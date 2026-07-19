@@ -16,6 +16,9 @@ export const Typography = {
   pageTitle: { fontSize: 32, fontWeight: '700' as const },
   sectionTitle: { fontSize: 24, fontWeight: '700' as const },
   cardTitle: { fontSize: 20, fontWeight: '600' as const },
+  // Collapsible-section headers (Team + Stores accordions) — deliberately
+  // larger/bolder than card body text so groups read as headers.
+  accordionHeader: { fontSize: 18, fontWeight: '700' as const },
   body: { fontSize: 16, fontWeight: '400' as const },
   caption: { fontSize: 12, fontWeight: '400' as const, textTransform: 'uppercase' as const, letterSpacing: 1 },
   label: { fontSize: 12, fontWeight: '400' as const, textTransform: 'uppercase' as const, letterSpacing: 1.5 },

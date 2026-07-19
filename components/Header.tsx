@@ -1,5 +1,6 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors, Typography } from '../constants/colors';
 
 interface HeaderProps {
@@ -9,8 +10,9 @@ interface HeaderProps {
 }
 
 export default function Header({ title, onBack, rightElement }: HeaderProps) {
+  const insets = useSafeAreaInsets();
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: insets.top + 12 }]}>
       <View style={styles.leftSection}>
         {onBack && (
           <TouchableOpacity onPress={onBack} style={styles.backButton}>
@@ -30,7 +32,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 24,
-    paddingTop: 12,
     paddingBottom: 16,
     backgroundColor: Colors.background,
   },

@@ -1,0 +1,51 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: Inter, "Segoe UI", system-ui, -apple-system, sans-serif; color: #0f172a;
+       -webkit-print-color-adjust: exact; print-color-adjust: exact; background: #fff; }
+@page { size: A4; margin: 0; }
+.page { width: 210mm; height: 296mm; padding: 11mm 12mm; page-break-after: always; overflow: hidden;
+        display: flex; flex-direction: column; gap: 10px; }
+.page:last-of-type { page-break-after: auto; }
+.hd { display: flex; justify-content: space-between; align-items: flex-start; }
+.kicker { font-size: 10px; letter-spacing: 1.5px; color: #64748b; font-weight: 600; }
+h1 { font-size: 24px; font-weight: 700; margin-top: 2px; }
+.partial { font-size: 12px; font-weight: 500; color: #64748b; }
+.who { font-size: 12px; color: #475569; margin-top: 2px; }
+.meta { font-size: 10.5px; color: #64748b; text-align: right; line-height: 1.5; }
+.tiles { display: flex; gap: 10px; }
+.tile { flex: 1; background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px 14px;
+        box-shadow: 0 1px 2px rgba(15,23,42,.05); }
+.t-label { font-size: 10px; letter-spacing: .8px; text-transform: uppercase; color: #64748b; font-weight: 600; }
+.t-value { font-size: 24px; font-weight: 650; margin-top: 4px; }
+.t-sub { font-size: 10.5px; color: #64748b; margin-top: 2px; }
+.card { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px 14px;
+        box-shadow: 0 1px 2px rgba(15,23,42,.05); }
+.c-title { font-size: 12.5px; font-weight: 600; margin-bottom: 8px; }
+.c-sub { font-size: 10.5px; font-weight: 400; color: #64748b; }
+.row { display: flex; gap: 10px; }
+.row .grow { flex: 1.35; }
+.row .card:last-child { flex: 1; }
+.donut-row { display: flex; align-items: center; gap: 14px; }
+.legend { display: flex; flex-direction: column; gap: 8px; }
+.lg { display: flex; align-items: center; gap: 7px; font-size: 11px; }
+.sw { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.lg-name { font-weight: 600; color: #0f172a; }
+.lg-val { color: #64748b; }
+table { width: 100%; border-collapse: collapse; }
+th { font-size: 9.5px; text-transform: uppercase; letter-spacing: .7px; color: #64748b; text-align: left;
+     padding: 4px 8px 6px 0; border-bottom: 1px solid #e2e8f0; }
+td { font-size: 11px; padding: 6px 8px 6px 0; border-bottom: 1px solid #eef2f5; color: #475569; }
+td:first-child, td:nth-child(2) { color: #0f172a; }
+.num { text-align: right; padding-right: 16px; }
+th.num { text-align: right; }
+.note { max-width: 150px; }
+.rep-note { font-size: 11px; color: #475569; padding: 3px 0; }
+.empty { font-size: 11px; color: #94a3b8; padding: 10px 0; }
+.ft { margin-top: auto; font-size: 9.5px; color: #94a3b8; text-align: center; }
+svg text { font-family: inherit; }
+
+  body { padding: 14px 18px; width: 720px; }
+  </style></head><body>
+  <div class="c-title" style="font-size:15px">Cases sold per day</div>
+  <div class="c-sub" style="margin-bottom:10px">1 June – 13 July 2026</div>
+  <svg viewBox="0 0 680 210" width="680" height="210" xmlns="http://www.w3.org/2000/svg"><text x="24" y="195" text-anchor="end" font-size="9" fill="#94a3b8">0</text><line x1="30" y1="103" x2="674" y2="103" stroke="#eef2f5" stroke-width="1"/><text x="24" y="106" text-anchor="end" font-size="9" fill="#94a3b8">1</text><line x1="30" y1="14" x2="674" y2="14" stroke="#eef2f5" stroke-width="1"/><text x="24" y="17" text-anchor="end" font-size="9" fill="#94a3b8">2</text><line x1="30" y1="192" x2="674" y2="192" stroke="#cbd5e1" stroke-width="1"/><text x="37.48837209302326" y="204" text-anchor="middle" font-size="9" fill="#94a3b8">1 Jun</text><text x="247.1627906976744" y="204" text-anchor="middle" font-size="9" fill="#94a3b8">15 Jun</text><text x="486.79069767441865" y="204" text-anchor="middle" font-size="9" fill="#94a3b8">1 Jul</text><text x="666.5116279069767" y="204" text-anchor="middle" font-size="9" fill="#94a3b8">13 Jul</text><path d="M376.8613953488372,192 v-174 a4,4 0 0 1 4,-4 h2.1841860465116287 a4,4 0 0 1 4,4 v174 z" fill="#2a78d6"/><text x="381.95348837209303" y="10" text-anchor="middle" font-size="9.5" fill="#475569">2</text></svg></body></html>

@@ -1,0 +1,92 @@
+{
+  "note": "Snapshot of live Supabase data pulled 2026-07-13 via MCP for the report-format prototype. Rep resolved by name search: exactly one matching users row.",
+  "rep": {
+    "id": "b0046906-a9f4-45b2-a09d-a38e798990ef",
+    "name": "Varadddd Kulkarni",
+    "phone": "+919607459739",
+    "role": "rep"
+  },
+  "range": { "from": "2026-06-01", "to": "2026-07-13" },
+  "attendance": [
+    {
+      "check_in_time": "2026-06-24T12:47:09.869Z",
+      "check_out_time": "2026-06-24T12:57:58.208Z",
+      "total_distance_km": 0.02,
+      "total_market_time_minutes": 11,
+      "address": "35A, Government Employee Staff Quarters, Pradhikaran, Akurdi, Pimpri-Chinchwad, Maharashtra 411044, India"
+    },
+    {
+      "check_in_time": "2026-07-01T06:10:27.750Z",
+      "check_out_time": null,
+      "total_distance_km": null,
+      "total_market_time_minutes": null,
+      "address": "MQ62+M9H, Ravet, Pimpri-Chinchwad, Maharashtra 412101, India"
+    },
+    {
+      "check_in_time": "2026-07-02T07:17:28.232Z",
+      "check_out_time": "2026-07-02T09:30:04.151Z",
+      "total_distance_km": 5.06,
+      "total_market_time_minutes": 133,
+      "address": "MQ62+M9H, Ravet, Pimpri-Chinchwad, Maharashtra 412101, India"
+    }
+  ],
+  "visits": [
+    {
+      "store_name": "Deccan brews cafe",
+      "check_in_time": "2026-06-24T12:48:13.743Z",
+      "check_out_time": "2026-06-24T12:49:01.914Z",
+      "duration_minutes": 1,
+      "cases_sold": 0,
+      "notes": null,
+      "distance_from_store_meters": null
+    },
+    {
+      "store_name": "Deccan brews cafe",
+      "check_in_time": "2026-06-24T12:50:55.235Z",
+      "check_out_time": "2026-06-24T12:52:58.755Z",
+      "duration_minutes": 2,
+      "cases_sold": 2,
+      "notes": "My manager is shit",
+      "distance_from_store_meters": null
+    },
+    {
+      "store_name": "Deccan brews cafe",
+      "check_in_time": "2026-07-02T09:27:00.547Z",
+      "check_out_time": "2026-07-02T09:27:50.745Z",
+      "duration_minutes": 1,
+      "cases_sold": 0,
+      "notes": null,
+      "distance_from_store_meters": null
+    },
+    {
+      "store_name": "Suraj wines",
+      "check_in_time": "2026-07-02T09:29:17.211Z",
+      "check_out_time": "2026-07-02T09:29:33.860Z",
+      "duration_minutes": 0,
+      "cases_sold": 0,
+      "notes": null,
+      "distance_from_store_meters": 151
+    }
+  ],
+  "dailyReports": [
+    { "report_date": "2026-07-02", "notes": "No", "challenges": "None pfscd" }
+  ],
+  "monthly": [
+    {
+      "month_label": "2026-06",
+      "days_present": 1,
+      "total_market_time_minutes": 11,
+      "total_distance_km": 0.02,
+      "stores_visited": 2,
+      "total_cases_sold": 2
+    },
+    {
+      "month_label": "2026-07",
+      "days_present": 2,
+      "total_market_time_minutes": 133,
+      "total_distance_km": 5.06,
+      "stores_visited": 2,
+      "total_cases_sold": 0
+    }
+  ]
+}

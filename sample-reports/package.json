@@ -1,0 +1,8 @@
+{
+  "name": "tankassist-sample-reports",
+  "private": true,
+  "description": "Dev-only report format prototypes (PDF/XLSX). Not part of the app bundle — nothing here is imported by the Expo app.",
+  "dependencies": {
+    "exceljs": "^4.4.0"
+  }
+}
