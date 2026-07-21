@@ -1,54 +1,27 @@
-import React, { useState, useCallback, useMemo } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  SectionList,
-  TouchableOpacity,
-  TextInput,
-} from 'react-native';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import { View, Text, StyleSheet, SectionList, Pressable } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors, Typography } from '../../constants/colors';
-import Card from '../../components/Card';
+import { Colors, Type, Space, Radius, Layout } from '../../constants/colors';
+import BentoTile from '../../components/BentoTile';
+import EmptyState from '../../components/EmptyState';
+import ErrorState from '../../components/ErrorState';
+import SearchField from '../../components/SearchField';
+import { ListSkeleton } from '../../components/skeleton/ListSkeleton';
 import { useAuthStore } from '../../store/useAuthStore';
-import { supabase } from '../../lib/supabase';
-
-interface Store {
-  id: string;
-  name: string;
-  address: string | null;
-  latitude: number | null;
-  longitude: number | null;
-  contact_person: string | null;
-  contact_number: string | null;
-  license_number: string | null;
-  owner_name: string | null;
-  state: string | null;
-}
-
-interface StoreAssignment {
-  id: string;
-  store_id: string;
-  stores: Store;
-}
+import { useRepStores, Store } from '../../hooks/useStores';
 
 type ViewMode = 'assigned' | 'all';
 type StoreStatus = 'visited' | 'in-progress' | 'pending';
 
 const NO_STATE = 'No State';
 
-/**
- * Empty query → group by state as a collapsible accordion ("No State" last;
- * collapsed sections keep their header, render no rows). Query → one flat
- * section, accordion state ignored.
- */
+// Empty query → group by state (accordion, "No State" last). Query → one flat section.
 function buildSections(stores: Store[], query: string, expanded: Set<string>) {
   const q = query.trim().toLowerCase();
   if (q) {
-    return [
-      { title: '', count: 0, data: stores.filter((s) => s.name.toLowerCase().includes(q)) },
-    ];
+    return [{ title: '', count: 0, data: stores.filter((s) => s.name.toLowerCase().includes(q)) }];
   }
   const map: Record<string, Store[]> = {};
   for (const s of stores) {
@@ -57,34 +30,35 @@ function buildSections(stores: Store[], query: string, expanded: Set<string>) {
     map[key].push(s);
   }
   return Object.keys(map)
-    .sort((a, b) => {
-      if (a === NO_STATE) return 1;
-      if (b === NO_STATE) return -1;
-      return a.localeCompare(b);
-    })
-    .map((k) => ({
-      title: k,
-      count: map[k].length,
-      data: expanded.has(k) ? map[k] : [],
-    }));
+    .sort((a, b) => (a === NO_STATE ? 1 : b === NO_STATE ? -1 : a.localeCompare(b)))
+    .map((k) => ({ title: k, count: map[k].length, data: expanded.has(k) ? map[k] : [] }));
 }
 
-export default function RepStoresScreen({
-  navigation,
-}: {
-  navigation: any;
-}) {
+export default function RepStoresScreen({ navigation }: { navigation: any }) {
   const { profile } = useAuthStore();
+  const insets = useSafeAreaInsets();
+  const { data, refetch, isPending, isError } = useRepStores(profile?.id);
+  const assignments = data?.assignments ?? [];
+  const allStores = data?.allStores ?? [];
+  const visited = data?.visited ?? new Set<string>();
+  const inProgress = data?.inProgress ?? new Set<string>();
+
   const [viewMode, setViewMode] = useState<ViewMode>('assigned');
-  const [assignments, setAssignments] = useState<StoreAssignment[]>([]);
-  const [allStores, setAllStores] = useState<Store[]>([]);
-  const [visitedStoreIds, setVisitedStoreIds] = useState<Set<string>>(new Set());
-  const [inProgressStoreIds, setInProgressStoreIds] = useState<Set<string>>(
-    new Set()
-  );
-  const [searchQuery, setSearchQuery] = useState('');
-  // Accordion: all states start collapsed.
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  // Debounce the in-memory filter so large lists don't re-section per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchInput), 200);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  useFocusEffect(
+    useCallback(() => {
+      refetch();
+    }, [refetch])
+  );
 
   const toggleSection = (title: string) =>
     setExpanded((prev) => {
@@ -94,303 +68,159 @@ export default function RepStoresScreen({
       return next;
     });
 
-  const today = new Date().toISOString().split('T')[0];
-
-  const loadData = useCallback(async () => {
-    if (!profile) return;
-
-    const { data: assigns } = await supabase
-      .from('store_assignments')
-      .select('id, store_id, stores(*)')
-      .eq('user_id', profile.id)
-      .eq('assigned_date', today);
-    setAssignments((assigns as any) || []);
-
-    const { data: storesData } = await supabase
-      .from('stores')
-      .select('*')
-      .order('name');
-    setAllStores(storesData || []);
-
-    const { data: visits } = await supabase
-      .from('store_visits')
-      .select('store_id, check_out_time')
-      .eq('user_id', profile.id)
-      .gte('check_in_time', `${today}T00:00:00`)
-      .lt('check_in_time', `${today}T23:59:59`);
-
-    const visited = new Set<string>();
-    const inProgress = new Set<string>();
-    (visits || []).forEach((v) => {
-      if (v.check_out_time) {
-        visited.add(v.store_id);
-      } else {
-        inProgress.add(v.store_id);
-      }
-    });
-    setVisitedStoreIds(visited);
-    setInProgressStoreIds(inProgress);
-  }, [profile, today]);
-
-  useFocusEffect(
-    useCallback(() => {
-      loadData();
-    }, [loadData])
-  );
-
-  const getStatus = (storeId: string): StoreStatus => {
-    if (visitedStoreIds.has(storeId)) return 'visited';
-    if (inProgressStoreIds.has(storeId)) return 'in-progress';
-    return 'pending';
-  };
+  const getStatus = (storeId: string): StoreStatus =>
+    visited.has(storeId) ? 'visited' : inProgress.has(storeId) ? 'in-progress' : 'pending';
 
   const assignedStoreIds = new Set(assignments.map((a) => a.store_id));
-
-  // Dataset for the current mode, then grouped/filtered into sections.
-  const dataset: Store[] =
-    viewMode === 'assigned' ? assignments.map((a) => a.stores) : allStores;
+  const dataset: Store[] = viewMode === 'assigned' ? assignments.map((a) => a.stores) : allStores;
   const sections = useMemo(
-    () => buildSections(dataset, searchQuery, expanded),
-    [dataset, searchQuery, expanded]
+    () => buildSections(dataset, search, expanded),
+    [dataset, search, expanded]
   );
 
   return (
     <View style={styles.container}>
-      <View style={styles.headerPad}>
-        <Text style={styles.title}>My Stores</Text>
-        <Text style={styles.subtitle}>
-          {assignments.length} assigned • {visitedStoreIds.size} visited
+      <View style={[styles.headerPad, { paddingTop: insets.top + Space.md }]}>
+        <Text style={[Type.title, { color: Colors.text }]}>Your stores</Text>
+        <Text style={[Type.body, { color: Colors.textSecondary, marginTop: 2 }]}>
+          {assignments.length} assigned · {visited.size} visited
         </Text>
 
-        {/* Toggle: Assigned / All Stores */}
         <View style={styles.toggleRow}>
-          <TouchableOpacity
-            onPress={() => setViewMode('assigned')}
-            style={[
-              styles.toggleBtn,
-              viewMode === 'assigned' && styles.toggleBtnActive,
-            ]}
-          >
-            <Text
-              style={[
-                styles.toggleText,
-                viewMode === 'assigned' && styles.toggleTextActive,
-              ]}
+          {(['assigned', 'all'] as ViewMode[]).map((m) => (
+            <Pressable
+              key={m}
+              onPress={() => setViewMode(m)}
+              style={[styles.toggleBtn, viewMode === m && styles.toggleBtnActive]}
             >
-              Assigned Today
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            onPress={() => setViewMode('all')}
-            style={[
-              styles.toggleBtn,
-              viewMode === 'all' && styles.toggleBtnActive,
-            ]}
-          >
-            <Text
-              style={[
-                styles.toggleText,
-                viewMode === 'all' && styles.toggleTextActive,
-              ]}
-            >
-              All Stores
-            </Text>
-          </TouchableOpacity>
+              <Text style={[styles.toggleText, viewMode === m && styles.toggleTextActive]}>
+                {m === 'assigned' ? 'Assigned today' : 'All stores'}
+              </Text>
+            </Pressable>
+          ))}
         </View>
 
-        <TextInput
-          style={styles.searchInput}
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-          placeholder="Search by name..."
-          placeholderTextColor={Colors.muted}
-        />
+        <View style={{ marginTop: Space.md }}>
+          <SearchField value={searchInput} onChange={setSearchInput} placeholder="Search by name" />
+        </View>
       </View>
 
-      <SectionList
-        sections={sections}
-        keyExtractor={(item) => item.id}
-        contentContainerStyle={styles.list}
-        stickySectionHeadersEnabled={false}
-        renderSectionHeader={({ section }) =>
-          section.title ? (
-            <TouchableOpacity
-              style={styles.sectionHeaderRow}
-              onPress={() => toggleSection(section.title)}
-            >
-              <Text style={styles.sectionHeader}>
-                {section.title} ({section.count})
-              </Text>
-              <Ionicons
-                name={
-                  expanded.has(section.title)
-                    ? 'chevron-down'
-                    : 'chevron-forward'
-                }
-                size={16}
-                color={Colors.muted}
-              />
-            </TouchableOpacity>
-          ) : null
-        }
-        renderItem={({ item }) => {
-          const status = getStatus(item.id);
-          const isAssigned = assignedStoreIds.has(item.id);
-          return (
-            <TouchableOpacity
-              onPress={() =>
-                navigation.navigate('StoreDetail', { store: item })
+      {isPending && !data ? (
+        <ListSkeleton />
+      ) : isError && !data ? (
+        <ErrorState onRetry={refetch} />
+      ) : (
+        <SectionList
+          sections={sections}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={[
+            styles.list,
+            { paddingBottom: Layout.tabBar + insets.bottom + Space.md },
+          ]}
+          stickySectionHeadersEnabled={false}
+          renderSectionHeader={({ section }) =>
+            section.title ? (
+              <Pressable style={styles.sectionHeaderRow} onPress={() => toggleSection(section.title)}>
+                <Text style={[Type.section, { color: Colors.text }]}>
+                  {section.title} ({section.count})
+                </Text>
+                <Ionicons
+                  name={expanded.has(section.title) ? 'chevron-down' : 'chevron-forward'}
+                  size={16}
+                  color={Colors.textMuted}
+                />
+              </Pressable>
+            ) : null
+          }
+          renderItem={({ item }) => {
+            const status = getStatus(item.id);
+            const isAssigned = assignedStoreIds.has(item.id);
+            const dotColor =
+              status === 'visited'
+                ? Colors.success
+                : status === 'in-progress'
+                ? Colors.accent
+                : Colors.borderStrong;
+            return (
+              <Pressable
+                onPress={() => navigation.navigate('StoreDetail', { store: item })}
+                style={styles.rowWrap}
+              >
+                <BentoTile>
+                  <View style={styles.storeRow}>
+                    <View style={[styles.dot, { backgroundColor: dotColor }]} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={[Type.bodyMed, { color: Colors.text }]} numberOfLines={1}>
+                        {item.name}
+                      </Text>
+                      <Text style={[Type.caption, { color: Colors.textMuted }]} numberOfLines={1}>
+                        {item.address || 'No address'}
+                      </Text>
+                    </View>
+                    <View style={styles.rightCol}>
+                      {viewMode === 'all' && isAssigned && (
+                        <Text style={styles.assignedBadge}>Assigned</Text>
+                      )}
+                      <Text style={[Type.caption, { color: Colors.textMuted }]}>
+                        {status === 'visited' ? 'Visited' : status === 'in-progress' ? 'In progress' : 'Pending'}
+                      </Text>
+                    </View>
+                  </View>
+                </BentoTile>
+              </Pressable>
+            );
+          }}
+          ListEmptyComponent={
+            <EmptyState
+              icon="storefront-outline"
+              title={
+                viewMode === 'assigned'
+                  ? 'No stores assigned today'
+                  : search.trim()
+                  ? 'No matches'
+                  : 'No stores yet'
               }
-            >
-              <Card>
-                <View style={styles.storeRow}>
-                  <View
-                    style={[
-                      styles.statusDot,
-                      {
-                        backgroundColor:
-                          status === 'visited'
-                            ? Colors.success
-                            : status === 'in-progress'
-                            ? Colors.accent
-                            : Colors.muted,
-                      },
-                    ]}
-                  />
-                  <View style={styles.storeInfo}>
-                    <Text style={styles.storeName}>{item.name}</Text>
-                    <Text style={styles.storeAddress}>
-                      {item.address || 'No address'}
-                    </Text>
-                    <Text style={styles.tapHint}>Tap to know more Details →</Text>
-                  </View>
-                  <View style={styles.rightCol}>
-                    {viewMode === 'all' && isAssigned && (
-                      <Text style={styles.assignedBadge}>ASSIGNED</Text>
-                    )}
-                    <Text style={styles.statusLabel}>
-                      {status === 'visited'
-                        ? 'VISITED'
-                        : status === 'in-progress'
-                        ? 'IN PROGRESS'
-                        : 'PENDING'}
-                    </Text>
-                  </View>
-                </View>
-              </Card>
-            </TouchableOpacity>
-          );
-        }}
-        ListEmptyComponent={
-          <Card>
-            <Text style={styles.emptyText}>
-              {viewMode === 'assigned'
-                ? 'No stores assigned for today.'
-                : searchQuery.trim()
-                ? 'No stores match your search.'
-                : 'No stores found.'}
-            </Text>
-          </Card>
-        }
-      />
+              message={
+                viewMode === 'assigned'
+                  ? 'Stores assigned to you today show up here.'
+                  : undefined
+              }
+            />
+          }
+        />
+      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
-  headerPad: { paddingHorizontal: 24, paddingTop: 60, paddingBottom: 8 },
-  title: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.pageTitle,
-    color: Colors.text,
-  },
-  subtitle: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-    marginTop: 4,
-  },
+  headerPad: { paddingHorizontal: Layout.screenPad, paddingBottom: Space.sm },
   toggleRow: {
     flexDirection: 'row',
-    marginTop: 16,
-    backgroundColor: Colors.white,
+    marginTop: Space.md,
+    backgroundColor: Colors.surface,
     borderWidth: 1,
     borderColor: Colors.border,
-    borderRadius: 4,
+    borderRadius: Radius.md,
     overflow: 'hidden',
   },
-  toggleBtn: { flex: 1, paddingVertical: 10, alignItems: 'center' },
+  toggleBtn: { flex: 1, paddingVertical: Space.sm, alignItems: 'center', minHeight: Layout.tap, justifyContent: 'center' },
   toggleBtnActive: { backgroundColor: Colors.accent },
-  toggleText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-  },
+  toggleText: { ...Type.label, color: Colors.textMuted },
   toggleTextActive: { color: Colors.white },
-  searchInput: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 16,
-    color: Colors.text,
-    backgroundColor: Colors.white,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    borderRadius: 4,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    marginTop: 12,
-  },
-  list: { paddingHorizontal: 24, paddingBottom: 24 },
+  list: { paddingHorizontal: Layout.screenPad, paddingTop: Space.sm },
   sectionHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginTop: 16,
-    marginBottom: 8,
-    paddingVertical: 4,
+    marginTop: Space.md,
+    marginBottom: Space.sm,
+    minHeight: Layout.tap,
   },
-  sectionHeader: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.accordionHeader,
-    color: Colors.text,
-  },
-  storeRow: { flexDirection: 'row', alignItems: 'center' },
-  statusDot: { width: 10, height: 10, borderRadius: 5, marginRight: 12 },
-  storeInfo: { flex: 1 },
-  storeName: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.cardTitle,
-    color: Colors.text,
-  },
-  storeAddress: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 14,
-    color: Colors.muted,
-    marginTop: 2,
-  },
-  tapHint: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 12,
-    color: Colors.accent,
-    marginTop: 8,
-  },
-  rightCol: { alignItems: 'flex-end', marginLeft: 8 },
-  assignedBadge: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.5,
-    color: Colors.accent,
-    marginBottom: 2,
-  },
-  statusLabel: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-  },
-  emptyText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-  },
+  rowWrap: { marginBottom: Space.md },
+  storeRow: { flexDirection: 'row', alignItems: 'center', gap: Space.md },
+  dot: { width: 10, height: 10, borderRadius: 5 },
+  rightCol: { alignItems: 'flex-end', gap: 2 },
+  assignedBadge: { ...Type.caption, fontWeight: '700', color: Colors.accent },
 });

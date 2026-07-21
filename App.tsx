@@ -1,18 +1,22 @@
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, View, StyleSheet, Alert, AppState } from 'react-native';
+import { ActivityIndicator, View, StyleSheet, AppState } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors } from './constants/colors';
+import { queryClient } from './lib/queryClient';
 import { supabase } from './lib/supabase';
 import { useAuthStore } from './store/useAuthStore';
 
 // Auth screens
 import LoginScreen from './app/(auth)/login';
 import VerifyOtpScreen from './app/(auth)/verify-otp';
+import DeactivatedScreen from './app/(auth)/deactivated';
+import KickedOutScreen from './app/(auth)/kicked-out';
 
 // Rep screens
 import RepDashboard from './app/(rep)/dashboard';
@@ -112,20 +116,20 @@ function AdminOrdersStack() {
 const getTabScreenOptions = (bottomInset: number) => ({
   headerShown: false,
   tabBarStyle: {
-    backgroundColor: Colors.white,
+    backgroundColor: Colors.surface,
     borderTopColor: Colors.border,
     borderTopWidth: 1,
     height: 60 + bottomInset,
     paddingBottom: 8 + bottomInset,
     paddingTop: 8,
   },
+  // Active tab = olive (brand), never lime — lime is the spotlight accent only.
   tabBarActiveTintColor: Colors.accent,
-  tabBarInactiveTintColor: Colors.muted,
+  tabBarInactiveTintColor: Colors.textMuted,
   tabBarLabelStyle: {
     fontSize: 11,
     fontWeight: '600' as const,
-    letterSpacing: 0.5,
-    textTransform: 'uppercase' as const,
+    letterSpacing: 0.2,
   },
 });
 
@@ -148,7 +152,7 @@ function RepTabs() {
         name="MyStores"
         component={RepStoresStack}
         options={{
-          tabBarLabel: 'My Stores',
+          tabBarLabel: 'My stores',
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="storefront" size={size} color={color} />
           ),
@@ -273,16 +277,8 @@ function AuthStack() {
 }
 
 export default function App() {
-  const {
-    session,
-    profile,
-    initialized,
-    initialize,
-    kickedOut,
-    clearKickedOut,
-    deactivated,
-    clearDeactivated,
-  } = useAuthStore();
+  const { session, profile, initialized, initialize, kickedOut, deactivated } =
+    useAuthStore();
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
@@ -308,27 +304,9 @@ export default function App() {
     return () => sub.remove();
   }, []);
 
-  // Surface a server-side sign-out ("logged in on another device").
-  useEffect(() => {
-    if (kickedOut) {
-      Alert.alert(
-        'Signed out',
-        'You have been logged in on another device. For security, only one device can be signed in to an account at a time.',
-        [{ text: 'OK', onPress: clearKickedOut }]
-      );
-    }
-  }, [kickedOut]);
-
-  // Surface an account deactivation (is_active = false found on profile fetch).
-  useEffect(() => {
-    if (deactivated) {
-      Alert.alert(
-        'Account deactivated',
-        'Your account has been deactivated. Contact your management team.',
-        [{ text: 'OK', onPress: clearDeactivated }]
-      );
-    }
-  }, [deactivated]);
+  // Both a server-side sign-out ("logged in on another device", `kickedOut`) and
+  // an account deactivation (`deactivated`) are surfaced as calm full-screens
+  // (see the branches below), not alarming alerts.
 
   if (!ready || !initialized) {
     return (
@@ -341,16 +319,29 @@ export default function App() {
 
   return (
     <SafeAreaProvider>
-      <NavigationContainer>
-        {!session || !profile ? (
-          <AuthStack />
-        ) : profile.role === 'rep' ? (
-          <RepTabs />
+      {/* Data cache (Phase B): inside SafeAreaProvider, wrapping the nav trees.
+          Placed here so it never affects the loading branch above or the
+          AppState / kickedOut / deactivated effects in this component. */}
+      <QueryClientProvider client={queryClient}>
+        {deactivated ? (
+          // Calm full-screen; session is already torn down by signOutDeactivated.
+          <DeactivatedScreen />
+        ) : kickedOut ? (
+          // Calm full-screen; session was revoked server-side (single-session).
+          <KickedOutScreen />
         ) : (
-          <AdminTabs />
+          <NavigationContainer>
+            {!session || !profile ? (
+              <AuthStack />
+            ) : profile.role === 'rep' ? (
+              <RepTabs />
+            ) : (
+              <AdminTabs />
+            )}
+          </NavigationContainer>
         )}
         <StatusBar style="dark" />
-      </NavigationContainer>
+      </QueryClientProvider>
     </SafeAreaProvider>
   );
 }

@@ -6,14 +6,28 @@ import {
   ScrollView,
   TextInput,
   Alert,
-  TouchableOpacity,
+  Pressable,
   ActivityIndicator,
   Image,
 } from 'react-native';
-import { Colors, Typography } from '../../constants/colors';
+import { MotiView } from 'moti';
+import { useReducedMotion } from 'react-native-reanimated';
+import { Ionicons } from '@expo/vector-icons';
+import {
+  Colors,
+  Type,
+  Space,
+  Radius,
+  Layout,
+  tabularNums,
+} from '../../constants/colors';
+import { Motion } from '../../constants/motion';
 import Button from '../../components/Button';
 import Header from '../../components/Header';
-import Card from '../../components/Card';
+import BentoTile from '../../components/BentoTile';
+import StatusPill from '../../components/StatusPill';
+import PipelineStrip from '../../components/PipelineStrip';
+import SuccessOverlay from '../../components/SuccessOverlay';
 import VoiceInput from '../../components/VoiceInput';
 import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
@@ -76,37 +90,26 @@ interface QtyEntry {
 type Step = 'prev' | 'stock' | 'shop' | 'stockphoto' | 'order' | 'notes';
 type CameraTarget = 'shop' | 'stock' | 'delivered';
 
+// Sentence case (DESIGN §9). Order drives the progress indicator.
+const STEP_ORDER: Step[] = ['prev', 'stock', 'shop', 'stockphoto', 'order', 'notes'];
 const STEP_TITLES: Record<Step, string> = {
-  prev: 'Previous Order',
-  stock: 'Update Stock',
-  shop: 'Shop Photos',
-  stockphoto: 'Stock Photo',
-  order: 'Place Order',
+  prev: 'Previous order',
+  stock: 'Update stock',
+  shop: 'Shop photos',
+  stockphoto: 'Stock photo',
+  order: 'Place order',
   notes: 'Feedback',
 };
 
 const CANCEL_REASONS = ['Store refused', 'Wrong order', 'Duplicate', 'Other'];
-const STATUS_LABEL: Record<string, string> = {
-  placed: 'Order Registered',
-  in_process: 'Acknowledged',
-  dispatched: 'Dispatched',
-  in_transit: 'In Transit',
-  delivered: 'Delivered',
-  cancelled: 'Cancelled',
-};
 
 const toInt = (s: string): number => {
   const n = parseInt(s, 10);
   return Number.isFinite(n) && n > 0 ? n : 0;
 };
 const fmtDate = (iso: string) =>
-  new Date(iso).toLocaleDateString('en-GB', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-  });
-const fmtPrice = (n: number) =>
-  `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+  new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+const fmtPrice = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 
 export default function StoreVisitScreen({
   route,
@@ -117,6 +120,7 @@ export default function StoreVisitScreen({
 }) {
   const { store } = route.params as { store: StoreParam };
   const { profile } = useAuthStore();
+  const reduce = useReducedMotion();
 
   // Visit / check-in lock
   const [visitId, setVisitId] = useState<string | null>(null);
@@ -159,6 +163,7 @@ export default function StoreVisitScreen({
 
   const [orderBusy, setOrderBusy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [showSuccess, setShowSuccess] = useState(false);
 
   // ─── Mount: lock check-in (unchanged), then load stepper data ───
   useEffect(() => {
@@ -166,7 +171,7 @@ export default function StoreVisitScreen({
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
         if (status !== 'granted') {
-          Alert.alert('Error', 'Location permission required.');
+          Alert.alert('Location needed', 'Location permission is required to check in.');
           navigation.goBack();
           return;
         }
@@ -217,16 +222,13 @@ export default function StoreVisitScreen({
           setCheckInTime(now);
           reverseGeocode(lat, lng).then(async (addr) => {
             setCheckInAddress(addr);
-            await supabase
-              .from('store_visits')
-              .update({ address: addr })
-              .eq('id', data.id);
+            await supabase.from('store_visits').update({ address: addr }).eq('id', data.id);
           });
         }
 
         await loadStepperData();
       } catch (err: any) {
-        Alert.alert('Error', err.message || 'Failed to check in.');
+        Alert.alert('Couldn’t check in', err.message || 'Try again.');
         navigation.goBack();
       }
       setInitializing(false);
@@ -361,7 +363,7 @@ export default function StoreVisitScreen({
     if (cameraTarget === 'shop') setShopPhotoUris((p) => [...p, photo.uri]);
     else if (cameraTarget === 'delivered') setDeliveredPhotoUris((p) => [...p, photo.uri]);
     else if (cameraTarget === 'stock') setStockPhotoUri(photo.uri);
-    // Auto-close after each shot; reopen ("Take Another Photo") for more.
+    // Auto-close after each shot; reopen ("Take another photo") for more.
     setCameraTarget(null);
   };
 
@@ -388,7 +390,7 @@ export default function StoreVisitScreen({
       setDeliveredPhotoUris([]);
       goNext();
     } catch (err: any) {
-      Alert.alert('Error', err.message || 'Failed to mark delivered.');
+      Alert.alert('Couldn’t mark delivered', err.message || 'Try again.');
     }
     setPrevBusy(false);
   };
@@ -415,7 +417,7 @@ export default function StoreVisitScreen({
             p_reason: reason,
           });
           if (error) {
-            Alert.alert('Error', error.message || 'Failed to cancel.');
+            Alert.alert('Couldn’t cancel', error.message || 'Try again.');
             setPrevBusy(false);
             return;
           }
@@ -493,7 +495,7 @@ export default function StoreVisitScreen({
               if (itErr) throw itErr;
               setOrderPlaced(true);
             } catch (err: any) {
-              Alert.alert('Error', err.message || 'Failed to place order.');
+              Alert.alert('Couldn’t place order', err.message || 'Try again.');
             }
             setOrderBusy(false);
           },
@@ -568,11 +570,13 @@ export default function StoreVisitScreen({
         .eq('id', visitId);
       if (error) throw error;
 
-      Alert.alert('Visit Complete', store.name, [
-        { text: 'OK', onPress: () => navigation.goBack() },
-      ]);
+      // Peak-end: success overlay + haptic, then return.
+      setSubmitting(false);
+      setShowSuccess(true);
+      setTimeout(() => navigation.goBack(), 1400);
+      return;
     } catch (err: any) {
-      Alert.alert('Error', err.message || 'Failed to check out.');
+      Alert.alert('Couldn’t check out', err.message || 'Try again.');
     }
     setSubmitting(false);
   };
@@ -582,7 +586,7 @@ export default function StoreVisitScreen({
     return (
       <View style={styles.centered}>
         <ActivityIndicator size="large" color={Colors.accent} />
-        <Text style={styles.initText}>Locking check-in...</Text>
+        <Text style={styles.initText}>Locking check-in…</Text>
       </View>
     );
   }
@@ -590,7 +594,7 @@ export default function StoreVisitScreen({
   if (cameraTarget) {
     return (
       <View style={styles.container}>
-        <Header title="Camera" onBack={() => setCameraTarget(null)} />
+        <Header title="Take photo" onBack={() => setCameraTarget(null)} />
         <CameraView ref={cameraRef} style={styles.fullCamera} facing="back" />
         <View style={styles.cameraActions}>
           <Button title="Capture" onPress={takePhoto} style={styles.captureBtn} />
@@ -605,110 +609,135 @@ export default function StoreVisitScreen({
     );
   }
 
+  const idx = STEP_ORDER.indexOf(current);
+
   return (
     <View style={styles.container}>
       <Header title={store.name} onBack={goBack} />
-      <View style={styles.stepBar}>
-        <Text style={styles.stepBarText}>{STEP_TITLES[current]}</Text>
-        <Text style={styles.stepBarTime}>
-          {checkInTime
-            ? new Date(checkInTime).toLocaleTimeString('en-US', {
-                hour: '2-digit',
-                minute: '2-digit',
-              })
-            : ''}
-        </Text>
+
+      {/* Progress indicator — chunking + goal-gradient; the one lime spotlight */}
+      <View style={styles.progress}>
+        <View style={styles.progressTrack}>
+          {STEP_ORDER.map((s, i) => (
+            <View
+              key={s}
+              style={[
+                styles.progressSeg,
+                {
+                  backgroundColor:
+                    i < idx ? Colors.accent : i === idx ? Colors.spotlight : Colors.border,
+                },
+              ]}
+            />
+          ))}
+        </View>
+        <View style={styles.progressMeta}>
+          <Text style={[Type.label, { color: Colors.text }]}>
+            Step {idx + 1} of {STEP_ORDER.length} · {STEP_TITLES[current]}
+          </Text>
+          <Text style={[Type.caption, tabularNums, { color: Colors.textMuted }]}>
+            {checkInTime
+              ? new Date(checkInTime).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+              : ''}
+          </Text>
+        </View>
       </View>
 
       <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
-        {current === 'prev' && prevOrder && (
-          <PrevOrderStep
-            order={prevOrder}
-            isPlacer={prevOrder.placed_by === profile?.id}
-            busy={prevBusy}
-            deliveredPhotoCount={deliveredPhotoUris.length}
-            onCapture={() => openCamera('delivered')}
-            onDeliver={handleMarkDelivered}
-            cancelReason={cancelReason}
-            setCancelReason={setCancelReason}
-            cancelFreeText={cancelFreeText}
-            setCancelFreeText={setCancelFreeText}
-            onCancel={handleCancelOrder}
-            onSkip={goNext}
-          />
-        )}
-
-        {current === 'stock' && (
-          <StockStep
-            products={products}
-            stock={stock}
-            setField={setStockField}
-            latest={stockLatest}
-            selfId={profile?.id}
-          />
-        )}
-
-        {current === 'shop' && (
-          <ShopPhotosStep
-            uris={shopPhotoUris}
-            onOpenCamera={() => openCamera('shop')}
-            onRemove={(i: number) => setShopPhotoUris((p) => p.filter((_, idx) => idx !== i))}
-          />
-        )}
-
-        {current === 'stockphoto' && (
-          <StockPhotoStep
-            uri={stockPhotoUri}
-            onOpenCamera={() => openCamera('stock')}
-            onRemove={() => setStockPhotoUri(null)}
-          />
-        )}
-
-        {current === 'order' && (
-          <OrderStep
-            products={products}
-            lines={orderLines}
-            setLines={setOrderLines}
-            orderNotes={orderNotes}
-            setOrderNotes={setOrderNotes}
-            placed={orderPlaced}
-            busy={orderBusy}
-            total={orderTotal()}
-            onPlace={handlePlaceOrder}
-          />
-        )}
-
-        {current === 'notes' && (
-          <Card>
-            <Text style={styles.label}>FEEDBACK / NOTES (OPTIONAL)</Text>
-            <VoiceInput
-              value={notes}
-              onChangeText={setNotes}
-              placeholder="Anything worth noting about this visit..."
-              inputStyle={styles.textInput}
+        <MotiView
+          key={current}
+          from={{ opacity: 0, translateX: reduce ? 0 : 20 }}
+          animate={{ opacity: 1, translateX: 0 }}
+          transition={{ type: 'timing', duration: reduce ? Motion.dur.fast : Motion.dur.base }}
+        >
+          {current === 'prev' && prevOrder && (
+            <PrevOrderStep
+              order={prevOrder}
+              isPlacer={prevOrder.placed_by === profile?.id}
+              busy={prevBusy}
+              deliveredPhotoCount={deliveredPhotoUris.length}
+              onCapture={() => openCamera('delivered')}
+              onDeliver={handleMarkDelivered}
+              cancelReason={cancelReason}
+              setCancelReason={setCancelReason}
+              cancelFreeText={cancelFreeText}
+              setCancelFreeText={setCancelFreeText}
+              onCancel={handleCancelOrder}
+              onSkip={goNext}
             />
-          </Card>
-        )}
+          )}
+
+          {current === 'stock' && (
+            <StockStep
+              products={products}
+              stock={stock}
+              setField={setStockField}
+              latest={stockLatest}
+              touched={stockTouched}
+              selfId={profile?.id}
+            />
+          )}
+
+          {current === 'shop' && (
+            <ShopPhotosStep
+              uris={shopPhotoUris}
+              onOpenCamera={() => openCamera('shop')}
+              onRemove={(i: number) => setShopPhotoUris((p) => p.filter((_, idx) => idx !== i))}
+            />
+          )}
+
+          {current === 'stockphoto' && (
+            <StockPhotoStep
+              uri={stockPhotoUri}
+              onOpenCamera={() => openCamera('stock')}
+              onRemove={() => setStockPhotoUri(null)}
+            />
+          )}
+
+          {current === 'order' && (
+            <OrderStep
+              products={products}
+              lines={orderLines}
+              setLines={setOrderLines}
+              orderNotes={orderNotes}
+              setOrderNotes={setOrderNotes}
+              placed={orderPlaced}
+              busy={orderBusy}
+              total={orderTotal()}
+              onPlace={handlePlaceOrder}
+            />
+          )}
+
+          {current === 'notes' && (
+            <BentoTile>
+              <Text style={styles.fieldLabel}>Feedback / notes (optional)</Text>
+              <VoiceInput
+                value={notes}
+                onChangeText={setNotes}
+                placeholder="Anything worth noting about this visit…"
+                inputStyle={styles.textInput}
+              />
+            </BentoTile>
+          )}
+        </MotiView>
       </ScrollView>
 
       {/* Footer nav — the prev step drives its own actions */}
       {current !== 'prev' && (
         <View style={styles.footer}>
           {current === 'stock' ? (
-            <Text style={styles.footerHint}>
-              Enter what you can verify, or leave blank to skip.
-            </Text>
+            <Text style={styles.footerHint}>Enter what you can verify, or leave blank to skip.</Text>
           ) : null}
           <Button
             title={
               current === 'notes'
-                ? 'Complete Check-Out'
+                ? 'Complete check-out'
                 : current === 'stockphoto'
                 ? 'Next'
                 : current === 'order'
                 ? orderPlaced
                   ? 'Next'
-                  : 'Skip — No Order'
+                  : 'Skip — no order'
                 : 'Next'
             }
             onPress={goNext}
@@ -717,6 +746,8 @@ export default function StoreVisitScreen({
           />
         </View>
       )}
+
+      {showSuccess && <SuccessOverlay label="Checked out" />}
     </View>
   );
 }
@@ -737,119 +768,104 @@ function PrevOrderStep({
   onSkip,
 }: any) {
   return (
-    <>
-      <Card>
-        <View style={styles.badgeRow}>
-          <Text style={styles.prevTitle}>Pending order</Text>
-          <Text style={styles.statusBadge}>
-            {STATUS_LABEL[order.status] || order.status}
-          </Text>
+    <View style={{ gap: Space.md }}>
+      <BentoTile>
+        <View style={styles.rowBetween}>
+          <Text style={[Type.section, { color: Colors.text }]}>Pending order</Text>
+          <StatusPill status={order.status} />
         </View>
-        <Text style={styles.prevDate}>Placed {fmtDate(order.created_at)}</Text>
+        <View style={{ marginTop: Space.sm }}>
+          {/* Progress header owns the screen's single lime — keep this olive. */}
+          <PipelineStrip status={order.status} spotlightCurrent={false} />
+        </View>
+        <Text style={[Type.caption, { color: Colors.textMuted, marginTop: Space.md }]}>
+          Placed {fmtDate(order.created_at)}
+        </Text>
         {order.items.map((it: PrevOrderItem, i: number) => (
-          <Text key={i} style={styles.prevItem}>
+          <Text key={i} style={[Type.body, { color: Colors.text, marginTop: 2 }]}>
             • {it.product_name}: {it.cases} cs / {it.bottles} btl
             {it.free_cases || it.free_bottles
               ? `  (+${it.free_cases} cs / ${it.free_bottles} btl free)`
               : ''}
           </Text>
         ))}
-      </Card>
+      </BentoTile>
 
-      <Card>
-        <Text style={styles.label}>MARK DELIVERED</Text>
-        <Text style={styles.helpText}>
-          Verify the stock arrived. Optionally add delivered-stock photos.
-        </Text>
+      <BentoTile>
+        <Text style={styles.fieldLabel}>Mark delivered</Text>
+        <Text style={styles.helpText}>Verify the stock arrived. Optionally add delivered-stock photos.</Text>
         <Button
           title={
             deliveredPhotoCount > 0
-              ? `Add Another Photo (${deliveredPhotoCount})`
-              : 'Add Delivered Photo (optional)'
+              ? `Add another photo (${deliveredPhotoCount})`
+              : 'Add delivered photo (optional)'
           }
           onPress={onCapture}
           variant="secondary"
-          style={{ marginBottom: 10 }}
+          style={{ marginBottom: Space.sm }}
         />
-        <Button title="Mark Delivered" onPress={onDeliver} loading={busy} />
-      </Card>
+        <Button title="Mark delivered" onPress={onDeliver} loading={busy} />
+      </BentoTile>
 
-      <Card>
-        <Text style={styles.label}>CANCEL ORDER</Text>
+      <BentoTile>
+        <Text style={styles.fieldLabel}>Cancel order</Text>
         {isPlacer ? (
           <>
             <View style={styles.chipWrap}>
               {CANCEL_REASONS.map((r) => (
-                <TouchableOpacity
+                <Pressable
                   key={r}
                   style={[styles.chip, cancelReason === r && styles.chipSelected]}
                   onPress={() => setCancelReason(r)}
                 >
-                  <Text
-                    style={[
-                      styles.chipText,
-                      cancelReason === r && styles.chipTextSelected,
-                    ]}
-                  >
-                    {r}
-                  </Text>
-                </TouchableOpacity>
+                  <Text style={[styles.chipText, cancelReason === r && styles.chipTextSelected]}>{r}</Text>
+                </Pressable>
               ))}
             </View>
             <TextInput
               style={styles.textInput}
               value={cancelFreeText}
               onChangeText={setCancelFreeText}
-              placeholder={
-                cancelReason === 'Other'
-                  ? 'Describe the reason'
-                  : 'Add detail (optional)'
-              }
-              placeholderTextColor={Colors.muted}
+              placeholder={cancelReason === 'Other' ? 'Describe the reason' : 'Add detail (optional)'}
+              placeholderTextColor={Colors.textMuted}
               multiline
             />
             <Button
-              title="Cancel Order"
+              title="Cancel order"
               onPress={onCancel}
               variant="danger"
               loading={busy}
-              style={{ marginTop: 10 }}
+              style={{ marginTop: Space.sm }}
             />
           </>
         ) : (
-          <Text style={styles.mutedNote}>
-            Store wants to cancel? Contact your manager.
-          </Text>
+          <Text style={styles.mutedNote}>Store wants to cancel? Contact your manager.</Text>
         )}
-      </Card>
+      </BentoTile>
 
-      <Button
-        title="Skip — No New Stock Visible"
-        onPress={onSkip}
-        variant="secondary"
-        style={{ marginTop: 4 }}
-      />
-    </>
+      <Button title="Skip — no new stock visible" onPress={onSkip} variant="secondary" />
+    </View>
   );
 }
 
 // ─── Step 2: stock ───
-function StockStep({ products, stock, setField, latest, selfId }: any) {
+function StockStep({ products, stock, setField, latest, touched, selfId }: any) {
   if (products.length === 0) {
     return (
-      <Card>
+      <BentoTile>
         <Text style={styles.mutedNote}>No active products in the catalog.</Text>
-      </Card>
+      </BentoTile>
     );
   }
   return (
-    <>
+    <View style={{ gap: Space.md }}>
       {products.map((p: ProductRow) => {
         const l = latest[p.id] as StockLatest | undefined;
         const e = stock[p.id] || { cases: '', bottles: '' };
+        const isTouched = touched.has(p.id);
         return (
-          <Card key={p.id}>
-            <Text style={styles.productName}>{p.name}</Text>
+          <BentoTile key={p.id} style={isTouched ? styles.touchedCard : undefined}>
+            <Text style={[Type.bodyMed, { color: Colors.text }]}>{p.name}</Text>
             {l ? (
               <Text style={styles.subHint}>
                 Last recorded {l.cases} cs / {l.bottles} btl · {fmtDate(l.recorded_at)}
@@ -859,70 +875,79 @@ function StockStep({ products, stock, setField, latest, selfId }: any) {
               <Text style={styles.subHint}>Never recorded</Text>
             )}
             <View style={styles.qtyRow}>
-              <QtyField
-                label="Cases"
-                value={e.cases}
-                onChange={(v) => setField(p.id, 'cases', v)}
-              />
-              <QtyField
-                label="Bottles"
-                value={e.bottles}
-                onChange={(v) => setField(p.id, 'bottles', v)}
-              />
+              <QtyField label="Cases" value={e.cases} onChange={(v) => setField(p.id, 'cases', v)} />
+              <QtyField label="Bottles" value={e.bottles} onChange={(v) => setField(p.id, 'bottles', v)} />
             </View>
-          </Card>
+          </BentoTile>
         );
       })}
-    </>
+    </View>
   );
 }
 
 // ─── Step 3: shop photos ───
 function ShopPhotosStep({ uris, onOpenCamera, onRemove }: any) {
   return (
-    <Card>
-      <Text style={styles.label}>SHOP PHOTOS</Text>
+    <BentoTile>
+      <Text style={styles.fieldLabel}>Shop photos</Text>
       <Text style={styles.helpText}>Live photos only — gallery disabled.</Text>
       {uris.length > 0 && (
         <View style={styles.thumbRow}>
           {uris.map((uri: string, i: number) => (
             <View key={`${uri}-${i}`} style={styles.thumbWrapper}>
               <Image source={{ uri }} style={styles.thumb} />
-              <TouchableOpacity style={styles.thumbRemove} onPress={() => onRemove(i)}>
-                <Text style={styles.thumbRemoveText}>×</Text>
-              </TouchableOpacity>
+              <Pressable
+                style={styles.thumbRemove}
+                onPress={() => onRemove(i)}
+                accessibilityRole="button"
+                accessibilityLabel="Remove photo"
+              >
+                <Ionicons name="close" size={14} color={Colors.white} />
+              </Pressable>
             </View>
           ))}
         </View>
       )}
-      <Button
-        title={uris.length > 0 ? 'Take Another Photo' : 'Open Camera'}
+      <CaptureCard
+        label={uris.length > 0 ? 'Take another photo' : 'Open camera'}
         onPress={onOpenCamera}
-        variant="secondary"
       />
-    </Card>
+    </BentoTile>
   );
 }
 
 // ─── Step 4: stock photo ───
 function StockPhotoStep({ uri, onOpenCamera, onRemove }: any) {
   return (
-    <Card>
-      <Text style={styles.label}>STOCK PHOTO (REQUIRED)</Text>
-      <Text style={styles.helpText}>
-        You entered stock levels — capture a shelf photo as evidence.
-      </Text>
+    <BentoTile>
+      <Text style={styles.fieldLabel}>Stock photo (required)</Text>
+      <Text style={styles.helpText}>You entered stock levels — capture a shelf photo as evidence.</Text>
       {uri ? (
         <View style={styles.thumbWrapper}>
           <Image source={{ uri }} style={styles.stockThumb} />
-          <TouchableOpacity style={styles.thumbRemove} onPress={onRemove}>
-            <Text style={styles.thumbRemoveText}>×</Text>
-          </TouchableOpacity>
+          <Pressable
+            style={styles.thumbRemove}
+            onPress={onRemove}
+            accessibilityRole="button"
+            accessibilityLabel="Remove photo"
+          >
+            <Ionicons name="close" size={14} color={Colors.white} />
+          </Pressable>
         </View>
       ) : (
-        <Button title="Open Camera" onPress={onOpenCamera} variant="secondary" />
+        <CaptureCard label="Open camera" onPress={onOpenCamera} />
       )}
-    </Card>
+    </BentoTile>
+  );
+}
+
+// Framed capture affordance shared by the photo steps.
+function CaptureCard({ label, onPress }: { label: string; onPress: () => void }) {
+  return (
+    <Pressable style={styles.captureCard} onPress={onPress} accessibilityRole="button" accessibilityLabel={label}>
+      <Ionicons name="camera-outline" size={26} color={Colors.accent} />
+      <Text style={[Type.label, { color: Colors.accent }]}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -940,19 +965,22 @@ function OrderStep({
 }: any) {
   if (placed) {
     return (
-      <Card>
-        <Text style={styles.orderPlacedTitle}>✓ Order placed</Text>
-        <Text style={styles.helpText}>
+      <BentoTile>
+        <View style={styles.rowGap}>
+          <Ionicons name="checkmark-circle" size={22} color={Colors.success} />
+          <Text style={[Type.section, { color: Colors.success }]}>Order placed</Text>
+        </View>
+        <Text style={[styles.helpText, { marginTop: Space.xs }]}>
           The order is registered for this store. Tap Next to continue.
         </Text>
-      </Card>
+      </BentoTile>
     );
   }
   if (products.length === 0) {
     return (
-      <Card>
+      <BentoTile>
         <Text style={styles.mutedNote}>No active products to order.</Text>
-      </Card>
+      </BentoTile>
     );
   }
   const setField = (pid: string, field: keyof QtyEntry, v: string) =>
@@ -968,15 +996,13 @@ function OrderStep({
       },
     }));
   return (
-    <>
-      <Text style={styles.helpText}>
-        Optional — add products the store wants to order.
-      </Text>
+    <View style={{ gap: Space.md }}>
+      <Text style={styles.helpText}>Optional — add products the store wants to order.</Text>
       {products.map((p: ProductRow) => {
         const l = lines[p.id] || {};
         return (
-          <Card key={p.id}>
-            <Text style={styles.productName}>{p.name}</Text>
+          <BentoTile key={p.id}>
+            <Text style={[Type.bodyMed, { color: Colors.text }]}>{p.name}</Text>
             {p.price_per_case != null || p.price_per_bottle != null ? (
               <Text style={styles.subHint}>
                 {p.price_per_case != null ? `${fmtPrice(p.price_per_case)}/case` : ''}
@@ -992,27 +1018,25 @@ function OrderStep({
               <QtyField label="Free cases" value={l.free_cases || ''} onChange={(v) => setField(p.id, 'free_cases', v)} />
               <QtyField label="Free btl" value={l.free_bottles || ''} onChange={(v) => setField(p.id, 'free_bottles', v)} />
             </View>
-          </Card>
+          </BentoTile>
         );
       })}
-      <Card>
-        <Text style={styles.label}>ORDER NOTES (OPTIONAL)</Text>
+      <BentoTile>
+        <Text style={styles.fieldLabel}>Order notes (optional)</Text>
         <VoiceInput
           value={orderNotes}
           onChangeText={setOrderNotes}
           placeholder="Delivery instructions, scheme, etc."
           inputStyle={styles.textInput}
         />
-      </Card>
-      {total > 0 ? (
-        <Text style={styles.orderTotal}>Order value: {fmtPrice(total)}</Text>
-      ) : null}
-      <Button title="Place Order" onPress={onPlace} loading={busy} />
-    </>
+      </BentoTile>
+      {total > 0 ? <Text style={styles.orderTotal}>Order value: {fmtPrice(total)}</Text> : null}
+      <Button title="Place order" onPress={onPlace} loading={busy} />
+    </View>
   );
 }
 
-// ─── Small numeric field ───
+// ─── Numeric stepper field ───
 function QtyField({
   label,
   value,
@@ -1022,221 +1046,133 @@ function QtyField({
   value: string;
   onChange: (v: string) => void;
 }) {
+  const num = toInt(value);
   return (
     <View style={styles.qtyField}>
       <Text style={styles.qtyLabel}>{label}</Text>
-      <TextInput
-        style={styles.qtyInput}
-        value={value}
-        onChangeText={onChange}
-        placeholder="0"
-        placeholderTextColor={Colors.muted}
-        keyboardType="number-pad"
-      />
+      <View style={styles.stepper}>
+        <Pressable
+          onPress={() => onChange(String(Math.max(0, num - 1)))}
+          style={styles.stepBtn}
+          accessibilityRole="button"
+          accessibilityLabel={`Decrease ${label}`}
+        >
+          <Ionicons name="remove" size={18} color={Colors.accent} />
+        </Pressable>
+        <TextInput
+          style={styles.qtyInput}
+          value={value}
+          onChangeText={onChange}
+          placeholder="0"
+          placeholderTextColor={Colors.textMuted}
+          keyboardType="number-pad"
+          textAlign="center"
+        />
+        <Pressable
+          onPress={() => onChange(String(num + 1))}
+          style={styles.stepBtn}
+          accessibilityRole="button"
+          accessibilityLabel={`Increase ${label}`}
+        >
+          <Ionicons name="add" size={18} color={Colors.accent} />
+        </Pressable>
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
-  centered: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: Colors.background,
-  },
-  initText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-    marginTop: 12,
-  },
-  stepBar: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 24,
-    paddingVertical: 10,
-    backgroundColor: Colors.white,
+  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: Colors.background },
+  initText: { ...Type.body, color: Colors.textMuted, marginTop: Space.md },
+  // Progress
+  progress: {
+    paddingHorizontal: Layout.screenPad,
+    paddingVertical: Space.md,
+    backgroundColor: Colors.surface,
     borderBottomWidth: 1,
     borderBottomColor: Colors.border,
+    gap: Space.sm,
   },
-  stepBarText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.accordionHeader,
-    color: Colors.text,
-  },
-  stepBarTime: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-  },
+  progressTrack: { flexDirection: 'row', gap: 4 },
+  progressSeg: { flex: 1, height: 5, borderRadius: Radius.pill },
+  progressMeta: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   scroll: { flex: 1 },
-  content: { padding: 24, paddingBottom: 24 },
-  label: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginBottom: 8,
-  },
-  helpText: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 13,
-    color: Colors.muted,
-    marginBottom: 12,
-  },
-  mutedNote: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-  },
+  content: { padding: Layout.screenPad },
+  fieldLabel: { ...Type.label, color: Colors.textMuted, marginBottom: Space.sm },
+  helpText: { ...Type.caption, color: Colors.textMuted, marginBottom: Space.md },
+  mutedNote: { ...Type.body, color: Colors.textMuted },
   textInput: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 16,
+    ...Type.body,
     color: Colors.text,
-    backgroundColor: Colors.background,
+    backgroundColor: Colors.surfaceAlt,
     borderWidth: 1,
     borderColor: Colors.border,
-    borderRadius: 4,
-    padding: 12,
+    borderRadius: Radius.md,
+    padding: Space.md,
     minHeight: 80,
   },
   footer: {
-    padding: 24,
-    paddingTop: 12,
+    padding: Layout.screenPad,
+    paddingTop: Space.md,
     borderTopWidth: 1,
     borderTopColor: Colors.border,
     backgroundColor: Colors.background,
   },
-  footerHint: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 12,
-    color: Colors.muted,
-    marginBottom: 10,
-    textAlign: 'center',
-  },
-  // Prev order
-  badgeRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  prevTitle: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.cardTitle,
-    color: Colors.text,
-  },
-  statusBadge: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0.5,
-    color: Colors.white,
-    backgroundColor: Colors.accent,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 10,
-    overflow: 'hidden',
-  },
-  prevDate: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 13,
-    color: Colors.muted,
-    marginTop: 4,
-    marginBottom: 8,
-  },
-  prevItem: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 14,
-    color: Colors.text,
-    marginTop: 2,
-  },
+  footerHint: { ...Type.caption, color: Colors.textMuted, marginBottom: Space.sm, textAlign: 'center' },
+  rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  rowGap: { flexDirection: 'row', alignItems: 'center', gap: Space.sm },
   // chips
-  chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 10 },
+  chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: Space.sm, marginBottom: Space.sm },
   chip: {
-    backgroundColor: Colors.white,
+    backgroundColor: Colors.surface,
     borderWidth: 1.5,
     borderColor: Colors.border,
-    borderRadius: 20,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
+    borderRadius: Radius.pill,
+    paddingVertical: Space.sm,
+    paddingHorizontal: Space.md,
+    minHeight: Layout.tap,
+    justifyContent: 'center',
   },
   chipSelected: { borderColor: Colors.accent, backgroundColor: Colors.accent },
-  chipText: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 13,
-    color: Colors.text,
-    fontWeight: '600',
-  },
+  chipText: { ...Type.label, color: Colors.text },
   chipTextSelected: { color: Colors.white },
-  // products / qty
-  productName: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.cardTitle,
-    color: Colors.text,
-  },
-  subHint: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 12,
-    color: Colors.muted,
-    marginTop: 2,
-    marginBottom: 8,
-  },
-  qtyRow: { flexDirection: 'row', gap: 12, marginTop: 4 },
+  // stock/order
+  touchedCard: { borderColor: Colors.accent, backgroundColor: Colors.surfaceAlt },
+  subHint: { ...Type.caption, color: Colors.textMuted, marginTop: 2, marginBottom: Space.sm },
+  qtyRow: { flexDirection: 'row', gap: Space.md, marginTop: Space.xs },
   qtyField: { flex: 1 },
-  qtyLabel: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 11,
-    color: Colors.muted,
-    marginBottom: 4,
-    textTransform: 'uppercase',
-  },
-  qtyInput: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 18,
-    color: Colors.text,
-    backgroundColor: Colors.background,
+  qtyLabel: { ...Type.caption, color: Colors.textMuted, marginBottom: Space.xs },
+  stepper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Colors.surface,
     borderWidth: 1,
     borderColor: Colors.border,
-    borderRadius: 4,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    textAlign: 'center',
+    borderRadius: Radius.md,
+    overflow: 'hidden',
   },
-  orderTotal: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.cardTitle,
-    color: Colors.text,
-    textAlign: 'right',
-    marginBottom: 12,
-  },
-  orderPlacedTitle: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.cardTitle,
-    color: Colors.success,
-    marginBottom: 6,
-  },
+  stepBtn: { width: Layout.tap, height: Layout.tap, alignItems: 'center', justifyContent: 'center' },
+  qtyInput: { flex: 1, ...Type.section, color: Colors.text, paddingVertical: Space.sm },
+  orderTotal: { ...Type.bodyMed, color: Colors.text, textAlign: 'right' },
   // camera
   fullCamera: { flex: 1 },
-  cameraActions: {
-    flexDirection: 'row',
-    gap: 8,
-    padding: 16,
-    backgroundColor: Colors.background,
-  },
+  cameraActions: { flexDirection: 'row', gap: Space.sm, padding: Space.lg, backgroundColor: Colors.background },
   captureBtn: { flex: 1 },
-  cameraHint: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 12,
-    color: Colors.muted,
-    textAlign: 'center',
-    paddingBottom: 12,
+  captureCard: {
+    borderWidth: 1.5,
+    borderColor: Colors.borderStrong,
+    borderStyle: 'dashed',
+    borderRadius: Radius.md,
+    paddingVertical: Space.xl,
+    alignItems: 'center',
+    gap: Space.xs,
   },
   // thumbs
-  thumbRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 12 },
+  thumbRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Space.sm, marginBottom: Space.md },
   thumbWrapper: { position: 'relative' },
-  thumb: { width: 72, height: 72, borderRadius: 4, backgroundColor: Colors.background },
-  stockThumb: { width: 120, height: 120, borderRadius: 4, backgroundColor: Colors.background },
+  thumb: { width: 72, height: 72, borderRadius: Radius.md, backgroundColor: Colors.surfaceAlt },
+  stockThumb: { width: 120, height: 120, borderRadius: Radius.md, backgroundColor: Colors.surfaceAlt },
   thumbRemove: {
     position: 'absolute',
     top: -6,
@@ -1248,5 +1184,4 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  thumbRemoveText: { color: Colors.white, fontSize: 16, fontWeight: '700', lineHeight: 18 },
 });

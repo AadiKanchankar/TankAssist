@@ -8,15 +8,33 @@ import {
   RefreshControl,
   Modal,
   TextInput,
-  FlatList,
-  TouchableOpacity,
+  Pressable,
   ActivityIndicator,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { Colors, Typography } from '../../constants/colors';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { MotiView } from 'moti';
+import { useReducedMotion } from 'react-native-reanimated';
+import { Ionicons } from '@expo/vector-icons';
+import {
+  Colors,
+  Typography,
+  Type,
+  Space,
+  Radius,
+  Layout,
+  Glass,
+  tabularNums,
+} from '../../constants/colors';
+import { entrance } from '../../constants/motion';
 import Button from '../../components/Button';
-import Card from '../../components/Card';
 import Header from '../../components/Header';
+import BentoTile from '../../components/BentoTile';
+import Metric from '../../components/Metric';
+import Autocomplete, { AutocompleteItem } from '../../components/Autocomplete';
+import EmptyState from '../../components/EmptyState';
+import ErrorState from '../../components/ErrorState';
+import { RepDashboardSkeleton } from '../../components/skeleton/RepDashboardSkeleton';
 import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
 import { totalRouteKm } from '../../lib/haversine';
@@ -25,27 +43,7 @@ import StoreLocationPicker from '../../components/StoreLocationPicker';
 import type { StoreLocationValue } from '../../components/StoreLocationPicker';
 import * as Location from 'expo-location';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
-
-interface StoreAssignment {
-  id: string;
-  store_id: string;
-  stores: { id: string; name: string; address: string };
-}
-
-interface StoreVisit {
-  store_id: string;
-  check_out_time: string | null;
-}
-
-interface AttendanceRow {
-  id: string;
-  check_in_time: string | null;
-  check_out_time: string | null;
-  latitude: number | null;
-  longitude: number | null;
-  total_distance_km: number | null;
-  total_market_time_minutes: number | null;
-}
+import { useRepDashboard } from '../../hooks/useRepDashboard';
 
 interface StoreSearchResult {
   id: string;
@@ -55,21 +53,22 @@ interface StoreSearchResult {
   longitude: number | null;
 }
 
-export default function RepDashboard({
-  navigation,
-}: {
-  navigation: any;
-}) {
+const fmtHM = (min: number) => `${Math.floor(min / 60)}h ${min % 60}m`;
+
+export default function RepDashboard({ navigation }: { navigation: any }) {
+  const reduce = useReducedMotion();
+  const insets = useSafeAreaInsets();
   const { profile } = useAuthStore();
-  const [attendance, setAttendance] = useState<AttendanceRow | null>(null);
-  const [assignments, setAssignments] = useState<StoreAssignment[]>([]);
-  const [visits, setVisits] = useState<StoreVisit[]>([]);
-  const [reportSubmitted, setReportSubmitted] = useState(false);
+  const { data, refetch, isPending, isError } = useRepDashboard(profile?.id);
+  const attendance = data?.attendance ?? null;
+  const assignments = data?.assignments ?? [];
+  const visits = data?.visits ?? [];
+  const reportSubmitted = data?.reportSubmitted ?? false;
+  const casesToday = data?.casesToday ?? 0;
   const [punchingOut, setPunchingOut] = useState(false);
 
-  // Store search modal state
+  // Store search + add-store modal state
   const [showStoreModal, setShowStoreModal] = useState(false);
-  const [modalMode, setModalMode] = useState<'search' | 'add'>('search');
   const [storeSearch, setStoreSearch] = useState('');
   const [storeResults, setStoreResults] = useState<StoreSearchResult[]>([]);
   const [searchingStores, setSearchingStores] = useState(false);
@@ -94,56 +93,14 @@ export default function RepDashboard({
     return 'Good evening';
   };
 
-  const loadData = useCallback(async () => {
-    if (!profile) return;
-
-    // Fetch today's attendance
-    const { data: att } = await supabase
-      .from('attendance')
-      .select('*')
-      .eq('user_id', profile.id)
-      .gte('check_in_time', `${today}T00:00:00`)
-      .lt('check_in_time', `${today}T23:59:59`)
-      .order('check_in_time', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    setAttendance(att);
-
-    // Fetch assigned stores for today
-    const { data: assigns } = await supabase
-      .from('store_assignments')
-      .select('id, store_id, stores(id, name, address)')
-      .eq('user_id', profile.id)
-      .eq('assigned_date', today);
-    setAssignments((assigns as any) || []);
-
-    // Fetch today's visits
-    const { data: vis } = await supabase
-      .from('store_visits')
-      .select('store_id, check_out_time')
-      .eq('user_id', profile.id)
-      .gte('check_in_time', `${today}T00:00:00`)
-      .lt('check_in_time', `${today}T23:59:59`);
-    setVisits(vis || []);
-
-    // Check if daily report submitted
-    const { data: report } = await supabase
-      .from('daily_reports')
-      .select('id')
-      .eq('user_id', profile.id)
-      .eq('report_date', today)
-      .maybeSingle();
-    setReportSubmitted(!!report);
-  }, [profile, today]);
-
-  // Refetch data every time the screen gains focus (tab switch, back nav, etc.)
+  // Cache-backed focus refresh (Phase B): paint from cache, refetch in background.
   useFocusEffect(
     useCallback(() => {
-      loadData();
-    }, [loadData])
+      refetch();
+    }, [refetch])
   );
 
-  const { refreshing, onRefresh } = usePullToRefresh(loadData);
+  const { refreshing, onRefresh } = usePullToRefresh(refetch);
 
   const isCheckedIn = !!attendance?.check_in_time;
   const isPunchedOut = !!attendance?.check_out_time;
@@ -154,24 +111,23 @@ export default function RepDashboard({
     return visit.check_out_time ? 'visited' : 'in-progress';
   };
 
-  // --- Punch out ---
+  // --- Punch out (unchanged logic) ---
 
   const handlePunchOut = async () => {
     Alert.alert(
-      'End Day',
+      'End day',
       'Are you sure you want to punch out? This cannot be undone.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Punch Out',
+          text: 'Punch out',
           style: 'destructive',
           onPress: async () => {
             setPunchingOut(true);
             try {
-              // Get current location
               const { status } = await Location.requestForegroundPermissionsAsync();
               if (status !== 'granted') {
-                Alert.alert('Error', 'Location permission is required.');
+                Alert.alert('Location needed', 'Location permission is required to punch out.');
                 setPunchingOut(false);
                 return;
               }
@@ -180,16 +136,12 @@ export default function RepDashboard({
               });
               const checkOutTime = new Date().toISOString();
 
-              // Calculate total market time
               const checkInTime = new Date(attendance!.check_in_time!);
               const totalMinutes = Math.round(
                 (new Date(checkOutTime).getTime() - checkInTime.getTime()) / 60000
               );
 
-              // Build waypoints: punch-in → store visits (sorted by time) → punch-out
               const waypoints: Array<{ latitude: number; longitude: number }> = [];
-
-              // Punch-in coordinates
               if (attendance!.latitude && attendance!.longitude) {
                 waypoints.push({
                   latitude: attendance!.latitude,
@@ -197,7 +149,6 @@ export default function RepDashboard({
                 });
               }
 
-              // Store visit check-in coordinates, sorted by time
               const { data: visitCoords } = await supabase
                 .from('store_visits')
                 .select('latitude, longitude, check_in_time')
@@ -209,31 +160,23 @@ export default function RepDashboard({
               if (visitCoords) {
                 for (const vc of visitCoords) {
                   if (vc.latitude != null && vc.longitude != null) {
-                    waypoints.push({
-                      latitude: vc.latitude,
-                      longitude: vc.longitude,
-                    });
+                    waypoints.push({ latitude: vc.latitude, longitude: vc.longitude });
                   }
                 }
               }
 
-              // Punch-out coordinates
               waypoints.push({
                 latitude: loc.coords.latitude,
                 longitude: loc.coords.longitude,
               });
 
-              // Total daily distance for TA: use the real road-network
-              // route via Google Directions (rep's actual visited order,
-              // optimize:false). Fall back to straight-line Haversine if
-              // the API fails or there aren't enough points — never block
-              // punch-out on this call.
+              // Real road-network route via Google Directions; straight-line
+              // Haversine fallback — never block punch-out on this call.
               let distance = await directionsRouteKm(waypoints);
               if (distance == null) {
                 distance = totalRouteKm(waypoints);
               }
 
-              // Update attendance row
               await supabase
                 .from('attendance')
                 .update({
@@ -243,9 +186,9 @@ export default function RepDashboard({
                 })
                 .eq('id', attendance!.id);
 
-              await loadData();
+              await refetch();
             } catch (err: any) {
-              Alert.alert('Error', err.message || 'Failed to punch out.');
+              Alert.alert('Couldn’t punch out', err.message || 'Try again.');
             }
             setPunchingOut(false);
           },
@@ -254,10 +197,9 @@ export default function RepDashboard({
     );
   };
 
-  // --- Store search + creation ---
+  // --- Store search + creation (unchanged logic) ---
 
   const resetStoreModal = () => {
-    setModalMode('search');
     setStoreSearch('');
     setStoreResults([]);
     setNewStoreName('');
@@ -288,13 +230,17 @@ export default function RepDashboard({
 
   const handleSelectStore = (store: StoreSearchResult) => {
     setShowStoreModal(false);
-    resetStoreModal();
     navigation.navigate('StoreVisit', { store });
+  };
+
+  const openAddStore = () => {
+    setNewStoreName(storeSearch);
+    setShowStoreModal(true);
   };
 
   const handleCreateStore = async () => {
     if (!newStoreName.trim()) {
-      Alert.alert('Error', 'Store name is required.');
+      Alert.alert('Name required', 'Enter a store name to continue.');
       return;
     }
     setCreatingStore(true);
@@ -327,7 +273,7 @@ export default function RepDashboard({
         },
       });
     } catch (err: any) {
-      Alert.alert('Error', err.message || 'Failed to create store.');
+      Alert.alert('Couldn’t add the store', err.message || 'Try again.');
     }
     setCreatingStore(false);
   };
@@ -342,164 +288,256 @@ export default function RepDashboard({
   });
 
   const completedVisits = visits.filter((v) => v.check_out_time).length;
+  // ponytail: market time so far = now − check-in, computed at render (updates on
+  // focus/refresh). A live ticking timer needs a setInterval — YAGNI on a dashboard.
+  const activeMinutes = attendance?.check_in_time
+    ? Math.max(0, Math.round((Date.now() - new Date(attendance.check_in_time).getTime()) / 60000))
+    : 0;
+
+  const searchItems: AutocompleteItem[] = storeResults.map((s) => ({
+    id: s.id,
+    label: s.name,
+    sublabel: s.address || 'No address',
+  }));
+
+  if (isPending && !data) {
+    return (
+      <View style={[styles.screen, { paddingTop: insets.top }]}>
+        <RepDashboardSkeleton />
+      </View>
+    );
+  }
+  if (isError && !data) {
+    return (
+      <View style={[styles.screen, { paddingTop: insets.top }]}>
+        <ErrorState onRetry={refetch} />
+      </View>
+    );
+  }
+
+  let section = 0;
 
   return (
-    <View style={{ flex: 1, backgroundColor: Colors.background }}>
+    <View style={styles.screen}>
       <ScrollView
-        style={styles.container}
-        contentContainerStyle={styles.content}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-        }
+        contentContainerStyle={[
+          styles.content,
+          {
+            paddingTop: insets.top + Space.md,
+            // Clear the bottom tab bar (getTabScreenOptions height = 60 + inset)
+            // so the last card is never obscured, incl. the home-indicator area.
+            paddingBottom: Layout.tabBar + insets.bottom + Space.md,
+          },
+        ]}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
       >
-        {/* Greeting */}
-        <Text style={styles.greeting}>
-          {getGreeting()}, {profile?.name || 'Rep'}
-        </Text>
-        <Text style={styles.date}>{formattedDate}</Text>
-
-        {/* Day Ended Banner */}
-        {isPunchedOut && (
-          <Card style={styles.endedBanner}>
-            <Text style={styles.endedText}>Day ended. See you tomorrow.</Text>
-          </Card>
-        )}
-
-        {/* Attendance Card */}
-        <Card>
-          <Text style={styles.cardLabel}>ATTENDANCE</Text>
-          <View style={styles.statusRow}>
-            <View
-              style={[
-                styles.statusDot,
-                { backgroundColor: isCheckedIn ? Colors.success : Colors.alert },
-              ]}
-            />
-            <Text style={styles.statusText}>
-              {isCheckedIn ? 'Checked In' : 'Not Checked In'}
+        {/* Greeting + brand mark */}
+        <View style={styles.greetRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={[Type.title, { color: Colors.text }]}>
+              {getGreeting()}, {profile?.name || 'Rep'}
+            </Text>
+            <Text style={[Type.body, { color: Colors.textSecondary, marginTop: 2 }]}>
+              {formattedDate}
             </Text>
           </View>
+          <Text style={styles.brandMark}>Tank No. 90</Text>
+        </View>
 
-          {!isCheckedIn && (
-            <Button
-              title="Check In"
-              onPress={() => navigation.navigate('Attendance')}
-              style={styles.actionBtn}
-            />
-          )}
-
-          {isCheckedIn && !isPunchedOut && (
-            <Button
-              title="Punch Out / End Day"
-              onPress={handlePunchOut}
-              variant="danger"
-              loading={punchingOut}
-              style={styles.actionBtn}
-            />
-          )}
-
-          {isPunchedOut && attendance && (
-            <View style={styles.statsRow}>
-              <View style={styles.stat}>
-                <Text style={styles.statValue}>
-                  {Math.floor((attendance.total_market_time_minutes || 0) / 60)}h{' '}
-                  {(attendance.total_market_time_minutes || 0) % 60}m
+        {/* Hero — check-in state */}
+        <MotiView {...entrance(section++, reduce)}>
+          <BentoTile variant="dark" style={{ marginTop: Space.md }}>
+            {!isCheckedIn ? (
+              <>
+                <Text style={[Type.label, styles.onDarkMuted]}>Today</Text>
+                <Text style={[Type.section, { color: Colors.textOnDark, marginTop: 2 }]}>
+                  You’re not checked in yet
                 </Text>
-                <Text style={styles.statLabel}>MARKET TIME</Text>
-              </View>
-              <View style={styles.stat}>
-                <Text style={styles.statValue}>
-                  {attendance.total_distance_km?.toFixed(1) || '0.0'} km
+                <Text style={[Type.body, styles.onDarkMuted, { marginTop: Space.xs }]}>
+                  Start your day to record attendance and visit stores.
                 </Text>
-                <Text style={styles.statLabel}>DISTANCE</Text>
-              </View>
-            </View>
-          )}
-        </Card>
-
-        {/* Punch In Store — only visible when checked in and day not ended */}
-        {isCheckedIn && !isPunchedOut && (
-          <Card>
-            <Text style={styles.cardLabel}>STORE VISITS</Text>
-            <Text style={styles.visitsSummary}>
-              {completedVisits} completed today
-            </Text>
-            <Button
-              title="Punch In Store"
-              onPress={() => setShowStoreModal(true)}
-              style={styles.actionBtn}
-            />
-          </Card>
-        )}
-
-        {/* Today's Assigned Stores */}
-        {assignments.length > 0 && (
-          <>
-            <Text style={styles.sectionTitle}>Assigned Stores</Text>
-            {assignments.map((a) => {
-              const status = getStoreStatus(a.store_id);
-              return (
-                <Card key={a.id}>
-                  <View style={styles.storeRow}>
-                    <View
-                      style={[
-                        styles.statusDot,
-                        {
-                          backgroundColor:
-                            status === 'visited'
-                              ? Colors.success
-                              : status === 'in-progress'
-                              ? Colors.accent
-                              : Colors.muted,
-                        },
-                      ]}
-                    />
-                    <View style={styles.storeInfo}>
-                      <Text style={styles.storeName}>
-                        {(a as any).stores?.name || 'Store'}
-                      </Text>
-                      <Text style={styles.storeAddress}>
-                        {(a as any).stores?.address || ''}
-                      </Text>
-                    </View>
-                    <Text style={styles.storeStatus}>
-                      {status === 'visited'
-                        ? '✓'
-                        : status === 'in-progress'
-                        ? '...'
-                        : '—'}
+                <Button
+                  title="Start check-in"
+                  spotlight
+                  onPress={() => navigation.navigate('Attendance')}
+                  style={{ marginTop: Space.lg }}
+                />
+              </>
+            ) : isPunchedOut ? (
+              <>
+                <View style={styles.statusRow}>
+                  <View style={[styles.dot, { backgroundColor: Colors.textOnDark }]} />
+                  <Text style={[Type.label, { color: Colors.textOnDark }]}>Day ended</Text>
+                </View>
+                <View style={styles.heroStats}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[Type.label, styles.onDarkMuted]}>Market time</Text>
+                    <Text style={[Type.display, styles.onDarkValue]}>
+                      {fmtHM(attendance?.total_market_time_minutes || 0)}
                     </Text>
                   </View>
-                </Card>
-              );
-            })}
-          </>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[Type.label, styles.onDarkMuted]}>Distance</Text>
+                    <Text style={[Type.display, styles.onDarkValue]}>
+                      {(attendance?.total_distance_km ?? 0).toFixed(1)} km
+                    </Text>
+                  </View>
+                </View>
+              </>
+            ) : (
+              <>
+                <View style={styles.statusRow}>
+                  <View style={[styles.dot, { backgroundColor: Colors.spotlight }]} />
+                  <Text style={[Type.label, { color: Colors.textOnDark }]}>Checked in</Text>
+                </View>
+                <View style={styles.heroStats}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[Type.label, styles.onDarkMuted]}>Market time</Text>
+                    <Text style={[Type.display, styles.onDarkValue]}>{fmtHM(activeMinutes)}</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[Type.label, styles.onDarkMuted]}>Stores visited</Text>
+                    <Text style={[Type.display, styles.onDarkValue]}>{completedVisits}</Text>
+                  </View>
+                </View>
+                <Pressable
+                  onPress={handlePunchOut}
+                  disabled={punchingOut}
+                  accessibilityRole="button"
+                  accessibilityLabel="Punch out and end day"
+                  style={styles.heroSecondary}
+                >
+                  {punchingOut ? (
+                    <ActivityIndicator color={Colors.textOnDark} />
+                  ) : (
+                    <Text style={[Type.label, { color: Colors.textOnDark }]}>
+                      Punch out · end day
+                    </Text>
+                  )}
+                </Pressable>
+              </>
+            )}
+          </BentoTile>
+        </MotiView>
+
+        {/* Bento row: cases today · stores visited */}
+        <MotiView {...entrance(section++, reduce)} style={styles.bentoRow}>
+          <BentoTile style={styles.flex}>
+            <Metric label="Cases today" value={casesToday} />
+          </BentoTile>
+          <BentoTile style={styles.flex}>
+            <Metric label="Stores visited" value={completedVisits} />
+          </BentoTile>
+        </MotiView>
+
+        {/* Start a store visit — only while checked in and not punched out */}
+        {isCheckedIn && !isPunchedOut && (
+          <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
+            <Text style={[Type.section, styles.sectionTitle]}>Start a store visit</Text>
+            <Autocomplete
+              placeholder="Search a store to check in"
+              results={searchItems}
+              loading={searchingStores}
+              debounceMs={0}
+              onQueryChange={setStoreSearch}
+              onSelect={(item) => {
+                const full = storeResults.find((s) => s.id === item.id);
+                if (full) handleSelectStore(full);
+              }}
+            />
+            {storeSearch.trim().length >= 2 && (
+              <Pressable onPress={openAddStore} style={styles.addStoreLink} hitSlop={6}>
+                <Ionicons name="add-circle-outline" size={16} color={Colors.accent} />
+                <Text style={[Type.label, { color: Colors.accent }]}>
+                  Can’t find it? Add a store
+                </Text>
+              </Pressable>
+            )}
+          </MotiView>
         )}
 
-        {/* Daily Report Status */}
-        <Card>
-          <Text style={styles.cardLabel}>DAILY REPORT</Text>
-          <View style={styles.statusRow}>
-            <View
-              style={[
-                styles.statusDot,
-                {
-                  backgroundColor: reportSubmitted
-                    ? Colors.success
-                    : Colors.muted,
-                },
-              ]}
-            />
-            <Text style={styles.statusText}>
-              {reportSubmitted ? 'Submitted' : 'Pending'}
-            </Text>
+        {/* Your stores preview */}
+        <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
+          <View style={styles.sectionHeader}>
+            <Text style={[Type.section, { color: Colors.text }]}>Your stores</Text>
+            {assignments.length > 0 && (
+              <Pressable
+                onPress={() => navigation.navigate('MyStores')}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel="See all your stores"
+                style={styles.seeAll}
+              >
+                <Text style={[Type.label, { color: Colors.accent }]}>See all</Text>
+                <Ionicons name="chevron-forward" size={14} color={Colors.accent} />
+              </Pressable>
+            )}
           </View>
-        </Card>
 
-        <View style={{ height: 40 }} />
+          {assignments.length === 0 ? (
+            <BentoTile>
+              <EmptyState
+                icon="storefront-outline"
+                title="No assigned stores"
+                message="Stores you’re assigned to show up here. Check with your manager."
+              />
+            </BentoTile>
+          ) : (
+            <BentoTile>
+              {assignments.slice(0, 4).map((a, i) => {
+                const status = getStoreStatus(a.store_id);
+                const dotColor =
+                  status === 'visited'
+                    ? Colors.success
+                    : status === 'in-progress'
+                    ? Colors.accent
+                    : Colors.borderStrong;
+                const statusLabel =
+                  status === 'visited' ? 'Visited' : status === 'in-progress' ? 'In progress' : 'Pending';
+                return (
+                  <View
+                    key={a.id}
+                    style={[styles.storeRow, i > 0 && styles.storeRowDivider]}
+                  >
+                    <View style={[styles.dot, { backgroundColor: dotColor }]} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={[Type.bodyMed, { color: Colors.text }]} numberOfLines={1}>
+                        {(a as any).stores?.name || 'Store'}
+                      </Text>
+                      {(a as any).stores?.address ? (
+                        <Text style={[Type.caption, { color: Colors.textMuted }]} numberOfLines={1}>
+                          {(a as any).stores.address}
+                        </Text>
+                      ) : null}
+                    </View>
+                    <Text style={[Type.caption, { color: Colors.textMuted }]}>{statusLabel}</Text>
+                  </View>
+                );
+              })}
+            </BentoTile>
+          )}
+        </MotiView>
+
+        {/* Daily report status */}
+        <MotiView {...entrance(section++, reduce)}>
+          <BentoTile>
+            <Text style={[Type.label, { color: Colors.textMuted }]}>Daily report</Text>
+            <View style={[styles.statusRow, { marginTop: Space.sm }]}>
+              <View
+                style={[
+                  styles.dot,
+                  { backgroundColor: reportSubmitted ? Colors.success : Colors.borderStrong },
+                ]}
+              />
+              <Text style={[Type.bodyMed, { color: Colors.text }]}>
+                {reportSubmitted ? 'Submitted' : 'Pending'}
+              </Text>
+            </View>
+          </BentoTile>
+        </MotiView>
       </ScrollView>
 
-      {/* Punch In Store Modal */}
+      {/* Add-store modal */}
       <Modal
         visible={showStoreModal}
         animationType="slide"
@@ -511,111 +549,41 @@ export default function RepDashboard({
       >
         <View style={styles.modalContainer}>
           <Header
-            title={modalMode === 'search' ? 'Punch In Store' : 'Add New Store'}
+            title="Add a store"
             onBack={() => {
-              if (modalMode === 'add') {
-                setModalMode('search');
-              } else {
-                setShowStoreModal(false);
-                resetStoreModal();
-              }
+              setShowStoreModal(false);
+              resetStoreModal();
             }}
           />
+          <ScrollView style={styles.modalBody} keyboardShouldPersistTaps="handled">
+            <Text style={styles.fieldLabel}>Store name</Text>
+            <TextInput
+              style={styles.input}
+              value={newStoreName}
+              onChangeText={setNewStoreName}
+              placeholder="Store name"
+              placeholderTextColor={Colors.textMuted}
+            />
 
-          {modalMode === 'search' ? (
-            <View style={styles.modalBody}>
-              <TextInput
-                style={styles.searchInput}
-                value={storeSearch}
-                onChangeText={setStoreSearch}
-                placeholder="Search store name..."
-                placeholderTextColor={Colors.muted}
-                autoFocus
-              />
+            <StoreLocationPicker value={storeLocation} onChange={setStoreLocation} />
 
-              {searchingStores && (
-                <ActivityIndicator
-                  size="small"
-                  color={Colors.accent}
-                  style={{ marginTop: 16 }}
-                />
-              )}
+            <Text style={styles.fieldLabel}>License number (optional)</Text>
+            <TextInput
+              style={styles.input}
+              value={newStoreLicense}
+              onChangeText={setNewStoreLicense}
+              placeholder="Store license number"
+              placeholderTextColor={Colors.textMuted}
+            />
 
-              <FlatList
-                data={storeResults}
-                keyExtractor={(item) => item.id}
-                keyboardShouldPersistTaps="handled"
-                style={styles.resultsList}
-                renderItem={({ item }) => (
-                  <TouchableOpacity
-                    onPress={() => handleSelectStore(item)}
-                    style={styles.resultRow}
-                  >
-                    <Text style={styles.resultName}>{item.name}</Text>
-                    <Text style={styles.resultAddress}>
-                      {item.address || 'No address'}
-                    </Text>
-                  </TouchableOpacity>
-                )}
-                ListFooterComponent={
-                  storeSearch.length >= 2 ? (
-                    <TouchableOpacity
-                      onPress={() => {
-                        setNewStoreName(storeSearch);
-                        setModalMode('add');
-                      }}
-                      style={styles.addStoreRow}
-                    >
-                      <Text style={styles.addStoreText}>
-                        Can't find your store? Add it →
-                      </Text>
-                    </TouchableOpacity>
-                  ) : null
-                }
-                ListEmptyComponent={
-                  storeSearch.length >= 2 && !searchingStores ? (
-                    <Text style={styles.noResultsText}>No stores found</Text>
-                  ) : null
-                }
-              />
-            </View>
-          ) : (
-            <ScrollView
-              style={styles.modalBody}
-              keyboardShouldPersistTaps="handled"
-            >
-              <Text style={styles.fieldLabel}>STORE NAME *</Text>
-              <TextInput
-                style={styles.searchInput}
-                value={newStoreName}
-                onChangeText={setNewStoreName}
-                placeholder="Store name"
-                placeholderTextColor={Colors.muted}
-              />
-
-              <StoreLocationPicker
-                value={storeLocation}
-                onChange={setStoreLocation}
-              />
-
-              <Text style={styles.fieldLabel}>LICENSE NUMBER (OPTIONAL)</Text>
-              <TextInput
-                style={styles.searchInput}
-                value={newStoreLicense}
-                onChangeText={setNewStoreLicense}
-                placeholder="Store license number"
-                placeholderTextColor={Colors.muted}
-              />
-
-              <Button
-                title="Create & Check In"
-                onPress={handleCreateStore}
-                loading={creatingStore}
-                disabled={!newStoreName.trim()}
-                style={styles.createStoreBtn}
-              />
-            </ScrollView>
-          )}
+            <Button
+              title="Add & check in"
+              onPress={handleCreateStore}
+              loading={creatingStore}
+              disabled={!newStoreName.trim()}
+              style={{ marginTop: Space.xl, marginBottom: 48 }}
+            />
+          </ScrollView>
         </View>
       </Modal>
     </View>
@@ -623,187 +591,63 @@ export default function RepDashboard({
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.background },
-  content: { padding: 24, paddingTop: 60 },
-  greeting: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.pageTitle,
-    color: Colors.text,
+  screen: { flex: 1, backgroundColor: Colors.background },
+  content: { padding: Layout.screenPad },
+  greetRow: { flexDirection: 'row', alignItems: 'flex-start' },
+  brandMark: { ...Type.label, color: Colors.accent },
+  // Hero (dark surface)
+  onDarkMuted: { color: Colors.textOnDark, opacity: 0.7 },
+  onDarkValue: { color: Colors.textOnDark, ...tabularNums, marginTop: 2 },
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: Space.sm },
+  heroStats: { flexDirection: 'row', gap: Space.lg, marginTop: Space.md },
+  heroSecondary: {
+    marginTop: Space.lg,
+    minHeight: Layout.tap,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: Glass.hairline,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  date: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-    marginTop: 4,
-    marginBottom: 32,
-  },
-  endedBanner: {
-    backgroundColor: Colors.text,
-    borderColor: Colors.text,
-  },
-  endedText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.white,
-    textAlign: 'center',
-    fontWeight: '600',
-  },
-  cardLabel: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginBottom: 12,
-  },
-  statusRow: {
+  dot: { width: 10, height: 10, borderRadius: 5 },
+  // Bento
+  bentoRow: { flexDirection: 'row', gap: Layout.gridGap, marginTop: Space.md },
+  flex: { flex: 1 },
+  sectionTitle: { color: Colors.text, marginBottom: Space.sm },
+  sectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Space.sm,
   },
-  statusDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    marginRight: 10,
-  },
-  statusText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.text,
-    fontWeight: '600',
-  },
-  actionBtn: { marginTop: 16 },
-  statsRow: {
-    flexDirection: 'row',
-    marginTop: 16,
-    gap: 24,
-  },
-  stat: {},
-  statValue: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 20,
-    fontWeight: '700',
-    color: Colors.text,
-  },
-  statLabel: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginTop: 2,
-  },
-  visitsSummary: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.text,
-    fontWeight: '600',
-  },
-  sectionTitle: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.sectionTitle,
-    color: Colors.text,
-    marginTop: 8,
-    marginBottom: 16,
-  },
-  storeRow: {
+  seeAll: { flexDirection: 'row', alignItems: 'center', gap: 2, minHeight: Layout.tap, paddingLeft: Space.sm },
+  addStoreLink: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: Space.xs,
+    marginTop: Space.sm,
+    minHeight: Layout.tap,
   },
-  storeInfo: { flex: 1, marginLeft: 12 },
-  storeName: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.cardTitle,
-    color: Colors.text,
-  },
-  storeAddress: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 14,
-    color: Colors.muted,
-    marginTop: 2,
-  },
-  storeStatus: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 20,
-    color: Colors.muted,
-    marginLeft: 8,
-  },
+  storeRow: { flexDirection: 'row', alignItems: 'center', gap: Space.md, paddingVertical: Space.sm },
+  storeRowDivider: { borderTopWidth: 1, borderTopColor: Colors.border },
   // Modal
   modalContainer: { flex: 1, backgroundColor: Colors.background },
-  modalBody: { flex: 1, padding: 24 },
-  searchInput: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 16,
-    color: Colors.text,
-    backgroundColor: Colors.white,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    borderRadius: 4,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-  },
-  resultsList: { marginTop: 8 },
-  resultRow: {
-    paddingVertical: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.border,
-  },
-  resultName: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.cardTitle,
-    color: Colors.text,
-  },
-  resultAddress: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 14,
-    color: Colors.muted,
-    marginTop: 2,
-  },
-  noResultsText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-    textAlign: 'center',
-    marginTop: 24,
-  },
-  addStoreRow: {
-    paddingVertical: 20,
-    alignItems: 'center',
-  },
-  addStoreText: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 16,
-    color: Colors.accent,
-    fontWeight: '600',
-  },
-  // Add store form
+  modalBody: { flex: 1, padding: Layout.screenPad },
   fieldLabel: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginBottom: 8,
-    marginTop: 20,
+    ...Type.label,
+    color: Colors.textMuted,
+    marginBottom: Space.sm,
+    marginTop: Space.lg,
   },
-  predictionsContainer: {
-    backgroundColor: Colors.white,
+  input: {
+    fontFamily: Typography.fontFamily,
+    ...Type.body,
+    color: Colors.text,
+    backgroundColor: Colors.surface,
     borderWidth: 1,
     borderColor: Colors.border,
-    borderRadius: 4,
-    marginTop: 4,
+    borderRadius: Radius.md,
+    paddingHorizontal: Space.lg,
+    paddingVertical: Space.md,
   },
-  predictionRow: {
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.border,
-  },
-  predictionText: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 14,
-    color: Colors.text,
-  },
-  selectedAddressText: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 13,
-    color: Colors.success,
-    fontWeight: '600',
-    marginTop: 8,
-  },
-  createStoreBtn: { marginTop: 32, marginBottom: 48 },
 });

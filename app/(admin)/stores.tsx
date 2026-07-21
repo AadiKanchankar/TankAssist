@@ -1,48 +1,24 @@
-import React, { useState, useCallback, useMemo } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  SectionList,
-  TextInput,
-  TouchableOpacity,
-  RefreshControl,
-} from 'react-native';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import { View, Text, StyleSheet, SectionList, Pressable, RefreshControl } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors, Typography } from '../../constants/colors';
-import Card from '../../components/Card';
+import { Colors, Type, Space, Layout } from '../../constants/colors';
 import Button from '../../components/Button';
-import { supabase } from '../../lib/supabase';
+import BentoTile from '../../components/BentoTile';
+import EmptyState from '../../components/EmptyState';
+import ErrorState from '../../components/ErrorState';
+import SearchField from '../../components/SearchField';
+import { ListSkeleton } from '../../components/skeleton/ListSkeleton';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
-
-interface Store {
-  id: string;
-  name: string;
-  address: string | null;
-  latitude: number | null;
-  longitude: number | null;
-  contact_person: string | null;
-  contact_number: string | null;
-  license_number: string | null;
-  owner_name: string | null;
-  state: string | null;
-}
+import { useAdminStores, Store } from '../../hooks/useStores';
 
 const NO_STATE = 'No State';
 
-/**
- * Build the SectionList data: with an empty query, group stores by state
- * (state name as a tappable accordion header, "No State" last; collapsed
- * sections keep their header but render no rows). With a query, one flat
- * section (no header) filtered across every state — accordion state ignored.
- */
 function buildSections(stores: Store[], query: string, expanded: Set<string>) {
   const q = query.trim().toLowerCase();
   if (q) {
-    return [
-      { title: '', count: 0, data: stores.filter((s) => s.name.toLowerCase().includes(q)) },
-    ];
+    return [{ title: '', count: 0, data: stores.filter((s) => s.name.toLowerCase().includes(q)) }];
   }
   const map: Record<string, Store[]> = {};
   for (const s of stores) {
@@ -51,27 +27,30 @@ function buildSections(stores: Store[], query: string, expanded: Set<string>) {
     map[key].push(s);
   }
   return Object.keys(map)
-    .sort((a, b) => {
-      if (a === NO_STATE) return 1;
-      if (b === NO_STATE) return -1;
-      return a.localeCompare(b);
-    })
-    .map((k) => ({
-      title: k,
-      count: map[k].length,
-      data: expanded.has(k) ? map[k] : [],
-    }));
+    .sort((a, b) => (a === NO_STATE ? 1 : b === NO_STATE ? -1 : a.localeCompare(b)))
+    .map((k) => ({ title: k, count: map[k].length, data: expanded.has(k) ? map[k] : [] }));
 }
 
-export default function AdminStoresScreen({
-  navigation,
-}: {
-  navigation: any;
-}) {
-  const [stores, setStores] = useState<Store[]>([]);
+export default function AdminStoresScreen({ navigation }: { navigation: any }) {
+  const insets = useSafeAreaInsets();
+  const { data, refetch, isPending, isError } = useAdminStores();
+  const stores = data ?? [];
+
+  const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
-  // Accordion: all states start collapsed.
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchInput), 200);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  useFocusEffect(
+    useCallback(() => {
+      refetch();
+    }, [refetch])
+  );
+  const { refreshing, onRefresh } = usePullToRefresh(refetch);
 
   const toggleSection = (title: string) =>
     setExpanded((prev) => {
@@ -81,23 +60,6 @@ export default function AdminStoresScreen({
       return next;
     });
 
-  const loadStores = useCallback(async () => {
-    const { data } = await supabase
-      .from('stores')
-      .select('*')
-      .order('name');
-    setStores(data || []);
-  }, []);
-
-  // Refetch on focus so edits/deletes/adds from pushed screens show up.
-  useFocusEffect(
-    useCallback(() => {
-      loadStores();
-    }, [loadStores])
-  );
-
-  const { refreshing, onRefresh } = usePullToRefresh(loadStores);
-
   const sections = useMemo(
     () => buildSections(stores, search, expanded),
     [stores, search, expanded]
@@ -105,131 +67,86 @@ export default function AdminStoresScreen({
 
   return (
     <View style={styles.container}>
-      <View style={styles.headerPad}>
-        <Text style={styles.title}>Manage Stores</Text>
+      <View style={[styles.headerPad, { paddingTop: insets.top + Space.md }]}>
+        <Text style={[Type.title, { color: Colors.text, marginBottom: Space.md }]}>Stores</Text>
+        {/* Calm list (no Von Restorff): Add store stays olive, not lime. */}
         <Button
-          title="+ Add Store"
+          title="Add store"
           onPress={() => navigation.navigate('StoreForm')}
-          style={styles.addBtn}
+          style={{ marginBottom: Space.md }}
         />
-        <TextInput
-          style={styles.searchInput}
-          value={search}
-          onChangeText={setSearch}
-          placeholder="Search stores by name..."
-          placeholderTextColor={Colors.muted}
-        />
+        <SearchField value={searchInput} onChange={setSearchInput} placeholder="Search stores by name" />
       </View>
 
-      <SectionList
-        sections={sections}
-        keyExtractor={(item) => item.id}
-        contentContainerStyle={styles.list}
-        stickySectionHeadersEnabled={false}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-        }
-        renderSectionHeader={({ section }) =>
-          section.title ? (
-            <TouchableOpacity
-              style={styles.sectionHeaderRow}
-              onPress={() => toggleSection(section.title)}
+      {isPending && !data ? (
+        <ListSkeleton />
+      ) : isError && !data ? (
+        <ErrorState onRetry={refetch} />
+      ) : (
+        <SectionList
+          sections={sections}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={[
+            styles.list,
+            { paddingBottom: Layout.tabBar + insets.bottom + Space.md },
+          ]}
+          stickySectionHeadersEnabled={false}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+          renderSectionHeader={({ section }) =>
+            section.title ? (
+              <Pressable style={styles.sectionHeaderRow} onPress={() => toggleSection(section.title)}>
+                <Text style={[Type.section, { color: Colors.text }]}>
+                  {section.title} ({section.count})
+                </Text>
+                <Ionicons
+                  name={expanded.has(section.title) ? 'chevron-down' : 'chevron-forward'}
+                  size={16}
+                  color={Colors.textMuted}
+                />
+              </Pressable>
+            ) : null
+          }
+          renderItem={({ item }) => (
+            <Pressable
+              onPress={() => navigation.navigate('StoreDetail', { store: item })}
+              style={styles.rowWrap}
             >
-              <Text style={styles.sectionHeader}>
-                {section.title} ({section.count})
-              </Text>
-              <Ionicons
-                name={
-                  expanded.has(section.title)
-                    ? 'chevron-down'
-                    : 'chevron-forward'
-                }
-                size={16}
-                color={Colors.muted}
-              />
-            </TouchableOpacity>
-          ) : null
-        }
-        renderItem={({ item }) => (
-          <TouchableOpacity
-            onPress={() => navigation.navigate('StoreDetail', { store: item })}
-          >
-            <Card>
-              <Text style={styles.storeName}>{item.name}</Text>
-              <Text style={styles.storeAddress}>
-                {item.address || 'No address'}
-              </Text>
-              <Text style={styles.tapHint}>Tap to know more Details →</Text>
-            </Card>
-          </TouchableOpacity>
-        )}
-        ListEmptyComponent={
-          <Card>
-            <Text style={styles.emptyText}>
-              {search.trim() ? 'No stores match your search.' : 'No stores yet.'}
-            </Text>
-          </Card>
-        }
-      />
+              <BentoTile>
+                <Text style={[Type.bodyMed, { color: Colors.text }]} numberOfLines={1}>
+                  {item.name}
+                </Text>
+                <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]} numberOfLines={1}>
+                  {item.address || 'No address'}
+                </Text>
+              </BentoTile>
+            </Pressable>
+          )}
+          ListEmptyComponent={
+            <EmptyState
+              icon="storefront-outline"
+              title={search.trim() ? 'No matches' : 'No stores yet'}
+              message={search.trim() ? undefined : 'Add your first store to get started.'}
+              actionLabel={search.trim() ? undefined : 'Add store'}
+              onAction={search.trim() ? undefined : () => navigation.navigate('StoreForm')}
+            />
+          }
+        />
+      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
-  headerPad: { paddingHorizontal: 24, paddingTop: 60, paddingBottom: 8 },
-  title: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.pageTitle,
-    color: Colors.text,
-    marginBottom: 12,
-  },
-  addBtn: { marginBottom: 12 },
-  searchInput: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 16,
-    color: Colors.text,
-    backgroundColor: Colors.white,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    borderRadius: 4,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-  },
-  list: { paddingHorizontal: 24, paddingBottom: 24 },
+  headerPad: { paddingHorizontal: Layout.screenPad, paddingBottom: Space.sm },
+  list: { paddingHorizontal: Layout.screenPad, paddingTop: Space.sm },
   sectionHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginTop: 16,
-    marginBottom: 8,
-    paddingVertical: 4,
+    marginTop: Space.md,
+    marginBottom: Space.sm,
+    minHeight: Layout.tap,
   },
-  sectionHeader: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.accordionHeader,
-    color: Colors.text,
-  },
-  storeName: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.cardTitle,
-    color: Colors.text,
-  },
-  storeAddress: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 14,
-    color: Colors.muted,
-    marginTop: 2,
-  },
-  tapHint: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 12,
-    color: Colors.accent,
-    marginTop: 8,
-  },
-  emptyText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-  },
+  rowWrap: { marginBottom: Space.md },
 });

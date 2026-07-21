@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React from 'react';
 import {
   View,
   Text,
@@ -7,244 +7,52 @@ import {
   Alert,
   Linking,
   Platform,
-  TouchableOpacity,
-  ActivityIndicator,
+  Pressable,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { MotiView } from 'moti';
+import { useReducedMotion } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors, Typography } from '../../constants/colors';
-import Card from '../../components/Card';
+import { useCallback, useState } from 'react';
+import { Colors, Type, Space, Radius, Layout, tabularNums } from '../../constants/colors';
+import { entrance } from '../../constants/motion';
 import Button from '../../components/Button';
 import Header from '../../components/Header';
+import BentoTile from '../../components/BentoTile';
+import Breadcrumbs from '../../components/Breadcrumbs';
+import Metric from '../../components/Metric';
+import StatusPill from '../../components/StatusPill';
+import { StoreDetailSkeleton } from '../../components/skeleton/StoreDetailSkeleton';
 import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
-import {
-  orderStatusColor,
-  orderStatusLabel,
-  orderValue,
-  fmtOrderPrice,
-} from '../../lib/orders';
-
-interface StoreParam {
-  id: string;
-  name: string;
-  address: string | null;
-  latitude: number | null;
-  longitude: number | null;
-  contact_person: string | null; // Store Manager Name
-  contact_number: string | null;
-  license_number: string | null;
-  owner_name: string | null;
-  state: string | null;
-}
-
-interface VisitRow {
-  id: string;
-  check_in_time: string;
-  check_out_time: string | null;
-  cases_sold: number | null;
-  notes: string | null;
-  users: { name: string } | null;
-}
-
-interface StockRow {
-  product_id: string;
-  product_name: string;
-  unit: string;
-  cases: number;
-  bottles: number;
-  recorded_at: string;
-  recorded_by: string;
-  recorder_name: string | null;
-}
-
-interface RecentOrder {
-  id: string;
-  status: string;
-  created_at: string;
-  value: number;
-}
-
-type RepStatus = 'visited' | 'in-progress' | 'pending';
+import { fmtOrderPrice } from '../../lib/orders';
+import { useStoreDetail, Store, StockRow } from '../../hooks/useStores';
 
 const fmtDate = (iso: string) =>
-  new Date(iso).toLocaleDateString('en-GB', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-  });
+  new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 
-/**
- * Shared Store Detail screen (rep + admin). Shows the store's **Current Stock**
- * (latest snapshot per product), a secondary Total Cases Ordered stat, the
- * non-null info fields, and Visits & Notes — all RLS-scoped. Managers also get
- * a recent-orders list (→ Order Detail) plus Edit/Delete; reps get
- * Check-In/Navigate. Stock is read-only for everyone here.
- */
-export default function StoreDetailScreen({
-  route,
-  navigation,
-}: {
-  route: any;
-  navigation: any;
-}) {
-  const { store: routeStore } = route.params as { store: StoreParam };
+export default function StoreDetailScreen({ route, navigation }: { route: any; navigation: any }) {
+  const { store: routeStore } = route.params as { store: Store };
   const { profile } = useAuthStore();
   const isManager = profile?.role !== 'rep';
+  const reduce = useReducedMotion();
+  const insets = useSafeAreaInsets();
 
-  const [store, setStore] = useState<StoreParam>(routeStore);
-  const [visits, setVisits] = useState<VisitRow[]>([]);
-  const [stock, setStock] = useState<StockRow[]>([]);
-  const [totalCasesOrdered, setTotalCasesOrdered] = useState(0);
-  const [recentOrders, setRecentOrders] = useState<RecentOrder[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data, refetch, isPending } = useStoreDetail(routeStore, isManager, profile?.id);
+  const store = data?.store ?? routeStore;
+  const visits = data?.visits ?? [];
+  const stock = data?.stock ?? [];
+  const totalCasesOrdered = data?.totalCasesOrdered ?? 0;
+  const recentOrders = data?.recentOrders ?? [];
+  const repStatus = data?.repStatus ?? 'pending';
+  const dayEnded = data?.dayEnded ?? false;
   const [deleting, setDeleting] = useState(false);
-
-  const [repStatus, setRepStatus] = useState<RepStatus>('pending');
-  const [dayEnded, setDayEnded] = useState(false);
-
-  const today = new Date().toISOString().split('T')[0];
-
-  const load = useCallback(async () => {
-    setLoading(true);
-
-    const { data: fresh } = await supabase
-      .from('stores')
-      .select('*')
-      .eq('id', routeStore.id)
-      .maybeSingle();
-    if (fresh) setStore(fresh as StoreParam);
-
-    // Visits + notes (RLS-scoped).
-    const { data: visitRows } = await supabase
-      .from('store_visits')
-      .select('id, check_in_time, check_out_time, cases_sold, notes, users(name)')
-      .eq('store_id', routeStore.id)
-      .order('check_in_time', { ascending: false });
-    setVisits((visitRows as any as VisitRow[]) || []);
-
-    // Current stock = latest snapshot per active product for this store.
-    const [{ data: prods }, { data: snaps }] = await Promise.all([
-      supabase
-        .from('products')
-        .select('id, name, unit')
-        .eq('is_active', true)
-        .order('name'),
-      supabase
-        .from('store_stock_snapshots')
-        .select('product_id, cases, bottles, recorded_at, recorded_by')
-        .eq('store_id', routeStore.id)
-        .order('recorded_at', { ascending: false }),
-    ]);
-    const latest: Record<string, any> = {};
-    for (const s of (snaps as any[]) || []) {
-      if (!latest[s.product_id]) latest[s.product_id] = s;
-    }
-    // Resolve recorder names (managers see all; a rep sees only their own).
-    const recorderIds = [
-      ...new Set(Object.values(latest).map((s: any) => s.recorded_by)),
-    ];
-    const names: Record<string, string> = {};
-    if (recorderIds.length) {
-      const { data: users } = await supabase
-        .from('users')
-        .select('id, name')
-        .in('id', recorderIds);
-      for (const u of users || []) names[u.id] = u.name;
-    }
-    const stockRows: StockRow[] = ((prods as any[]) || [])
-      .filter((p) => latest[p.id])
-      .map((p) => {
-        const s = latest[p.id];
-        return {
-          product_id: p.id,
-          product_name: p.name,
-          unit: p.unit,
-          cases: s.cases,
-          bottles: s.bottles,
-          recorded_at: s.recorded_at,
-          recorded_by: s.recorded_by,
-          recorder_name: names[s.recorded_by] || null,
-        };
-      });
-    // Active products never recorded show as "never recorded" rows too.
-    const neverRecorded: StockRow[] = ((prods as any[]) || [])
-      .filter((p) => !latest[p.id])
-      .map((p) => ({
-        product_id: p.id,
-        product_name: p.name,
-        unit: p.unit,
-        cases: -1,
-        bottles: -1,
-        recorded_at: '',
-        recorded_by: '',
-        recorder_name: null,
-      }));
-    setStock([...stockRows, ...neverRecorded]);
-
-    // Orders at this store → total cases ordered (excl. cancelled) + recent list.
-    const { data: orderRows } = await supabase
-      .from('orders')
-      .select(
-        'id, status, created_at, order_items(cases, bottles, free_cases, free_bottles, price_per_case, price_per_bottle)'
-      )
-      .eq('store_id', routeStore.id)
-      .order('created_at', { ascending: false });
-    const orders = (orderRows as any[]) || [];
-    let ordered = 0;
-    for (const o of orders) {
-      if (o.status === 'cancelled') continue;
-      ordered += (o.order_items || []).reduce(
-        (s: number, it: any) => s + (it.cases || 0),
-        0
-      );
-    }
-    setTotalCasesOrdered(ordered);
-    setRecentOrders(
-      orders.slice(0, 5).map((o) => ({
-        id: o.id,
-        status: o.status,
-        created_at: o.created_at,
-        value: orderValue(o.order_items || []),
-      }))
-    );
-
-    if (!isManager && profile) {
-      const { data: todayVisit } = await supabase
-        .from('store_visits')
-        .select('check_out_time')
-        .eq('user_id', profile.id)
-        .eq('store_id', routeStore.id)
-        .gte('check_in_time', `${today}T00:00:00`)
-        .lt('check_in_time', `${today}T23:59:59`)
-        .order('check_in_time', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      setRepStatus(
-        todayVisit
-          ? todayVisit.check_out_time
-            ? 'visited'
-            : 'in-progress'
-          : 'pending'
-      );
-
-      const { data: att } = await supabase
-        .from('attendance')
-        .select('check_out_time')
-        .eq('user_id', profile.id)
-        .gte('check_in_time', `${today}T00:00:00`)
-        .lt('check_in_time', `${today}T23:59:59`)
-        .maybeSingle();
-      setDayEnded(!!att?.check_out_time);
-    }
-
-    setLoading(false);
-  }, [routeStore.id, isManager, profile, today]);
 
   useFocusEffect(
     useCallback(() => {
-      load();
-    }, [load])
+      refetch();
+    }, [refetch])
   );
 
   const callNumber = () => {
@@ -253,7 +61,7 @@ export default function StoreDetailScreen({
 
   const navigateToStore = () => {
     if (store.latitude == null || store.longitude == null) {
-      Alert.alert('Error', 'Store coordinates not available.');
+      Alert.alert('No location', 'Store coordinates aren’t available.');
       return;
     }
     const url = Platform.select({
@@ -264,361 +72,256 @@ export default function StoreDetailScreen({
   };
 
   const handleDelete = () => {
-    Alert.alert('Delete Store', `Delete "${store.name}"? This cannot be undone.`, [
+    Alert.alert('Delete store', `Delete "${store.name}"? This cannot be undone.`, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
         style: 'destructive',
         onPress: async () => {
           setDeleting(true);
-          const { error } = await supabase
-            .from('stores')
-            .delete()
-            .eq('id', store.id);
+          const { error } = await supabase.from('stores').delete().eq('id', store.id);
           setDeleting(false);
-          if (error) {
-            Alert.alert('Error', error.message);
-          } else {
-            navigation.goBack();
-          }
+          if (error) Alert.alert('Couldn’t delete', error.message);
+          else navigation.goBack();
         },
       },
     ]);
   };
 
+  let s = 0;
+
   return (
     <View style={styles.container}>
       <Header title={store.name} onBack={() => navigation.goBack()} />
+      <View style={styles.crumbs}>
+        <Breadcrumbs
+          items={[{ label: 'Stores', onPress: () => navigation.goBack() }, { label: store.name }]}
+        />
+      </View>
 
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
-        {/* Current Stock */}
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>CURRENT STOCK</Text>
-          {loading ? (
-            <ActivityIndicator
-              size="small"
-              color={Colors.accent}
-              style={{ marginTop: 12 }}
-            />
-          ) : stock.length === 0 ? (
-            <Card>
-              <Text style={styles.emptyText}>No products in the catalog.</Text>
-            </Card>
-          ) : (
-            <Card>
-              {stock.map((s, i) => (
-                <View
-                  key={s.product_id}
-                  style={[styles.stockRow, i > 0 && styles.stockRowDivider]}
-                >
-                  <Text style={styles.stockName}>{s.product_name}</Text>
-                  {s.cases < 0 ? (
-                    <Text style={styles.stockNever}>Never recorded</Text>
-                  ) : (
-                    <>
-                      <Text style={styles.stockQty}>
-                        {s.cases} cs / {s.bottles} btl
+      {isPending && !data ? (
+        <StoreDetailSkeleton />
+      ) : (
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={[
+            styles.content,
+            { paddingBottom: Layout.tabBar + insets.bottom + Space.md },
+          ]}
+        >
+          {/* Current stock */}
+          <MotiView {...entrance(s++, reduce)}>
+            <BentoTile>
+              <Text style={styles.sectionLabel}>Current stock</Text>
+              {stock.length === 0 ? (
+                <Text style={styles.mutedNote}>No products in the catalog.</Text>
+              ) : (
+                stock.map((row: StockRow, i: number) => (
+                  <View key={row.product_id} style={[styles.stockRow, i > 0 && styles.divider]}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[Type.bodyMed, { color: Colors.text }]}>{row.product_name}</Text>
+                      {row.cases < 0 ? (
+                        <Text style={styles.stockNever}>Never recorded</Text>
+                      ) : (
+                        <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]}>
+                          {fmtDate(row.recorded_at)}
+                          {row.recorder_name ? ` · ${row.recorder_name}` : ''}
+                        </Text>
+                      )}
+                    </View>
+                    {row.cases >= 0 && (
+                      <Text style={[Type.bodyMed, tabularNums, { color: Colors.text }]}>
+                        {row.cases} cs / {row.bottles} btl
                       </Text>
-                      <Text style={styles.stockMeta}>
-                        {fmtDate(s.recorded_at)}
-                        {s.recorder_name ? ` · ${s.recorder_name}` : ''}
-                      </Text>
-                    </>
-                  )}
-                </View>
-              ))}
-            </Card>
-          )}
-        </View>
+                    )}
+                  </View>
+                ))
+              )}
+            </BentoTile>
+          </MotiView>
 
-        {/* Total cases ordered (secondary stat) */}
-        <Card style={styles.orderedCard}>
-          <Text style={styles.orderedValue}>{totalCasesOrdered}</Text>
-          <Text style={styles.orderedLabel}>TOTAL CASES ORDERED (ALL-TIME)</Text>
-        </Card>
+          {/* Cases ordered · visits */}
+          <MotiView {...entrance(s++, reduce)} style={styles.row}>
+            <BentoTile style={styles.flex}>
+              <Metric label="Cases ordered · all-time" value={totalCasesOrdered} />
+            </BentoTile>
+            <BentoTile style={styles.flex}>
+              <Metric label="Visits" value={visits.length} />
+            </BentoTile>
+          </MotiView>
 
-        {/* Store info — only non-null fields */}
-        <View style={styles.infoBlock}>
-          {store.address ? (
-            <View style={styles.infoRow}>
-              <Ionicons name="location-outline" size={18} color={Colors.muted} style={styles.infoIcon} />
-              <Text style={styles.infoText}>{store.address}</Text>
-            </View>
-          ) : null}
-          {store.state ? (
-            <View style={styles.infoRow}>
-              <Ionicons name="map-outline" size={18} color={Colors.muted} style={styles.infoIcon} />
-              <Text style={styles.infoText}>{store.state}</Text>
-            </View>
-          ) : null}
-          {store.license_number ? (
-            <View style={styles.infoRow}>
-              <Ionicons name="document-text-outline" size={18} color={Colors.muted} style={styles.infoIcon} />
-              <Text style={styles.infoText}>License: {store.license_number}</Text>
-            </View>
-          ) : null}
-          {store.contact_number ? (
-            <TouchableOpacity style={styles.infoRow} onPress={callNumber}>
-              <Ionicons name="call" size={18} color={Colors.accent} style={styles.infoIcon} />
-              <Text style={[styles.infoText, styles.infoLink]}>{store.contact_number}</Text>
-            </TouchableOpacity>
-          ) : null}
-          {store.contact_person ? (
-            <View style={styles.infoRow}>
-              <Ionicons name="person-outline" size={18} color={Colors.muted} style={styles.infoIcon} />
-              <Text style={styles.infoText}>Store Manager: {store.contact_person}</Text>
-            </View>
-          ) : null}
-          {store.owner_name ? (
-            <View style={styles.infoRow}>
-              <Ionicons name="business-outline" size={18} color={Colors.muted} style={styles.infoIcon} />
-              <Text style={styles.infoText}>Owner: {store.owner_name}</Text>
-            </View>
-          ) : null}
-        </View>
-
-        {/* Rep actions */}
-        {!isManager && (
-          <View style={styles.actions}>
-            {store.latitude != null && store.longitude != null && (
-              <Button
-                title="Navigate to Store"
-                onPress={navigateToStore}
-                variant="secondary"
-                style={styles.actionBtn}
-              />
-            )}
-            {dayEnded ? (
-              <View style={styles.repStatusBadge}>
-                <Text style={styles.repStatusText}>Day ended</Text>
-              </View>
-            ) : repStatus === 'visited' ? (
-              <View style={styles.repStatusBadge}>
-                <Text style={styles.repStatusText}>✓ Visit completed</Text>
-              </View>
-            ) : (
-              <Button
-                title={repStatus === 'in-progress' ? 'Continue Visit' : 'Check In'}
-                onPress={() => navigation.navigate('StoreVisit', { store })}
-                style={styles.actionBtn}
-              />
-            )}
-          </View>
-        )}
-
-        {/* Recent orders (managers) */}
-        {isManager && recentOrders.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionLabel}>RECENT ORDERS</Text>
-            {recentOrders.map((o) => (
-              <TouchableOpacity
-                key={o.id}
-                onPress={() => navigation.navigate('OrderDetail', { orderId: o.id })}
-              >
-                <Card style={styles.orderCard}>
-                  <Text
-                    style={[styles.orderBadge, { backgroundColor: orderStatusColor(o.status) }]}
-                  >
-                    {orderStatusLabel(o.status)}
-                  </Text>
-                  <Text style={styles.orderMeta}>
-                    {fmtDate(o.created_at)}
-                    {o.value > 0 ? ` · ${fmtOrderPrice(o.value)}` : ''}
-                  </Text>
-                </Card>
-              </TouchableOpacity>
-            ))}
-          </View>
-        )}
-
-        {/* Visits & Notes */}
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>VISITS & NOTES</Text>
-          {loading ? (
-            <ActivityIndicator size="large" color={Colors.accent} style={{ marginTop: 24 }} />
-          ) : visits.length === 0 ? (
-            <Card>
-              <Text style={styles.emptyText}>No visits recorded yet.</Text>
-            </Card>
-          ) : (
-            visits.map((v) => (
-              <Card key={v.id} style={styles.visitCard}>
-                <View style={styles.visitHeaderRow}>
-                  <Text style={styles.visitRepName}>{v.users?.name || 'Unknown rep'}</Text>
-                  <Text style={styles.visitDate}>{fmtDate(v.check_in_time)}</Text>
-                </View>
-                {v.cases_sold ? (
-                  <Text style={styles.visitCases}>{v.cases_sold} cases sold (legacy)</Text>
+          {/* Store info (non-null fields) */}
+          {(store.address || store.state || store.license_number || store.contact_number ||
+            store.contact_person || store.owner_name) && (
+            <MotiView {...entrance(s++, reduce)}>
+              <BentoTile>
+                {store.address ? <InfoRow icon="location-outline" text={store.address} /> : null}
+                {store.state ? <InfoRow icon="map-outline" text={store.state} /> : null}
+                {store.license_number ? (
+                  <InfoRow icon="document-text-outline" text={`License: ${store.license_number}`} />
                 ) : null}
-                {v.notes ? (
-                  <Text style={styles.visitNotes}>{v.notes}</Text>
-                ) : (
-                  <Text style={styles.visitNoNotes}>No notes</Text>
-                )}
-              </Card>
-            ))
+                {store.contact_number ? (
+                  <InfoRow icon="call" text={store.contact_number} link onPress={callNumber} />
+                ) : null}
+                {store.contact_person ? (
+                  <InfoRow icon="person-outline" text={`Store manager: ${store.contact_person}`} />
+                ) : null}
+                {store.owner_name ? (
+                  <InfoRow icon="business-outline" text={`Owner: ${store.owner_name}`} />
+                ) : null}
+              </BentoTile>
+            </MotiView>
           )}
-        </View>
 
-        {/* Manager actions */}
-        {isManager && (
-          <View style={styles.managerActions}>
-            <Button
-              title="Edit Store"
-              onPress={() => navigation.navigate('StoreForm', { store })}
-              variant="secondary"
-              style={styles.managerBtn}
-            />
-            <Button
-              title="Delete Store"
-              onPress={handleDelete}
-              variant="danger"
-              loading={deleting}
-              style={styles.managerBtn}
-            />
-          </View>
-        )}
-      </ScrollView>
+          {/* Rep actions — Check-in is the rep's one spotlight */}
+          {!isManager && (
+            <MotiView {...entrance(s++, reduce)} style={{ gap: Space.md }}>
+              {store.latitude != null && store.longitude != null && (
+                <Button title="Navigate to store" onPress={navigateToStore} variant="secondary" />
+              )}
+              {dayEnded ? (
+                <BentoTile>
+                  <Text style={styles.repStatusText}>Day ended</Text>
+                </BentoTile>
+              ) : repStatus === 'visited' ? (
+                <BentoTile>
+                  <Text style={styles.repStatusText}>Visit completed</Text>
+                </BentoTile>
+              ) : (
+                <Button
+                  title={repStatus === 'in-progress' ? 'Continue visit' : 'Check in'}
+                  spotlight
+                  onPress={() => navigation.navigate('StoreVisit', { store })}
+                />
+              )}
+            </MotiView>
+          )}
+
+          {/* Recent orders (managers) */}
+          {isManager && recentOrders.length > 0 && (
+            <MotiView {...entrance(s++, reduce)}>
+              <Text style={styles.sectionTitle}>Recent orders</Text>
+              <BentoTile>
+                {recentOrders.map((o, i) => (
+                  <Pressable
+                    key={o.id}
+                    onPress={() => navigation.navigate('OrderDetail', { orderId: o.id })}
+                    style={[styles.orderRow, i > 0 && styles.divider]}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Order ${fmtDate(o.created_at)}`}
+                  >
+                    <StatusPill status={o.status} />
+                    <Text style={[Type.caption, { color: Colors.textMuted, flex: 1, textAlign: 'right' }]}>
+                      {fmtDate(o.created_at)}
+                      {o.value > 0 ? ` · ${fmtOrderPrice(o.value)}` : ''}
+                    </Text>
+                    <Ionicons name="chevron-forward" size={14} color={Colors.textMuted} />
+                  </Pressable>
+                ))}
+              </BentoTile>
+            </MotiView>
+          )}
+
+          {/* Visits & notes */}
+          <MotiView {...entrance(s++, reduce)}>
+            <Text style={styles.sectionTitle}>Visits & notes</Text>
+            {visits.length === 0 ? (
+              <BentoTile>
+                <Text style={styles.mutedNote}>No visits recorded yet.</Text>
+              </BentoTile>
+            ) : (
+              visits.map((v) => (
+                <BentoTile key={v.id} style={{ marginBottom: Space.md }}>
+                  <View style={styles.rowBetween}>
+                    <Text style={[Type.bodyMed, { color: Colors.text }]}>
+                      {v.users?.name || 'Unknown rep'}
+                    </Text>
+                    <Text style={[Type.caption, { color: Colors.textMuted }]}>
+                      {fmtDate(v.check_in_time)}
+                    </Text>
+                  </View>
+                  {v.cases_sold ? (
+                    <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 4 }]}>
+                      {v.cases_sold} cases sold (legacy)
+                    </Text>
+                  ) : null}
+                  {v.notes ? (
+                    <Text style={[Type.body, { color: Colors.text, marginTop: Space.sm }]}>{v.notes}</Text>
+                  ) : (
+                    <Text style={[Type.caption, { color: Colors.textMuted, marginTop: Space.sm }]}>No notes</Text>
+                  )}
+                </BentoTile>
+              ))
+            )}
+          </MotiView>
+
+          {/* Manager actions */}
+          {isManager && (
+            <MotiView {...entrance(s++, reduce)} style={styles.managerActions}>
+              <Button
+                title="Edit store"
+                onPress={() => navigation.navigate('StoreForm', { store })}
+                variant="secondary"
+                style={styles.flex}
+              />
+              <Button
+                title="Delete store"
+                onPress={handleDelete}
+                variant="danger"
+                loading={deleting}
+                style={styles.flex}
+              />
+            </MotiView>
+          )}
+        </ScrollView>
+      )}
     </View>
+  );
+}
+
+function InfoRow({
+  icon,
+  text,
+  link,
+  onPress,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  text: string;
+  link?: boolean;
+  onPress?: () => void;
+}) {
+  const body = (
+    <View style={styles.infoRow}>
+      <Ionicons name={icon} size={18} color={link ? Colors.accent : Colors.textMuted} style={styles.infoIcon} />
+      <Text style={[Type.body, { flex: 1, color: link ? Colors.accent : Colors.text }]}>{text}</Text>
+    </View>
+  );
+  return link && onPress ? (
+    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={text}>
+      {body}
+    </Pressable>
+  ) : (
+    body
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
+  crumbs: { paddingHorizontal: Layout.screenPad, paddingBottom: Space.sm },
   scroll: { flex: 1 },
-  content: { padding: 24, paddingBottom: 48 },
-  section: { marginBottom: 20 },
-  sectionLabel: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginBottom: 8,
-  },
-  // Current stock
-  stockRow: { paddingVertical: 8 },
-  stockRowDivider: { borderTopWidth: 1, borderTopColor: Colors.border },
-  stockName: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.cardTitle,
-    color: Colors.text,
-  },
-  stockQty: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.text,
-    marginTop: 2,
-  },
-  stockMeta: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 12,
-    color: Colors.muted,
-    marginTop: 2,
-  },
-  stockNever: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 13,
-    color: Colors.muted,
-    fontStyle: 'italic',
-    marginTop: 2,
-  },
-  // Ordered stat
-  orderedCard: { alignItems: 'center', paddingVertical: 16, marginBottom: 20 },
-  orderedValue: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 32,
-    fontWeight: '700',
-    color: Colors.accent,
-  },
-  orderedLabel: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginTop: 4,
-  },
-  // Info block
-  infoBlock: { marginBottom: 20 },
-  infoRow: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: 12 },
-  infoIcon: { marginRight: 10, marginTop: 1 },
-  infoText: {
-    flex: 1,
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.text,
-  },
-  infoLink: { color: Colors.accent, fontWeight: '600' },
-  // Rep actions
-  actions: { marginBottom: 20 },
-  actionBtn: { marginBottom: 12 },
-  repStatusBadge: { paddingVertical: 16, alignItems: 'center' },
-  repStatusText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.success,
-    fontWeight: '600',
-  },
-  // Recent orders
-  orderCard: { marginBottom: 10 },
-  orderBadge: {
-    alignSelf: 'flex-start',
-    fontFamily: Typography.fontFamily,
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.5,
-    color: Colors.white,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 10,
-    overflow: 'hidden',
-  },
-  orderMeta: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 13,
-    color: Colors.muted,
-    marginTop: 6,
-  },
-  // Visits
-  visitCard: { marginBottom: 12 },
-  visitHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  visitRepName: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.cardTitle,
-    color: Colors.text,
-  },
-  visitDate: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 13,
-    color: Colors.muted,
-  },
-  visitCases: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 13,
-    color: Colors.muted,
-    marginTop: 4,
-  },
-  visitNotes: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.text,
-    marginTop: 8,
-    lineHeight: 22,
-  },
-  visitNoNotes: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 13,
-    color: Colors.muted,
-    fontStyle: 'italic',
-    marginTop: 8,
-  },
-  emptyText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-  },
-  // Manager actions
-  managerActions: { flexDirection: 'row', gap: 12, marginTop: 8 },
-  managerBtn: { flex: 1 },
+  content: { padding: Layout.screenPad, gap: Space.md },
+  sectionLabel: { ...Type.label, color: Colors.textMuted, marginBottom: Space.sm },
+  sectionTitle: { ...Type.section, color: Colors.text, marginBottom: Space.sm },
+  mutedNote: { ...Type.body, color: Colors.textMuted },
+  stockRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: Space.sm, gap: Space.md },
+  divider: { borderTopWidth: 1, borderTopColor: Colors.border },
+  stockNever: { ...Type.caption, color: Colors.textMuted, fontStyle: 'italic', marginTop: 2 },
+  row: { flexDirection: 'row', gap: Layout.gridGap },
+  flex: { flex: 1 },
+  infoRow: { flexDirection: 'row', alignItems: 'flex-start', paddingVertical: Space.xs, minHeight: 28 },
+  infoIcon: { marginRight: Space.sm, marginTop: 2 },
+  repStatusText: { ...Type.bodyMed, color: Colors.success, textAlign: 'center' },
+  orderRow: { flexDirection: 'row', alignItems: 'center', gap: Space.sm, paddingVertical: Space.sm, minHeight: Layout.tap },
+  rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  managerActions: { flexDirection: 'row', gap: Space.md },
 });

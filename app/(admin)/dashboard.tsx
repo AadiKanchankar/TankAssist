@@ -5,24 +5,27 @@ import {
   StyleSheet,
   ScrollView,
   RefreshControl,
-  TouchableOpacity,
   Modal,
   FlatList,
+  Pressable,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { Colors, Typography } from '../../constants/colors';
-import Card from '../../components/Card';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { MotiView } from 'moti';
+import { useReducedMotion } from 'react-native-reanimated';
+import { Ionicons } from '@expo/vector-icons';
+import { Colors, Type, Space, Radius, Layout, tabularNums } from '../../constants/colors';
+import { entrance } from '../../constants/motion';
 import Header from '../../components/Header';
+import BentoTile from '../../components/BentoTile';
+import Metric from '../../components/Metric';
+import { ManagerDashboardSkeleton } from '../../components/skeleton/ManagerDashboardSkeleton';
+import ErrorState from '../../components/ErrorState';
+import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
-
-interface RepSummary {
-  id: string;
-  name: string;
-  visitCount: number;
-  checkedIn: boolean;
-  punchedOut: boolean;
-}
+import { useManagerDashboard, RepSummary } from '../../hooks/useManagerDashboard';
+import { OrderFilter } from '../../lib/orders';
 
 interface RepVisit {
   id: string;
@@ -33,85 +36,41 @@ interface RepVisit {
   duration_minutes: number | null;
 }
 
-export default function AdminDashboard() {
-  const [presentCount, setPresentCount] = useState(0);
-  const [absentCount, setAbsentCount] = useState(0);
-  const [totalAssigned, setTotalAssigned] = useState(0);
-  const [totalVisited, setTotalVisited] = useState(0);
-  const [reps, setReps] = useState<RepSummary[]>([]);
+// Open-orders glance → each taps through to the pre-filtered Orders tab.
+// Colours match the management pipeline donut so both admin dashboards read alike.
+const OPEN_BUCKETS: { key: OrderFilter; label: string; color: string }[] = [
+  { key: 'to_process', label: 'To process', color: Colors.accent },
+  { key: 'dispatched', label: 'Dispatched', color: Colors.warning },
+  { key: 'in_transit', label: 'In transit', color: Colors.textSecondary },
+];
+
+export default function AdminDashboard({ navigation }: { navigation: any }) {
+  const reduce = useReducedMotion();
+  const insets = useSafeAreaInsets();
+  const { profile } = useAuthStore();
+  const { data, refetch, isPending, isError } = useManagerDashboard();
+  const presentCount = data?.presentCount ?? 0;
+  const absentCount = data?.absentCount ?? 0;
+  const totalAssigned = data?.totalAssigned ?? 0;
+  const totalVisited = data?.totalVisited ?? 0;
+  const reps = data?.reps ?? [];
+  const pipeline = data?.pipeline;
+
   const [selectedRep, setSelectedRep] = useState<RepSummary | null>(null);
   const [repVisits, setRepVisits] = useState<RepVisit[]>([]);
 
   const today = new Date().toISOString().split('T')[0];
 
-  const loadData = useCallback(async () => {
-    // Get all reps
-    const { data: allReps } = await supabase
-      .from('users')
-      .select('id, name')
-      .eq('role', 'rep');
-
-    const totalReps = allReps?.length || 0;
-
-    // Get today's attendance
-    const { data: attendanceRows } = await supabase
-      .from('attendance')
-      .select('user_id, check_out_time')
-      .gte('check_in_time', `${today}T00:00:00`)
-      .lt('check_in_time', `${today}T23:59:59`);
-
-    const checkedInIds = new Set((attendanceRows || []).map((a) => a.user_id));
-    const punchedOutIds = new Set(
-      (attendanceRows || []).filter((a) => a.check_out_time).map((a) => a.user_id)
-    );
-
-    setPresentCount(checkedInIds.size);
-    setAbsentCount(totalReps - checkedInIds.size);
-
-    // Store coverage
-    const { data: assignments } = await supabase
-      .from('store_assignments')
-      .select('store_id')
-      .eq('assigned_date', today);
-    const assignedStoreIds = new Set((assignments || []).map((a) => a.store_id));
-    setTotalAssigned(assignedStoreIds.size);
-
-    const { data: visits } = await supabase
-      .from('store_visits')
-      .select('store_id, user_id, check_out_time')
-      .gte('check_in_time', `${today}T00:00:00`)
-      .lt('check_in_time', `${today}T23:59:59`);
-
-    const visitedStoreIds = new Set(
-      (visits || []).filter((v) => v.check_out_time).map((v) => v.store_id)
-    );
-    setTotalVisited(visitedStoreIds.size);
-
-    // Rep summaries
-    const repSummaries: RepSummary[] = (allReps || []).map((r) => {
-      const repVisits = (visits || []).filter(
-        (v) => v.user_id === r.id && v.check_out_time
-      );
-      return {
-        id: r.id,
-        name: r.name,
-        visitCount: repVisits.length,
-        checkedIn: checkedInIds.has(r.id),
-        punchedOut: punchedOutIds.has(r.id),
-      };
-    });
-    setReps(repSummaries);
-  }, [today]);
-
-  // Refetch data every time the screen gains focus (tab switch, modal close)
+  // Cache-backed focus refresh (Phase B); fetching lives in useManagerDashboard.
   useFocusEffect(
     useCallback(() => {
-      loadData();
-    }, [loadData])
+      refetch();
+    }, [refetch])
   );
 
-  const { refreshing, onRefresh } = usePullToRefresh(loadData);
+  const { refreshing, onRefresh } = usePullToRefresh(refetch);
 
+  // Drill-down: a rep's visits today (unchanged logic).
   const loadRepVisits = async (repId: string) => {
     const { data } = await supabase
       .from('store_visits')
@@ -133,104 +92,179 @@ export default function AdminDashboard() {
     );
   };
 
+  const getGreeting = () => {
+    const hour = new Date().getHours();
+    if (hour < 12) return 'Good morning';
+    if (hour < 17) return 'Good afternoon';
+    return 'Good evening';
+  };
+
   const formattedDate = new Date().toLocaleDateString('en-US', {
     weekday: 'long',
     month: 'long',
     day: 'numeric',
   });
 
+  const totalReps = presentCount + absentCount;
+  const lowCoverage = totalReps > 0 && presentCount / totalReps < 0.5;
+  const coveragePct = totalAssigned > 0 ? Math.round((totalVisited / totalAssigned) * 100) : 0;
+  const goToOrders = (filter: OrderFilter) =>
+    navigation.navigate('Orders', { screen: 'OrdersList', params: { filter } });
+
+  if (isPending && !data) {
+    return (
+      <View style={[styles.screen, { paddingTop: insets.top }]}>
+        <ManagerDashboardSkeleton />
+      </View>
+    );
+  }
+  if (isError && !data) {
+    return (
+      <View style={[styles.screen, { paddingTop: insets.top }]}>
+        <ErrorState onRetry={refetch} />
+      </View>
+    );
+  }
+
+  let section = 0;
+
   return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={styles.content}
-      refreshControl={
-        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-      }
-    >
-      <Text style={styles.title}>Dashboard</Text>
-      <Text style={styles.date}>{formattedDate}</Text>
-
-      {/* Attendance */}
-      <Card>
-        <Text style={styles.cardLabel}>ATTENDANCE</Text>
-        <View style={styles.statsRow}>
-          <View style={styles.stat}>
-            <Text style={[styles.statValue, { color: Colors.success }]}>
-              {presentCount}
+    <View style={styles.screen}>
+      <ScrollView
+        contentContainerStyle={[
+          styles.content,
+          {
+            paddingTop: insets.top + Space.md,
+            paddingBottom: Layout.tabBar + insets.bottom + Space.md,
+          },
+        ]}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+      >
+        {/* Greeting + brand mark */}
+        <View style={styles.greetRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={[Type.title, { color: Colors.text }]}>
+              {getGreeting()}, {profile?.name || 'Manager'}
             </Text>
-            <Text style={styles.statLabel}>PRESENT</Text>
-          </View>
-          <View style={styles.stat}>
-            <Text style={[styles.statValue, { color: Colors.alert }]}>
-              {absentCount}
+            <Text style={[Type.body, { color: Colors.textSecondary, marginTop: 2 }]}>
+              {formattedDate}
             </Text>
-            <Text style={styles.statLabel}>ABSENT</Text>
           </View>
+          <Text style={styles.brandMark}>Tank No. 90</Text>
         </View>
-      </Card>
 
-      {/* Store Coverage */}
-      <Card>
-        <Text style={styles.cardLabel}>STORE COVERAGE</Text>
-        <View style={styles.statsRow}>
-          <View style={styles.stat}>
-            <Text style={styles.statValue}>{totalAssigned}</Text>
-            <Text style={styles.statLabel}>ASSIGNED</Text>
-          </View>
-          <View style={styles.stat}>
-            <Text style={[styles.statValue, { color: Colors.success }]}>
-              {totalVisited}
-            </Text>
-            <Text style={styles.statLabel}>VISITED</Text>
-          </View>
-          <View style={styles.stat}>
-            <Text style={[styles.statValue, { color: Colors.alert }]}>
-              {totalAssigned - totalVisited}
-            </Text>
-            <Text style={styles.statLabel}>MISSED</Text>
-          </View>
-        </View>
-      </Card>
-
-      {/* Reps List */}
-      <Text style={styles.sectionTitle}>Reps Today</Text>
-      {reps.map((rep) => (
-        <TouchableOpacity
-          key={rep.id}
-          onPress={async () => {
-            setSelectedRep(rep);
-            await loadRepVisits(rep.id);
-          }}
-        >
-          <Card>
-            <View style={styles.repRow}>
-              <View
+        {/* Hero — reps checked in (spotlight when under half) */}
+        <MotiView {...entrance(section++, reduce)}>
+          <BentoTile variant="dark" style={{ marginTop: Space.md }}>
+            <Text style={[Type.label, styles.onDarkMuted]}>Reps checked in today</Text>
+            <View style={styles.heroRatioRow}>
+              <Text
                 style={[
-                  styles.statusDot,
-                  {
-                    backgroundColor: rep.checkedIn
-                      ? Colors.success
-                      : Colors.muted,
-                  },
+                  Type.display,
+                  tabularNums,
+                  { color: lowCoverage ? Colors.spotlight : Colors.textOnDark },
                 ]}
-              />
-              <View style={styles.repInfo}>
-                <Text style={styles.repName}>{rep.name}</Text>
-                <Text style={styles.repMeta}>
-                  {rep.checkedIn
-                    ? rep.punchedOut
-                      ? 'Punched Out'
-                      : 'Active'
-                    : 'Not checked in'}
-                </Text>
-              </View>
-              <Text style={styles.visitCount}>{rep.visitCount} visits</Text>
+              >
+                {presentCount}
+              </Text>
+              <Text style={[Type.section, styles.onDarkMuted, { marginBottom: 2 }]}>
+                {' '}
+                / {totalReps}
+              </Text>
             </View>
-          </Card>
-        </TouchableOpacity>
-      ))}
+            <Text style={[Type.body, styles.onDarkMuted]}>
+              {absentCount} not checked in
+            </Text>
+          </BentoTile>
+        </MotiView>
 
-      {/* Rep Visits Modal */}
+        {/* Bento row: visits today · coverage */}
+        <MotiView {...entrance(section++, reduce)} style={styles.bentoRow}>
+          <BentoTile style={styles.flex}>
+            <Metric label="Visits today" value={totalVisited} />
+          </BentoTile>
+          <BentoTile style={styles.flex}>
+            <Metric label="Store coverage" value={`${coveragePct}%`} />
+          </BentoTile>
+        </MotiView>
+
+        {/* Open orders glance */}
+        <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
+          <View style={styles.sectionHeader}>
+            <Text style={[Type.section, { color: Colors.text }]}>Open orders</Text>
+            <Pressable
+              onPress={() => goToOrders('to_process')}
+              hitSlop={8}
+              style={styles.seeAll}
+              accessibilityRole="button"
+              accessibilityLabel="Open the orders tab"
+            >
+              <Text style={[Type.label, { color: Colors.accent }]}>View all</Text>
+              <Ionicons name="chevron-forward" size={14} color={Colors.accent} />
+            </Pressable>
+          </View>
+          <View style={styles.bucketRow}>
+            {OPEN_BUCKETS.map((b) => (
+              <Pressable
+                key={b.key}
+                onPress={() => goToOrders(b.key)}
+                style={styles.bucket}
+                accessibilityRole="button"
+                accessibilityLabel={`${pipeline?.[b.key] ?? 0} orders ${b.label}`}
+              >
+                <View style={[styles.dot, { backgroundColor: b.color }]} />
+                <Text style={[Type.metric, tabularNums, { color: Colors.text }]}>
+                  {pipeline?.[b.key] ?? 0}
+                </Text>
+                <Text style={[Type.caption, { color: Colors.textMuted }]}>{b.label}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </MotiView>
+
+        {/* Team today */}
+        <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
+          <Text style={[Type.section, styles.sectionTitle]}>Your team today</Text>
+          <BentoTile>
+            {reps.length === 0 ? (
+              <Text style={[Type.body, { color: Colors.textMuted }]}>No reps yet.</Text>
+            ) : (
+              reps.map((rep, i) => (
+                <Pressable
+                  key={rep.id}
+                  onPress={async () => {
+                    setSelectedRep(rep);
+                    await loadRepVisits(rep.id);
+                  }}
+                  style={[styles.repRow, i > 0 && styles.repRowDivider]}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${rep.name}, ${rep.visitCount} visits`}
+                >
+                  <View
+                    style={[
+                      styles.dot,
+                      { backgroundColor: rep.checkedIn ? Colors.success : Colors.borderStrong },
+                    ]}
+                  />
+                  <View style={{ flex: 1 }}>
+                    <Text style={[Type.bodyMed, { color: Colors.text }]} numberOfLines={1}>
+                      {rep.name}
+                    </Text>
+                    <Text style={[Type.caption, { color: Colors.textMuted }]}>
+                      {rep.checkedIn ? (rep.punchedOut ? 'Punched out' : 'Active') : 'Not checked in'}
+                    </Text>
+                  </View>
+                  <Text style={[Type.label, { color: Colors.accent }]}>
+                    {rep.visitCount} visits
+                  </Text>
+                </Pressable>
+              ))
+            )}
+          </BentoTile>
+        </MotiView>
+      </ScrollView>
+
+      {/* Rep visits drill-down (unchanged logic) */}
       <Modal
         visible={!!selectedRep}
         animationType="slide"
@@ -239,137 +273,76 @@ export default function AdminDashboard() {
       >
         {selectedRep && (
           <View style={styles.modalContainer}>
-            <Header
-              title={`${selectedRep.name}'s Visits`}
-              onBack={() => setSelectedRep(null)}
-            />
+            <Header title={`${selectedRep.name}’s visits`} onBack={() => setSelectedRep(null)} />
             <FlatList
               data={repVisits}
               keyExtractor={(item) => item.id}
               contentContainerStyle={styles.modalList}
               renderItem={({ item }) => (
-                <Card>
-                  <Text style={styles.visitStoreName}>{item.store_name}</Text>
-                  <Text style={styles.visitTime}>
+                <BentoTile style={{ marginBottom: Space.md }}>
+                  <Text style={[Type.bodyMed, { color: Colors.text }]}>{item.store_name}</Text>
+                  <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]}>
                     {new Date(item.check_in_time).toLocaleTimeString('en-US', {
                       hour: '2-digit',
                       minute: '2-digit',
                     })}
                     {item.check_out_time
-                      ? ` → ${new Date(
-                          item.check_out_time
-                        ).toLocaleTimeString('en-US', {
+                      ? ` → ${new Date(item.check_out_time).toLocaleTimeString('en-US', {
                           hour: '2-digit',
                           minute: '2-digit',
                         })}`
                       : ' → In progress'}
                   </Text>
-                  <Text style={styles.visitCases}>
-                    {item.cases_sold} cases • {item.duration_minutes || '—'} min
+                  <Text style={[Type.label, { color: Colors.accent, marginTop: Space.xs }]}>
+                    {item.cases_sold} cases · {item.duration_minutes || '—'} min
                   </Text>
-                </Card>
+                </BentoTile>
               )}
               ListEmptyComponent={
-                <Card>
-                  <Text style={styles.emptyText}>No visits today.</Text>
-                </Card>
+                <BentoTile>
+                  <Text style={[Type.body, { color: Colors.textMuted }]}>No visits today.</Text>
+                </BentoTile>
               }
             />
           </View>
         )}
       </Modal>
-
-      <View style={{ height: 40 }} />
-    </ScrollView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.background },
-  content: { padding: 24, paddingTop: 60 },
-  title: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.pageTitle,
-    color: Colors.text,
+  screen: { flex: 1, backgroundColor: Colors.background },
+  content: { padding: Layout.screenPad },
+  greetRow: { flexDirection: 'row', alignItems: 'flex-start' },
+  brandMark: { ...Type.label, color: Colors.accent },
+  onDarkMuted: { color: Colors.textOnDark, opacity: 0.7 },
+  heroRatioRow: { flexDirection: 'row', alignItems: 'flex-end', marginTop: Space.xs },
+  dot: { width: 10, height: 10, borderRadius: 5 },
+  bentoRow: { flexDirection: 'row', gap: Layout.gridGap, marginTop: Space.md },
+  flex: { flex: 1 },
+  sectionTitle: { color: Colors.text, marginBottom: Space.sm },
+  sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Space.sm,
   },
-  date: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-    marginTop: 4,
-    marginBottom: 24,
+  seeAll: { flexDirection: 'row', alignItems: 'center', gap: 2, minHeight: Layout.tap, paddingLeft: Space.sm },
+  bucketRow: { flexDirection: 'row', gap: Layout.gridGap },
+  bucket: {
+    flex: 1,
+    backgroundColor: Colors.surface,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: Radius.card,
+    paddingVertical: Space.md,
+    paddingHorizontal: Space.md,
+    gap: 2,
   },
-  cardLabel: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginBottom: 12,
-  },
-  statsRow: { flexDirection: 'row', gap: 32 },
-  stat: {},
-  statValue: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 28,
-    fontWeight: '700',
-    color: Colors.text,
-  },
-  statLabel: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginTop: 2,
-  },
-  sectionTitle: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.sectionTitle,
-    color: Colors.text,
-    marginTop: 8,
-    marginBottom: 16,
-  },
-  repRow: { flexDirection: 'row', alignItems: 'center' },
-  statusDot: { width: 10, height: 10, borderRadius: 5, marginRight: 12 },
-  repInfo: { flex: 1 },
-  repName: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.cardTitle,
-    color: Colors.text,
-  },
-  repMeta: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 14,
-    color: Colors.muted,
-    marginTop: 2,
-  },
-  visitCount: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.accent,
-    fontWeight: '600',
-  },
+  repRow: { flexDirection: 'row', alignItems: 'center', gap: Space.md, paddingVertical: Space.sm, minHeight: Layout.tap },
+  repRowDivider: { borderTopWidth: 1, borderTopColor: Colors.border },
   // Modal
   modalContainer: { flex: 1, backgroundColor: Colors.background },
-  modalList: { padding: 24 },
-  visitStoreName: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.cardTitle,
-    color: Colors.text,
-    marginBottom: 4,
-  },
-  visitTime: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 14,
-    color: Colors.muted,
-  },
-  visitCases: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 14,
-    color: Colors.accent,
-    fontWeight: '600',
-    marginTop: 4,
-  },
-  emptyText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-  },
+  modalList: { padding: Layout.screenPad },
 });

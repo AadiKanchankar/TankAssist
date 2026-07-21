@@ -1,470 +1,324 @@
-import React, { useState, useCallback } from 'react';
+import React, { useCallback } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
   RefreshControl,
-  TouchableOpacity,
+  Pressable,
+  Dimensions,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { Colors, Typography } from '../../constants/colors';
-import Card from '../../components/Card';
-import { supabase } from '../../lib/supabase';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { MotiView } from 'moti';
+import { useReducedMotion } from 'react-native-reanimated';
+import { Ionicons } from '@expo/vector-icons';
+import {
+  Colors,
+  Type,
+  Space,
+  Radius,
+  Layout,
+  tabularNums,
+} from '../../constants/colors';
+import { entrance } from '../../constants/motion';
+import BentoTile from '../../components/BentoTile';
+import Donut, { DonutSegment } from '../../components/Donut';
+import TrendBars from '../../components/TrendBars';
+import { ManagementDashboardSkeleton } from '../../components/skeleton/ManagementDashboardSkeleton';
+import ErrorState from '../../components/ErrorState';
+import { useAuthStore } from '../../store/useAuthStore';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
-import { casesSold } from '../../lib/reportSemantics';
-import {
-  ORDER_FILTER_STATUSES,
-  OrderFilter,
-  orderStatusColor,
-} from '../../lib/orders';
-import {
-  toDateStr,
-  addDays,
-  monthStart,
-  nextMonthStart,
-  monthName,
-} from '../../lib/reportExport';
+import { OrderFilter } from '../../lib/orders';
+import { monthName } from '../../lib/reportExport';
+import { useManagementDashboard } from '../../hooks/useManagementDashboard';
 
-// Stores with no visit within this many days are flagged as needing attention.
-const STALE_VISIT_DAYS = 7;
-
-const PIPELINE: { key: OrderFilter; label: string }[] = [
-  { key: 'to_process', label: 'To Process' },
-  { key: 'dispatched', label: 'Dispatched' },
-  { key: 'in_transit', label: 'In Transit' },
-  { key: 'delivered', label: 'Delivered' },
-  { key: 'cancelled', label: 'Cancelled' },
+// Pipeline buckets with DISTINCT on-brand colours (order metadata collides
+// dispatched/in_transit on ink, so the donut/legend use this explicit set).
+const BUCKET_META: { key: OrderFilter; label: string; color: string }[] = [
+  { key: 'to_process', label: 'To process', color: Colors.accent },
+  { key: 'dispatched', label: 'Dispatched', color: Colors.warning },
+  { key: 'in_transit', label: 'In transit', color: Colors.textSecondary },
+  { key: 'delivered', label: 'Delivered', color: Colors.success },
+  { key: 'cancelled', label: 'Cancelled', color: Colors.alert },
 ];
 
-interface AttentionStore {
-  id: string;
-  name: string;
-  reasons: string[];
-}
-interface TopStore {
-  name: string;
-  cases: number;
-}
-
 export default function ManagementDashboard({ navigation }: { navigation: any }) {
-  const [pipeline, setPipeline] = useState<Record<OrderFilter, number>>({
+  const reduce = useReducedMotion();
+  const insets = useSafeAreaInsets();
+  const { profile } = useAuthStore();
+  const { data, refetch, isPending, isError } = useManagementDashboard();
+
+  const pipeline = data?.pipeline ?? {
     to_process: 0,
     dispatched: 0,
     in_transit: 0,
     delivered: 0,
     cancelled: 0,
-  });
-  const [casesThisMonth, setCasesThisMonth] = useState(0);
-  const [casesLastMonth, setCasesLastMonth] = useState(0);
-  const [trend, setTrend] = useState<number[]>([]);
-  const [repsCheckedIn, setRepsCheckedIn] = useState(0);
-  const [visitsToday, setVisitsToday] = useState(0);
-  const [attention, setAttention] = useState<AttentionStore[]>([]);
-  const [topStores, setTopStores] = useState<TopStore[]>([]);
-  const [monthTitle, setMonthTitle] = useState(monthName(new Date()));
-
-  const load = useCallback(async () => {
-    const now = new Date();
-    const mStartStr = toDateStr(monthStart(now));
-    const nextMStr = toDateStr(nextMonthStart(now));
-    const lastMStartStr = toDateStr(
-      new Date(now.getFullYear(), now.getMonth() - 1, 1)
-    );
-    const today = toDateStr(now);
-    const staleCutoff = toDateStr(addDays(now, -STALE_VISIT_DAYS));
-    setMonthTitle(monthName(now));
-
-    // Cases (hybrid, org-wide) — this month byDay/byStore/total + last month total.
-    const [thisM, lastM] = await Promise.all([
-      casesSold(mStartStr, nextMStr),
-      casesSold(lastMStartStr, mStartStr),
-    ]);
-    setCasesThisMonth(thisM.total);
-    setCasesLastMonth(lastM.total);
-
-    // Trend: cases per calendar day of the current month.
-    const daysInMonth = addDays(nextMonthStart(now), -1).getDate();
-    const arr: number[] = [];
-    for (let d = 1; d <= daysInMonth; d++) {
-      const key = toDateStr(new Date(now.getFullYear(), now.getMonth(), d));
-      arr.push(thisM.byDay[key] || 0);
-    }
-    setTrend(arr);
-
-    // Order pipeline counts.
-    const { data: ords } = await supabase.from('orders').select('status');
-    const counts: Record<OrderFilter, number> = {
-      to_process: 0,
-      dispatched: 0,
-      in_transit: 0,
-      delivered: 0,
-      cancelled: 0,
-    };
-    for (const o of (ords as any[]) || []) {
-      for (const p of PIPELINE) {
-        if (ORDER_FILTER_STATUSES[p.key].includes(o.status)) counts[p.key]++;
-      }
-    }
-    setPipeline(counts);
-
-    // Today's field activity.
-    const { data: attToday } = await supabase
-      .from('attendance')
-      .select('user_id')
-      .gte('check_in_time', `${today}T00:00:00`)
-      .lt('check_in_time', `${today}T23:59:59`);
-    setRepsCheckedIn(new Set((attToday || []).map((a) => a.user_id)).size);
-    const { data: visToday } = await supabase
-      .from('store_visits')
-      .select('id')
-      .gte('check_in_time', `${today}T00:00:00`)
-      .lt('check_in_time', `${today}T23:59:59`);
-    setVisitsToday((visToday || []).length);
-
-    // Stores needing attention: no visit in N days, and/or latest stock all-zero.
-    const [{ data: stores }, { data: recentVisits }, { data: snaps }] =
-      await Promise.all([
-        supabase.from('stores').select('id, name'),
-        supabase
-          .from('store_visits')
-          .select('store_id')
-          .gte('check_in_time', `${staleCutoff}T00:00:00`),
-        supabase
-          .from('store_stock_snapshots')
-          .select('store_id, product_id, cases, bottles, recorded_at')
-          .order('recorded_at', { ascending: false }),
-      ]);
-
-    const visitedRecently = new Set(
-      (recentVisits || []).map((v) => v.store_id)
-    );
-    // Latest snapshot per store+product → decide which stores are all-zero.
-    const seen = new Set<string>();
-    const storeHasSnap = new Set<string>();
-    const storeNonZero = new Set<string>();
-    for (const s of (snaps as any[]) || []) {
-      const key = `${s.store_id}|${s.product_id}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      storeHasSnap.add(s.store_id);
-      if ((s.cases || 0) > 0 || (s.bottles || 0) > 0) storeNonZero.add(s.store_id);
-    }
-
-    const attn: AttentionStore[] = [];
-    for (const s of (stores as any[]) || []) {
-      const reasons: string[] = [];
-      if (!visitedRecently.has(s.id))
-        reasons.push(`No visit in ${STALE_VISIT_DAYS}d`);
-      if (storeHasSnap.has(s.id) && !storeNonZero.has(s.id))
-        reasons.push('Stock at zero');
-      if (reasons.length) attn.push({ id: s.id, name: s.name, reasons });
-    }
-    setAttention(attn);
-
-    // Top stores this month by cases (hybrid).
-    const nameById: Record<string, string> = {};
-    for (const s of (stores as any[]) || []) nameById[s.id] = s.name;
-    setTopStores(
-      Object.entries(thisM.byStore)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 5)
-        .map(([id, cases]) => ({ name: nameById[id] || 'Store', cases }))
-    );
-  }, []);
+  };
+  const casesThisMonth = data?.casesThisMonth ?? 0;
+  const casesLastMonth = data?.casesLastMonth ?? 0;
+  const trend = data?.trend ?? [];
+  const repsCheckedIn = data?.repsCheckedIn ?? 0;
+  const visitsToday = data?.visitsToday ?? 0;
+  const attention = data?.attention ?? [];
+  const topStores = data?.topStores ?? [];
+  const monthTitle = data?.monthTitle ?? monthName(new Date());
 
   useFocusEffect(
     useCallback(() => {
-      load();
-    }, [load])
+      refetch();
+    }, [refetch])
   );
 
-  const { refreshing, onRefresh } = usePullToRefresh(load);
+  const { refreshing, onRefresh } = usePullToRefresh(refetch);
 
   const delta = casesThisMonth - casesLastMonth;
   const goToOrders = (filter: OrderFilter) =>
     navigation.navigate('Orders', { screen: 'OrdersList', params: { filter } });
 
+  const openCount = pipeline.to_process + pipeline.dispatched + pipeline.in_transit;
+  const donutData: DonutSegment[] = BUCKET_META.map((b) => ({
+    label: b.label,
+    value: pipeline[b.key],
+    color: b.color,
+  }));
+
+  // Fit a full month of per-day bars to the card width (no horizontal scroll).
+  const innerW = Dimensions.get('window').width - 2 * Layout.screenPad - 2 * Layout.cardPad;
+  const n = Math.max(1, trend.length);
+  const trendSpacing = 2;
+  const barWidth = Math.max(3, Math.floor((innerW - (n + 1) * trendSpacing) / n));
+  const trendData = trend.map((v) => ({ label: '', value: v }));
+
+  if (isPending && !data) {
+    return (
+      <View style={[styles.screen, { paddingTop: insets.top }]}>
+        <ManagementDashboardSkeleton />
+      </View>
+    );
+  }
+  if (isError && !data) {
+    return (
+      <View style={[styles.screen, { paddingTop: insets.top }]}>
+        <ErrorState onRetry={refetch} />
+      </View>
+    );
+  }
+
+  let section = 0;
+
   return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={styles.content}
-      refreshControl={
-        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-      }
-    >
-      <Text style={styles.title}>Dashboard</Text>
-      <Text style={styles.subtitle}>{monthTitle}</Text>
-
-      {/* Order pipeline strip */}
-      <Text style={styles.sectionTitle}>Order Pipeline</Text>
+    <View style={styles.screen}>
       <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.pipelineRow}
+        contentContainerStyle={[
+          styles.content,
+          {
+            paddingTop: insets.top + Space.md,
+            paddingBottom: Layout.tabBar + insets.bottom + Space.md,
+          },
+        ]}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
       >
-        {PIPELINE.map((p) => (
-          <TouchableOpacity
-            key={p.key}
-            style={styles.pipelineCard}
-            onPress={() => goToOrders(p.key)}
-          >
-            <View
-              style={[styles.pipelineDot, { backgroundColor: orderStatusColor(p.key === 'to_process' ? 'placed' : p.key) }]}
-            />
-            <Text style={styles.pipelineCount}>{pipeline[p.key]}</Text>
-            <Text style={styles.pipelineLabel}>{p.label}</Text>
-          </TouchableOpacity>
-        ))}
-      </ScrollView>
-
-      {/* Cases ordered — this vs last month + trend */}
-      <Card>
-        <Text style={styles.cardLabel}>CASES ORDERED · {monthTitle}</Text>
-        <View style={styles.casesRow}>
-          <Text style={styles.casesValue}>{casesThisMonth}</Text>
-          <View style={styles.deltaWrap}>
-            <Text
-              style={[
-                styles.deltaText,
-                { color: delta >= 0 ? Colors.success : Colors.alert },
-              ]}
-            >
-              {delta >= 0 ? '▲' : '▼'} {Math.abs(delta)}
+        {/* Greeting + brand mark */}
+        <View style={styles.greetRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={[Type.title, { color: Colors.text }]}>
+              {getGreeting()}, {profile?.name || 'Team'}
             </Text>
-            <Text style={styles.deltaSub}>vs {casesLastMonth} last month</Text>
+            <Text style={[Type.body, { color: Colors.textSecondary, marginTop: 2 }]}>
+              {monthTitle}
+            </Text>
           </View>
+          <Text style={styles.brandMark}>Tank No. 90</Text>
         </View>
-        <BarTrend data={trend} />
-        <Text style={styles.trendCaption}>Cases per day</Text>
-      </Card>
 
-      {/* Today's field activity */}
-      <Card>
-        <Text style={styles.cardLabel}>TODAY'S FIELD ACTIVITY</Text>
-        <View style={styles.statsRow}>
-          <View style={styles.stat}>
-            <Text style={[styles.statValue, { color: Colors.success }]}>
+        {/* Hero — cases this month (cream on dark for legibility; no lime here) */}
+        <MotiView {...entrance(section++, reduce)}>
+          <BentoTile variant="dark" style={{ marginTop: Space.md }}>
+            <Text style={[Type.label, styles.onDarkMuted]}>Cases this month · {monthTitle}</Text>
+            <Text style={[Type.display, tabularNums, { color: Colors.textOnDark, marginTop: 2 }]}>
+              {casesThisMonth}
+            </Text>
+            <View style={styles.deltaRow}>
+              <Ionicons
+                name={delta >= 0 ? 'arrow-up' : 'arrow-down'}
+                size={14}
+                color={Colors.textOnDark}
+              />
+              <Text style={[Type.label, styles.onDarkMuted]}>
+                {Math.abs(delta)} vs {casesLastMonth} last month
+              </Text>
+            </View>
+          </BentoTile>
+        </MotiView>
+
+        {/* Cases per day — the one lime spotlight (latest bar) */}
+        <MotiView {...entrance(section++, reduce)}>
+          <BentoTile style={{ marginTop: Space.md }}>
+            <Text style={[Type.label, { color: Colors.textMuted }]}>Cases per day</Text>
+            <View style={{ marginTop: Space.md }}>
+              {trendData.length > 0 ? (
+                <TrendBars data={trendData} barWidth={barWidth} spacing={trendSpacing} height={110} />
+              ) : (
+                <Text style={[Type.body, { color: Colors.textMuted }]}>No cases yet this month.</Text>
+              )}
+            </View>
+          </BentoTile>
+        </MotiView>
+
+        {/* Order pipeline — donut + tappable legend → pre-filtered Orders tab */}
+        <MotiView {...entrance(section++, reduce)}>
+          <BentoTile style={{ marginTop: Space.md }}>
+            <Text style={[Type.section, { color: Colors.text, marginBottom: Space.md }]}>
+              Order pipeline
+            </Text>
+            <View style={styles.pipelineRow}>
+              <Donut
+                data={donutData}
+                centerValue={openCount}
+                centerLabel="open"
+                radius={54}
+                onSegmentPress={(label) => {
+                  const b = BUCKET_META.find((x) => x.label === label);
+                  if (b) goToOrders(b.key);
+                }}
+              />
+              <View style={styles.legend}>
+                {BUCKET_META.map((b) => (
+                  <Pressable
+                    key={b.key}
+                    onPress={() => goToOrders(b.key)}
+                    style={styles.legendRow}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${pipeline[b.key]} orders ${b.label}`}
+                  >
+                    <View style={[styles.dot, { backgroundColor: b.color }]} />
+                    <Text style={[Type.body, { color: Colors.text, flex: 1 }]}>{b.label}</Text>
+                    <Text style={[Type.bodyMed, tabularNums, { color: Colors.text }]}>
+                      {pipeline[b.key]}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+          </BentoTile>
+        </MotiView>
+
+        {/* Today's field activity */}
+        <MotiView {...entrance(section++, reduce)} style={styles.bentoRow}>
+          <BentoTile style={styles.flex}>
+            <Text style={[Type.label, { color: Colors.textMuted }]}>Reps checked in</Text>
+            <Text style={[Type.metric, tabularNums, { color: Colors.success, marginTop: 2 }]}>
               {repsCheckedIn}
             </Text>
-            <Text style={styles.statLabel}>REPS CHECKED IN</Text>
-          </View>
-          <View style={styles.stat}>
-            <Text style={styles.statValue}>{visitsToday}</Text>
-            <Text style={styles.statLabel}>VISITS TODAY</Text>
-          </View>
-        </View>
-      </Card>
+          </BentoTile>
+          <BentoTile style={styles.flex}>
+            <Text style={[Type.label, { color: Colors.textMuted }]}>Visits today</Text>
+            <Text style={[Type.metric, tabularNums, { color: Colors.text, marginTop: 2 }]}>
+              {visitsToday}
+            </Text>
+          </BentoTile>
+        </MotiView>
 
-      {/* Stores needing attention */}
-      <Text style={styles.sectionTitle}>Stores Needing Attention</Text>
-      {attention.length === 0 ? (
-        <Card>
-          <Text style={styles.emptyText}>All stores are covered. 🎉</Text>
-        </Card>
-      ) : (
-        attention.map((s) => (
-          <Card key={s.id} style={styles.attnCard}>
-            <Text style={styles.attnName}>{s.name}</Text>
-            <View style={styles.tagRow}>
-              {s.reasons.map((r) => (
-                <Text key={r} style={styles.tag}>
-                  {r}
-                </Text>
-              ))}
-            </View>
-          </Card>
-        ))
-      )}
-
-      {/* Top stores this month */}
-      <Text style={styles.sectionTitle}>Top Stores · {monthTitle}</Text>
-      {topStores.length === 0 ? (
-        <Card>
-          <Text style={styles.emptyText}>No cases ordered yet this month.</Text>
-        </Card>
-      ) : (
-        <Card>
-          {topStores.map((s, i) => (
-            <View
-              key={`${s.name}-${i}`}
-              style={[styles.topRow, i > 0 && styles.topRowDivider]}
+        {/* Stores needing attention */}
+        <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
+          <Text style={[Type.section, styles.sectionTitle]}>Stores needing attention</Text>
+          {attention.length === 0 ? (
+            <BentoTile>
+              <Text style={[Type.body, { color: Colors.textMuted }]}>All stores are covered.</Text>
+            </BentoTile>
+          ) : (
+            <Pressable
+              onPress={() => navigation.navigate('Stores')}
+              accessibilityRole="button"
+              accessibilityLabel={`${attention.length} stores need attention`}
             >
-              <Text style={styles.topName}>
-                {i + 1}. {s.name}
-              </Text>
-              <Text style={styles.topCases}>{s.cases} cases</Text>
-            </View>
-          ))}
-        </Card>
-      )}
+              <BentoTile>
+                <View style={styles.attnHead}>
+                  <Text style={[Type.metric, tabularNums, { color: Colors.warning }]}>
+                    {attention.length}
+                  </Text>
+                  <Ionicons name="chevron-forward" size={18} color={Colors.textMuted} />
+                </View>
+                {attention.slice(0, 3).map((s, i) => (
+                  <View key={s.id} style={[styles.attnRow, i > 0 && styles.attnDivider]}>
+                    <Text style={[Type.bodyMed, { color: Colors.text, flex: 1 }]} numberOfLines={1}>
+                      {s.name}
+                    </Text>
+                    <View style={styles.tagRow}>
+                      {s.reasons.map((r) => (
+                        <Text key={r} style={styles.tag}>
+                          {r}
+                        </Text>
+                      ))}
+                    </View>
+                  </View>
+                ))}
+              </BentoTile>
+            </Pressable>
+          )}
+        </MotiView>
 
-      <View style={{ height: 40 }} />
-    </ScrollView>
-  );
-}
-
-/** Basic RN bar chart (no charting library / SVG). One bar per day. */
-function BarTrend({ data }: { data: number[] }) {
-  const max = Math.max(1, ...data);
-  const H = 72;
-  return (
-    <View style={[styles.trendRow, { height: H }]}>
-      {data.map((v, i) => (
-        <View
-          key={i}
-          style={[
-            styles.trendBar,
-            { height: v > 0 ? Math.max(3, (v / max) * H) : 1 },
-          ]}
-        />
-      ))}
+        {/* Top stores this month */}
+        <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
+          <Text style={[Type.section, styles.sectionTitle]}>Top stores · {monthTitle}</Text>
+          <BentoTile>
+            {topStores.length === 0 ? (
+              <Text style={[Type.body, { color: Colors.textMuted }]}>No cases ordered yet this month.</Text>
+            ) : (
+              topStores.map((s, i) => (
+                <View key={`${s.name}-${i}`} style={[styles.topRow, i > 0 && styles.attnDivider]}>
+                  <Text style={[Type.body, { color: Colors.text, flex: 1 }]} numberOfLines={1}>
+                    {i + 1}. {s.name}
+                  </Text>
+                  <Text style={[Type.bodyMed, tabularNums, { color: Colors.accent }]}>
+                    {s.cases} cases
+                  </Text>
+                </View>
+              ))
+            )}
+          </BentoTile>
+        </MotiView>
+      </ScrollView>
     </View>
   );
 }
 
+function getGreeting() {
+  const hour = new Date().getHours();
+  if (hour < 12) return 'Good morning';
+  if (hour < 17) return 'Good afternoon';
+  return 'Good evening';
+}
+
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.background },
-  content: { padding: 24, paddingTop: 60 },
-  title: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.pageTitle,
-    color: Colors.text,
-  },
-  subtitle: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-    marginTop: 4,
-    marginBottom: 16,
-  },
-  sectionTitle: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.sectionTitle,
-    color: Colors.text,
-    marginTop: 20,
-    marginBottom: 12,
-  },
-  // Pipeline
-  pipelineRow: { gap: 10, paddingBottom: 4 },
-  pipelineCard: {
-    minWidth: 88,
-    backgroundColor: Colors.white,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    borderRadius: 8,
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    alignItems: 'center',
-  },
-  pipelineDot: { width: 8, height: 8, borderRadius: 4, marginBottom: 6 },
-  pipelineCount: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 24,
-    fontWeight: '700',
-    color: Colors.text,
-  },
-  pipelineLabel: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 11,
-    color: Colors.muted,
-    marginTop: 2,
-  },
-  // Cases card
-  cardLabel: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginBottom: 12,
-  },
-  casesRow: { flexDirection: 'row', alignItems: 'flex-end', marginBottom: 12 },
-  casesValue: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 40,
-    fontWeight: '700',
-    color: Colors.accent,
-  },
-  deltaWrap: { marginLeft: 16, marginBottom: 6 },
-  deltaText: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  deltaSub: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 12,
-    color: Colors.muted,
-  },
-  trendRow: { flexDirection: 'row', alignItems: 'flex-end' },
-  trendBar: {
-    flex: 1,
-    marginHorizontal: 1,
-    backgroundColor: Colors.accent,
-    borderRadius: 1,
-  },
-  trendCaption: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 11,
-    color: Colors.muted,
-    marginTop: 6,
-    textAlign: 'center',
-  },
-  // Today
-  statsRow: { flexDirection: 'row', gap: 32 },
-  stat: {},
-  statValue: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 28,
-    fontWeight: '700',
-    color: Colors.text,
-  },
-  statLabel: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginTop: 2,
-  },
-  // Attention
-  attnCard: { marginBottom: 10 },
-  attnName: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.cardTitle,
-    color: Colors.text,
-  },
-  tagRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 6 },
+  screen: { flex: 1, backgroundColor: Colors.background },
+  content: { padding: Layout.screenPad },
+  greetRow: { flexDirection: 'row', alignItems: 'flex-start' },
+  brandMark: { ...Type.label, color: Colors.accent },
+  onDarkMuted: { color: Colors.textOnDark, opacity: 0.7 },
+  deltaRow: { flexDirection: 'row', alignItems: 'center', gap: Space.xs, marginTop: Space.sm },
+  dot: { width: 10, height: 10, borderRadius: 5 },
+  pipelineRow: { flexDirection: 'row', alignItems: 'center', gap: Space.lg },
+  legend: { flex: 1, gap: 2 },
+  legendRow: { flexDirection: 'row', alignItems: 'center', gap: Space.sm, minHeight: Layout.tap },
+  bentoRow: { flexDirection: 'row', gap: Layout.gridGap, marginTop: Space.md },
+  flex: { flex: 1 },
+  sectionTitle: { color: Colors.text, marginBottom: Space.sm },
+  attnHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  attnRow: { flexDirection: 'row', alignItems: 'center', gap: Space.sm, paddingVertical: Space.sm },
+  attnDivider: { borderTopWidth: 1, borderTopColor: Colors.border },
+  tagRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Space.xs, justifyContent: 'flex-end' },
   tag: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 11,
+    ...Type.caption,
     fontWeight: '700',
-    color: Colors.alert,
+    color: Colors.warning,
     borderWidth: 1,
-    borderColor: Colors.alert,
-    borderRadius: 4,
+    borderColor: Colors.warning,
+    borderRadius: Radius.sm,
     paddingHorizontal: 6,
     paddingVertical: 2,
   },
-  // Top stores
-  topRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 10,
-  },
-  topRowDivider: { borderTopWidth: 1, borderTopColor: Colors.border },
-  topName: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.text,
-    flex: 1,
-  },
-  topCases: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.accent,
-    fontWeight: '600',
-  },
-  emptyText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-  },
+  topRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: Space.sm },
 });

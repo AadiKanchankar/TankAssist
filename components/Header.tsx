@@ -1,7 +1,8 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { View, Text, Pressable, StyleSheet } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Colors, Typography } from '../constants/colors';
+import { Ionicons } from '@expo/vector-icons';
+import { Colors, Type, Space, Layout } from '../constants/colors';
 
 interface HeaderProps {
   title: string;
@@ -12,16 +13,18 @@ interface HeaderProps {
 export default function Header({ title, onBack, rightElement }: HeaderProps) {
   const insets = useSafeAreaInsets();
   return (
-    <View style={[styles.container, { paddingTop: insets.top + 12 }]}>
+    <View style={[styles.container, { paddingTop: insets.top + Space.md }]}>
       <View style={styles.leftSection}>
         {onBack && (
-          <TouchableOpacity onPress={onBack} style={styles.backButton}>
-            <Text style={styles.backArrow}>←</Text>
-          </TouchableOpacity>
+          <Pressable onPress={onBack} style={styles.backButton} hitSlop={8} accessibilityLabel="Back">
+            <Ionicons name="chevron-back" size={24} color={Colors.text} />
+          </Pressable>
         )}
-        <Text style={styles.title}>{title}</Text>
+        <Text style={styles.title} numberOfLines={1}>
+          {title}
+        </Text>
       </View>
-      {rightElement && <View>{rightElement}</View>}
+      {rightElement ? <View>{rightElement}</View> : null}
     </View>
   );
 }
@@ -31,27 +34,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 24,
-    paddingBottom: 16,
+    paddingHorizontal: Layout.screenPad,
+    paddingBottom: Space.md,
     backgroundColor: Colors.background,
   },
-  leftSection: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  backButton: {
-    marginRight: 12,
-    padding: 4,
-  },
-  backArrow: {
-    fontSize: 24,
-    color: Colors.text,
-    fontWeight: '700',
-  },
-  title: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.sectionTitle,
-    color: Colors.text,
-  },
+  leftSection: { flexDirection: 'row', alignItems: 'center', flex: 1, gap: Space.xs },
+  backButton: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center', marginLeft: -6 },
+  title: { ...Type.title, color: Colors.text, flex: 1 },
 });

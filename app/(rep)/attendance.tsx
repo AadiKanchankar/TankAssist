@@ -1,8 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, Alert, ActivityIndicator } from 'react-native';
-import { Colors, Typography } from '../../constants/colors';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
+import { Colors, Type, Space, Radius, Layout, tabularNums } from '../../constants/colors';
 import Button from '../../components/Button';
 import Header from '../../components/Header';
+import BentoTile from '../../components/BentoTile';
+import SuccessOverlay from '../../components/SuccessOverlay';
 import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
 import * as Location from 'expo-location';
@@ -10,12 +14,9 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { uploadSelfie } from '../../lib/storage';
 import { reverseGeocode } from '../../lib/geocoding';
 
-export default function AttendanceScreen({
-  navigation,
-}: {
-  navigation: any;
-}) {
+export default function AttendanceScreen({ navigation }: { navigation: any }) {
   const { profile } = useAuthStore();
+  const insets = useSafeAreaInsets();
   const [location, setLocation] = useState<Location.LocationObject | null>(null);
   const [loadingLocation, setLoadingLocation] = useState(true);
   const [permission, requestPermission] = useCameraPermissions();
@@ -23,28 +24,23 @@ export default function AttendanceScreen({
   const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [address, setAddress] = useState<string | null>(null);
   const [loadingAddress, setLoadingAddress] = useState(false);
+  const [showSuccess, setShowSuccess] = useState(false);
   const cameraRef = useRef<CameraView>(null);
 
   useEffect(() => {
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert('Permission Denied', 'Location permission is required for check-in.');
+        Alert.alert('Location needed', 'Location permission is required for check-in.');
         navigation.goBack();
         return;
       }
-      const loc = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.BestForNavigation,
-      });
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.BestForNavigation });
       setLocation(loc);
       setLoadingLocation(false);
 
-      // Reverse geocode in parallel — non-blocking
       setLoadingAddress(true);
-      const addr = await reverseGeocode(
-        loc.coords.latitude,
-        loc.coords.longitude
-      );
+      const addr = await reverseGeocode(loc.coords.latitude, loc.coords.longitude);
       setAddress(addr);
       setLoadingAddress(false);
     })();
@@ -53,26 +49,21 @@ export default function AttendanceScreen({
   const takeSelfie = async () => {
     if (!cameraRef.current) return;
     const photo = await cameraRef.current.takePictureAsync({ quality: 0.7 });
-    if (photo) {
-      setPhotoUri(photo.uri);
-    }
+    if (photo) setPhotoUri(photo.uri);
   };
 
   const handleSubmit = async () => {
     if (!location) {
-      Alert.alert('Error', 'Location not available yet.');
+      Alert.alert('Location not ready', 'Wait for your location to resolve.');
       return;
     }
     if (!photoUri) {
-      Alert.alert('Error', 'Please take a selfie first.');
+      Alert.alert('Selfie needed', 'Take a selfie first.');
       return;
     }
-
     setSubmitting(true);
     try {
-      // Upload selfie to Supabase Storage (private bucket: visit-photos)
       const selfieUrl = await uploadSelfie(photoUri, profile!.id);
-
       const { error } = await supabase.from('attendance').insert({
         user_id: profile!.id,
         check_in_time: new Date().toISOString(),
@@ -81,14 +72,14 @@ export default function AttendanceScreen({
         address: address,
         selfie_url: selfieUrl,
       });
-
       if (error) throw error;
-
-      Alert.alert('Success', 'You are checked in!', [
-        { text: 'OK', onPress: () => navigation.goBack() },
-      ]);
+      // Peak-end: success overlay + haptic, then return.
+      setSubmitting(false);
+      setShowSuccess(true);
+      setTimeout(() => navigation.goBack(), 1400);
+      return;
     } catch (err: any) {
-      Alert.alert('Error', err.message || 'Failed to check in.');
+      Alert.alert('Couldn’t check in', err.message || 'Try again.');
     }
     setSubmitting(false);
   };
@@ -104,10 +95,12 @@ export default function AttendanceScreen({
   if (!permission.granted) {
     return (
       <View style={styles.container}>
-        <Header title="Check In" onBack={() => navigation.goBack()} />
+        <Header title="Check in" onBack={() => navigation.goBack()} />
         <View style={styles.centered}>
-          <Text style={styles.permText}>Camera permission is required.</Text>
-          <Button title="Grant Permission" onPress={requestPermission} />
+          <Text style={[Type.body, { color: Colors.text, marginBottom: Space.lg, textAlign: 'center' }]}>
+            Camera permission is required to check in.
+          </Text>
+          <Button title="Grant permission" onPress={requestPermission} />
         </View>
       </View>
     );
@@ -115,120 +108,75 @@ export default function AttendanceScreen({
 
   return (
     <View style={styles.container}>
-      <Header title="Check In" onBack={() => navigation.goBack()} />
+      <Header title="Check in" onBack={() => navigation.goBack()} />
 
-      <View style={styles.content}>
+      <View style={[styles.content, { paddingBottom: Layout.tabBar + insets.bottom + Space.md }]}>
         {/* GPS */}
-        <View style={styles.section}>
-          <Text style={styles.label}>GPS COORDINATES</Text>
+        <BentoTile>
+          <Text style={styles.label}>Your location</Text>
           {loadingLocation ? (
-            <ActivityIndicator size="small" color={Colors.accent} />
+            <ActivityIndicator size="small" color={Colors.accent} style={{ alignSelf: 'flex-start', marginTop: 4 }} />
           ) : (
             <>
-              <Text style={styles.coords}>
-                {location?.coords.latitude.toFixed(6)},{' '}
-                {location?.coords.longitude.toFixed(6)}
+              <Text style={[Type.bodyMed, tabularNums, { color: Colors.text }]}>
+                {location?.coords.latitude.toFixed(6)}, {location?.coords.longitude.toFixed(6)}
               </Text>
               {loadingAddress ? (
-                <Text style={styles.addressLoading}>Resolving address...</Text>
+                <Text style={[Type.caption, { color: Colors.textMuted, fontStyle: 'italic', marginTop: 4 }]}>
+                  Resolving address…
+                </Text>
               ) : address ? (
-                <Text style={styles.addressText}>{address}</Text>
+                <Text style={[Type.caption, { color: Colors.textSecondary, marginTop: 4 }]}>{address}</Text>
               ) : null}
             </>
           )}
-        </View>
+        </BentoTile>
 
-        {/* Camera */}
-        <View style={styles.section}>
-          <Text style={styles.label}>SELFIE</Text>
-          <Text style={styles.liveLabel}>Live photo only — gallery disabled</Text>
+        {/* Selfie */}
+        <BentoTile style={{ marginTop: Space.md }}>
+          <Text style={styles.label}>Selfie</Text>
+          <Text style={[Type.caption, { color: Colors.alert, marginBottom: Space.md }]}>
+            Live photo only — gallery disabled
+          </Text>
 
           {photoUri ? (
-            <View style={styles.photoPreview}>
-              <Text style={styles.photoTaken}>✓ Selfie captured</Text>
-              <Button
-                title="Retake"
-                onPress={() => setPhotoUri(null)}
-                variant="secondary"
-              />
+            <View style={styles.captured}>
+              <Ionicons name="checkmark-circle" size={22} color={Colors.success} />
+              <Text style={[Type.bodyMed, { color: Colors.success }]}>Selfie captured</Text>
+              <Button title="Retake" onPress={() => setPhotoUri(null)} variant="secondary" style={{ marginTop: Space.sm, alignSelf: 'stretch' }} />
             </View>
           ) : (
-            <View style={styles.cameraWrapper}>
-              <CameraView
-                ref={cameraRef}
-                style={styles.camera}
-                facing="front"
-              />
-              <Button title="Take Selfie" onPress={takeSelfie} style={styles.captureBtn} />
+            <View>
+              <View style={styles.cameraWrapper}>
+                <CameraView ref={cameraRef} style={styles.camera} facing="front" />
+              </View>
+              <Button title="Take selfie" onPress={takeSelfie} variant="secondary" style={{ marginTop: Space.md }} />
             </View>
           )}
-        </View>
+        </BentoTile>
 
-        {/* Submit */}
         <Button
-          title="Confirm Check In"
+          title="Confirm check-in"
+          spotlight
           onPress={handleSubmit}
           loading={submitting}
           disabled={!location || !photoUri}
           style={styles.submitBtn}
         />
       </View>
+
+      {showSuccess && <SuccessOverlay label="Checked in" />}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
-  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
-  content: { flex: 1, padding: 24 },
-  section: { marginBottom: 24 },
-  label: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginBottom: 8,
-  },
-  liveLabel: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 12,
-    color: Colors.alert,
-    marginBottom: 12,
-    fontWeight: '600',
-  },
-  coords: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.text,
-    fontWeight: '600',
-  },
-  addressLoading: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 13,
-    color: Colors.muted,
-    marginTop: 4,
-    fontStyle: 'italic',
-  },
-  addressText: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 13,
-    color: Colors.text,
-    marginTop: 4,
-  },
-  permText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.text,
-    marginBottom: 16,
-  },
-  cameraWrapper: { borderRadius: 4, overflow: 'hidden' },
+  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: Layout.screenPad },
+  content: { flex: 1, padding: Layout.screenPad },
+  label: { ...Type.label, color: Colors.textMuted, marginBottom: Space.sm },
+  cameraWrapper: { borderRadius: Radius.md, overflow: 'hidden', backgroundColor: Colors.surfaceAlt },
   camera: { width: '100%', height: 300 },
-  captureBtn: { marginTop: 12 },
-  photoPreview: { alignItems: 'center', gap: 12 },
-  photoTaken: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.success,
-    fontWeight: '600',
-  },
+  captured: { alignItems: 'center', gap: Space.sm },
   submitBtn: { marginTop: 'auto' },
 });

@@ -15,6 +15,8 @@ interface ButtonProps {
   variant?: 'primary' | 'secondary' | 'danger';
   disabled?: boolean;
   loading?: boolean;
+  /** Von Restorff spotlight — lime fill, sentence case. One per screen, primary only. */
+  spotlight?: boolean;
   style?: ViewStyle;
   textStyle?: TextStyle;
 }
@@ -25,11 +27,13 @@ export default function Button({
   variant = 'primary',
   disabled = false,
   loading = false,
+  spotlight = false,
   style,
   textStyle,
 }: ButtonProps) {
   const isPrimary = variant === 'primary';
   const isDanger = variant === 'danger';
+  const isSpotlight = isPrimary && spotlight;
 
   return (
     <TouchableOpacity
@@ -39,6 +43,7 @@ export default function Button({
       style={[
         styles.base,
         isPrimary && styles.primary,
+        isSpotlight && styles.spotlight,
         variant === 'secondary' && styles.secondary,
         isDanger && styles.danger,
         (disabled || loading) && styles.disabled,
@@ -47,13 +52,20 @@ export default function Button({
     >
       {loading ? (
         <ActivityIndicator
-          color={isPrimary || isDanger ? Colors.white : Colors.accent}
+          color={
+            isSpotlight
+              ? Colors.onSpotlight
+              : isPrimary || isDanger
+              ? Colors.white
+              : Colors.accent
+          }
         />
       ) : (
         <Text
           style={[
             styles.text,
             isPrimary && styles.primaryText,
+            isSpotlight && styles.spotlightText,
             variant === 'secondary' && styles.secondaryText,
             isDanger && styles.dangerText,
             textStyle,
@@ -78,6 +90,9 @@ const styles = StyleSheet.create({
   primary: {
     backgroundColor: Colors.accent,
   },
+  spotlight: {
+    backgroundColor: Colors.spotlight,
+  },
   secondary: {
     backgroundColor: 'transparent',
     borderWidth: 1.5,
@@ -98,6 +113,10 @@ const styles = StyleSheet.create({
   },
   primaryText: {
     color: Colors.white,
+  },
+  spotlightText: {
+    color: Colors.onSpotlight,
+    textTransform: 'none', // sentence case for the spotlight CTA (DESIGN §9)
   },
   secondaryText: {
     color: Colors.accent,

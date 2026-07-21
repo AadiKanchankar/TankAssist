@@ -30,8 +30,10 @@ yarn-error.*
 .DS_Store
 *.pem
 
-# local env files
-.env*.local
+# env files (anon-key-only architecture — no secrets expected, but block all envs)
+.env
+.env*
+!.env.example
 
 # typescript
 *.tsbuildinfo

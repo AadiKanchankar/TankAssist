@@ -15,6 +15,22 @@ export const orderStatusLabel = (status: string): string =>
 export const orderStatusColor = (status: string): string =>
   ORDER_STATUS_META[status]?.color || Colors.muted;
 
+/** The sequential status machine (excl. cancelled). Drives PipelineStrip. */
+export const ORDER_STAGE_SEQUENCE = [
+  'placed',
+  'in_process',
+  'dispatched',
+  'in_transit',
+  'delivered',
+] as const;
+
+/** Short labels for the 5-segment pipeline strip. */
+export const ORDER_STAGE_LABELS = ['Placed', 'Ack', 'Dispatch', 'Transit', 'Delivered'];
+
+/** 0-based index of a status in the stage sequence; -1 if cancelled/unknown. */
+export const orderStageIndex = (status: string): number =>
+  (ORDER_STAGE_SEQUENCE as readonly string[]).indexOf(status);
+
 export interface OrderItemQty {
   cases: number;
   bottles: number;

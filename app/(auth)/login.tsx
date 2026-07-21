@@ -7,11 +7,14 @@ import {
   KeyboardAvoidingView,
   Platform,
   ScrollView,
-  TouchableOpacity,
+  Pressable,
   Modal,
   FlatList,
+  ActivityIndicator,
 } from 'react-native';
-import { Colors, Typography } from '../../constants/colors';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
+import { Colors, Typography, Type, Space, Radius, Layout } from '../../constants/colors';
 import Button from '../../components/Button';
 import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
@@ -25,7 +28,7 @@ const COUNTRY_CODES = [
   { code: '+61', country: 'Australia' },
 ];
 
-const NO_ACCOUNT_MSG = 'No account found. Contact your management team.';
+const NO_ACCOUNT_MSG = 'No account found for this number. Contact your management team to get set up.';
 
 export default function LoginScreen({ navigation }: { navigation: any }) {
   const [phone, setPhone] = useState('');
@@ -37,7 +40,7 @@ export default function LoginScreen({ navigation }: { navigation: any }) {
 
   // Pre-OTP registration check (anon RPC, boolean only). Results are cached
   // per full phone number so the eager check below usually has the verdict
-  // ready before "Send OTP" is even tapped — no SMS is sent for unknown numbers.
+  // ready before "Send code" is even tapped — no SMS is sent for unknown numbers.
   const checkCache = useRef<Map<string, Promise<boolean>>>(new Map());
   // The full phone currently in the input — guards eager results against
   // resolving after the user has edited the number.
@@ -62,7 +65,7 @@ export default function LoginScreen({ navigation }: { navigation: any }) {
   };
 
   // Eagerly check as soon as a complete number is typed, so the verdict is
-  // already cached by the time the user taps "Send OTP".
+  // already cached by the time the user taps "Send code".
   useEffect(() => {
     const cleaned = phone.replace(/\s/g, '');
     const fullPhone = cleaned.length >= 10 ? `${countryCode}${cleaned}` : '';
@@ -86,7 +89,7 @@ export default function LoginScreen({ navigation }: { navigation: any }) {
     setError('');
     const cleaned = phone.replace(/\s/g, '');
     if (!cleaned || cleaned.length < 10) {
-      setError('Please enter a valid phone number.');
+      setError('Enter a valid phone number.');
       return;
     }
     const fullPhone = `${countryCode}${cleaned}`;
@@ -111,227 +114,160 @@ export default function LoginScreen({ navigation }: { navigation: any }) {
     }
   };
 
-  return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-    >
-      <ScrollView
-        contentContainerStyle={styles.scrollContent}
-        keyboardShouldPersistTaps="handled"
-      >
-        <View style={styles.header}>
-          <Text style={styles.brand}>TANK NO.90</Text>
-          <Text style={styles.appName}>TankAssist</Text>
-          <Text style={styles.subtitle}>Field Sales Operations</Text>
-        </View>
+  const isInvite = error === NO_ACCOUNT_MSG; // calm microcopy, not an error-shout
 
-        <View style={styles.form}>
-          <Text style={styles.label}>PHONE NUMBER</Text>
-          <View style={styles.phoneRow}>
-            <TouchableOpacity
-              style={styles.codeSelector}
-              onPress={() => setShowCodePicker(true)}
-            >
-              <Text style={styles.codeText}>{countryCode}</Text>
-              <Text style={styles.codeArrow}>▼</Text>
-            </TouchableOpacity>
-            <TextInput
-              style={styles.phoneInput}
-              value={phone}
-              onChangeText={(text) => {
-                setPhone(text);
-                setError('');
-              }}
-              placeholder="Enter phone number"
-              placeholderTextColor={Colors.muted}
-              keyboardType="phone-pad"
-              maxLength={15}
-            />
+  return (
+    <SafeAreaView style={styles.safe}>
+      <KeyboardAvoidingView
+        style={styles.flex}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
+        <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+          <View style={styles.header}>
+            <Text style={styles.brand}>Tank No. 90</Text>
+            <Text style={styles.appName}>TankAssist</Text>
+            <Text style={styles.subtitle}>Field sales operations</Text>
           </View>
 
-          {error ? <Text style={styles.error}>{error}</Text> : null}
+          <View>
+            <Text style={styles.label}>Phone number</Text>
+            <View style={styles.phoneRow}>
+              <Pressable style={styles.codeSelector} onPress={() => setShowCodePicker(true)}>
+                <Text style={styles.codeText}>{countryCode}</Text>
+                <Ionicons name="chevron-down" size={14} color={Colors.textMuted} />
+              </Pressable>
+              <View style={styles.inputWrap}>
+                <TextInput
+                  style={styles.phoneInput}
+                  value={phone}
+                  onChangeText={(text) => {
+                    setPhone(text);
+                    setError('');
+                  }}
+                  placeholder="Enter phone number"
+                  placeholderTextColor={Colors.textMuted}
+                  keyboardType="phone-pad"
+                  maxLength={15}
+                  accessibilityLabel="Phone number"
+                />
+                {checking && (
+                  <ActivityIndicator size="small" color={Colors.textMuted} style={styles.fieldDot} />
+                )}
+              </View>
+            </View>
 
-          <Button
-            title="Send OTP"
-            onPress={handleSendOtp}
-            loading={loading || checking}
-            style={styles.loginButton}
-          />
-        </View>
-      </ScrollView>
+            {error ? (
+              <Text style={[styles.msg, isInvite ? styles.invite : styles.error]}>{error}</Text>
+            ) : null}
 
-      {/* Country Code Picker Modal */}
+            <Button
+              title="Send code"
+              spotlight
+              onPress={handleSendOtp}
+              loading={loading}
+              style={styles.loginButton}
+            />
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+
+      {/* Country code picker */}
       <Modal
         visible={showCodePicker}
         animationType="slide"
         presentationStyle="pageSheet"
         onRequestClose={() => setShowCodePicker(false)}
       >
-        <View style={styles.modalContainer}>
+        <SafeAreaView style={styles.modalContainer} edges={['top']}>
           <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Select Country Code</Text>
-            <TouchableOpacity onPress={() => setShowCodePicker(false)}>
-              <Text style={styles.modalClose}>Done</Text>
-            </TouchableOpacity>
+            <Text style={[Type.section, { color: Colors.text }]}>Select country code</Text>
+            <Pressable onPress={() => setShowCodePicker(false)} hitSlop={8}>
+              <Text style={[Type.bodyMed, { color: Colors.accent }]}>Done</Text>
+            </Pressable>
           </View>
           <FlatList
             data={COUNTRY_CODES}
             keyExtractor={(item) => item.code}
             renderItem={({ item }) => (
-              <TouchableOpacity
-                style={[
-                  styles.codeItem,
-                  item.code === countryCode && styles.codeItemSelected,
-                ]}
+              <Pressable
+                style={[styles.codeItem, item.code === countryCode && styles.codeItemSelected]}
                 onPress={() => {
                   setCountryCode(item.code);
                   setShowCodePicker(false);
                 }}
               >
-                <Text style={styles.codeItemText}>
+                <Text style={[Type.body, { color: Colors.text }]}>
                   {item.code} — {item.country}
                 </Text>
                 {item.code === countryCode && (
-                  <Text style={styles.checkmark}>✓</Text>
+                  <Ionicons name="checkmark" size={18} color={Colors.accent} />
                 )}
-              </TouchableOpacity>
+              </Pressable>
             )}
           />
-        </View>
+        </SafeAreaView>
       </Modal>
-    </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: Colors.background,
-  },
-  scrollContent: {
-    flexGrow: 1,
-    justifyContent: 'center',
-    paddingHorizontal: 32,
-    paddingVertical: 48,
-  },
-  header: {
-    marginBottom: 48,
-  },
-  brand: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginBottom: 8,
-  },
-  appName: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.pageTitle,
-    color: Colors.text,
-    marginBottom: 4,
-  },
-  subtitle: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-  },
-  form: {},
-  label: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginBottom: 8,
-  },
-  phoneRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
+  safe: { flex: 1, backgroundColor: Colors.background },
+  flex: { flex: 1 },
+  scrollContent: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: Space.xl, paddingVertical: Space.xxl },
+  header: { marginBottom: Space.xxl },
+  brand: { ...Type.label, color: Colors.accent, marginBottom: Space.sm },
+  appName: { ...Type.display, color: Colors.text },
+  subtitle: { ...Type.body, color: Colors.textSecondary, marginTop: Space.xs },
+  label: { ...Type.label, color: Colors.textMuted, marginBottom: Space.sm },
+  phoneRow: { flexDirection: 'row', gap: Space.sm },
   codeSelector: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: Colors.white,
+    backgroundColor: Colors.surface,
     borderWidth: 1,
     borderColor: Colors.border,
-    borderRadius: 4,
-    paddingHorizontal: 12,
-    paddingVertical: 14,
-    gap: 6,
+    borderRadius: Radius.md,
+    paddingHorizontal: Space.md,
+    gap: Space.xs,
+    minHeight: Layout.tap,
   },
-  codeText: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 16,
-    color: Colors.text,
-    fontWeight: '600',
-  },
-  codeArrow: {
-    fontSize: 10,
-    color: Colors.muted,
-  },
+  codeText: { ...Type.bodyMed, color: Colors.text },
+  inputWrap: { flex: 1, justifyContent: 'center' },
   phoneInput: {
-    flex: 1,
     fontFamily: Typography.fontFamily,
-    fontSize: 16,
+    ...Type.body,
     color: Colors.text,
-    backgroundColor: Colors.white,
+    backgroundColor: Colors.surface,
     borderWidth: 1,
     borderColor: Colors.border,
-    borderRadius: 4,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
+    borderRadius: Radius.md,
+    paddingHorizontal: Space.lg,
+    paddingRight: 40,
+    minHeight: Layout.tap,
   },
-  error: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 14,
-    color: Colors.alert,
-    marginTop: 16,
-  },
-  loginButton: {
-    marginTop: 32,
-  },
+  fieldDot: { position: 'absolute', right: Space.md },
+  msg: { ...Type.body, marginTop: Space.lg },
+  error: { color: Colors.alert },
+  invite: { color: Colors.textSecondary },
+  loginButton: { marginTop: Space.xl },
   // Modal
-  modalContainer: {
-    flex: 1,
-    backgroundColor: Colors.background,
-  },
+  modalContainer: { flex: 1, backgroundColor: Colors.background },
   modalHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 24,
-    paddingTop: 60,
-    paddingBottom: 16,
-  },
-  modalTitle: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.sectionTitle,
-    color: Colors.text,
-  },
-  modalClose: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.accent,
-    fontWeight: '600',
+    paddingHorizontal: Space.xl,
+    paddingVertical: Space.lg,
   },
   codeItem: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 24,
-    paddingVertical: 16,
+    paddingHorizontal: Space.xl,
+    paddingVertical: Space.lg,
     borderBottomWidth: 1,
     borderBottomColor: Colors.border,
   },
-  codeItemSelected: {
-    backgroundColor: Colors.white,
-  },
-  codeItemText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.text,
-  },
-  checkmark: {
-    fontSize: 18,
-    color: Colors.accent,
-    fontWeight: '600',
-  },
+  codeItemSelected: { backgroundColor: Colors.surfaceAlt },
 });

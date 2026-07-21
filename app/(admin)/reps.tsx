@@ -4,7 +4,7 @@ import {
   Text,
   StyleSheet,
   SectionList,
-  TouchableOpacity,
+  Pressable,
   TextInput,
   Alert,
   Modal,
@@ -13,52 +13,45 @@ import {
   Linking,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors, Typography } from '../../constants/colors';
-import Card from '../../components/Card';
+import { Colors, Type, Space, Radius, Layout } from '../../constants/colors';
 import Button from '../../components/Button';
 import Header from '../../components/Header';
+import BentoTile from '../../components/BentoTile';
+import EmptyState from '../../components/EmptyState';
+import ErrorState from '../../components/ErrorState';
+import Autocomplete, { AutocompleteItem } from '../../components/Autocomplete';
+import { ListSkeleton } from '../../components/skeleton/ListSkeleton';
 import { supabase, enrollClient } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
+import { useTeam, Member, Role } from '../../hooks/useTeam';
 
-type Role = 'rep' | 'sales_manager' | 'management';
 type EnrollStep = 'form' | 'otp' | 'done';
-
-interface Member {
-  id: string;
-  name: string;
-  email: string | null;
-  phone: string | null;
-  role: Role;
-  is_active: boolean;
-  assigned_manager_id: string | null;
-}
 
 interface ManagerOption {
   id: string;
   name: string;
 }
 
-// Group order + display labels for the role accordion. Sales managers only ever
-// see the 'rep' group (filtered below); management sees all three.
 const ROLE_GROUPS: { role: Role; title: string }[] = [
-  { role: 'sales_manager', title: 'Sales Managers' },
-  { role: 'rep', title: 'Sales Reps' },
+  { role: 'sales_manager', title: 'Sales managers' },
+  { role: 'rep', title: 'Sales reps' },
   { role: 'management', title: 'Management' },
 ];
-
+const ROLE_TITLE: Record<Role, string> = {
+  rep: 'Sales rep',
+  sales_manager: 'Sales manager',
+  management: 'Management',
+};
 const ADD_ROLES: { value: Role; label: string }[] = [
   { value: 'rep', label: 'Rep' },
-  { value: 'sales_manager', label: 'Sales Manager' },
+  { value: 'sales_manager', label: 'Sales manager' },
   { value: 'management', label: 'Management' },
 ];
 
-/**
- * Normalize a typed number to E.164 +91 (India). Accepts a bare 10-digit
- * mobile or a 12-digit 91-prefixed one; returns null if it isn't a valid
- * Indian mobile (must start 6-9).
- */
+/** Normalize a typed number to E.164 +91 (India). Unchanged. */
 function normalizeIndianPhone(raw: string): string | null {
   const digits = raw.replace(/[^\d]/g, '');
   let local: string;
@@ -69,26 +62,13 @@ function normalizeIndianPhone(raw: string): string | null {
   return `+91${local}`;
 }
 
-/**
- * Group members into role sections (same collapsible pattern as the stores
- * state accordion). Empty groups are dropped; within a group, active members
- * sort first, then by name. Collapsed sections keep their header, render no rows.
- */
-function buildSections(
-  members: Member[],
-  visibleRoles: Role[],
-  expanded: Set<string>
-) {
+function buildSections(members: Member[], visibleRoles: Role[], expanded: Set<string>) {
   return ROLE_GROUPS.filter((g) => visibleRoles.includes(g.role))
     .map((g) => {
       const data = members
         .filter((m) => m.role === g.role)
         .sort((a, b) =>
-          a.is_active === b.is_active
-            ? a.name.localeCompare(b.name)
-            : a.is_active
-            ? -1
-            : 1
+          a.is_active === b.is_active ? a.name.localeCompare(b.name) : a.is_active ? -1 : 1
         );
       return { title: g.title, count: data.length, data };
     })
@@ -96,20 +76,18 @@ function buildSections(
     .map((s) => ({ ...s, data: expanded.has(s.title) ? s.data : [] }));
 }
 
-export default function AdminTeamScreen({
-  navigation,
-}: {
-  navigation: any;
-}) {
+export default function AdminTeamScreen({ navigation }: { navigation: any }) {
   const { profile } = useAuthStore();
+  const insets = useSafeAreaInsets();
   const isManagement = profile?.role === 'management';
+  const { data, refetch, isPending, isError } = useTeam(profile?.role);
+  const members = data ?? [];
 
-  const [members, setMembers] = useState<Member[]>([]);
-  // Accordion: all groups start collapsed (matches the stores accordion).
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [memberQuery, setMemberQuery] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
 
-  // ─── Add User (OTP enrollment) state ───
+  // ─── Add User (OTP enrollment) state — unchanged ───
   const [step, setStep] = useState<EnrollStep>('form');
   const [newName, setNewName] = useState('');
   const [newRole, setNewRole] = useState<Role>('rep');
@@ -125,6 +103,13 @@ export default function AdminTeamScreen({
   const [saving, setSaving] = useState(false);
   const [enrollError, setEnrollError] = useState('');
 
+  useFocusEffect(
+    useCallback(() => {
+      refetch();
+    }, [refetch])
+  );
+  const { refreshing, onRefresh } = usePullToRefresh(refetch);
+
   const toggleSection = (title: string) =>
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -133,35 +118,21 @@ export default function AdminTeamScreen({
       return next;
     });
 
-  const loadMembers = useCallback(async () => {
-    // Management sees everyone; sales managers see reps only. (RLS would let a
-    // sales manager read all users, so this is a UI-level scope, not security.)
-    let query = supabase
-      .from('users')
-      .select('id, name, email, phone, role, is_active, assigned_manager_id')
-      .order('name');
-    if (profile?.role !== 'management') query = query.eq('role', 'rep');
-    const { data } = await query;
-    setMembers((data as Member[]) || []);
-  }, [profile?.role]);
-
-  // Refetch on focus so a deactivate/reactivate from member detail reflects here.
-  useFocusEffect(
-    useCallback(() => {
-      loadMembers();
-    }, [loadMembers])
-  );
-
-  const { refreshing, onRefresh } = usePullToRefresh(loadMembers);
-
-  const visibleRoles: Role[] = isManagement
-    ? ['sales_manager', 'rep', 'management']
-    : ['rep'];
-
+  const visibleRoles: Role[] = isManagement ? ['sales_manager', 'rep', 'management'] : ['rep'];
   const sections = useMemo(
     () => buildSections(members, visibleRoles, expanded),
     [members, isManagement, expanded]
   );
+
+  const searchResults: AutocompleteItem[] = memberQuery.trim()
+    ? members
+        .filter((m) => m.name.toLowerCase().includes(memberQuery.trim().toLowerCase()))
+        .map((m) => ({
+          id: m.id,
+          label: m.name,
+          sublabel: `${ROLE_TITLE[m.role]}${m.phone ? ` · ${m.phone}` : ''}`,
+        }))
+    : [];
 
   const resetEnroll = () => {
     setStep('form');
@@ -179,7 +150,6 @@ export default function AdminTeamScreen({
   const openAddModal = async () => {
     resetEnroll();
     setShowAddModal(true);
-    // Active sales managers for the (rep-only) assignment picker.
     const { data } = await supabase.rpc('get_sales_managers');
     setManagers((data as ManagerOption[]) || []);
   };
@@ -204,10 +174,7 @@ export default function AdminTeamScreen({
     setNewPhoneE164(phone);
     setSending(true);
     try {
-      // Don't spend an SMS on a number that already has an active account.
-      const { data: reg } = await supabase.rpc('phone_registered', {
-        p_phone: phone,
-      });
+      const { data: reg } = await supabase.rpc('phone_registered', { p_phone: phone });
       if (reg === true) {
         setEnrollError('This number already has an active account.');
         setSending(false);
@@ -225,8 +192,7 @@ export default function AdminTeamScreen({
     setSending(false);
   };
 
-  // Insert the profile row via the MAIN client (management session). Guards
-  // genuine duplicates and doubles as the orphan-recovery / retry path.
+  // Insert the profile row via the MAIN client (management session). Unchanged.
   const saveProfile = async (id: string) => {
     setSaving(true);
     try {
@@ -253,24 +219,20 @@ export default function AdminTeamScreen({
         is_active: true,
       });
       if (error) {
-        // Orphan: auth user exists, profile insert failed. "Retry Save" re-runs
-        // this insert with the id we already captured — no re-OTP needed.
         setEnrollError(
           `Code verified, but saving the profile failed: ${
             error.message || 'unknown error'
-          }. Tap "Retry Save" to finish.`
+          }. Tap "Retry save" to finish.`
         );
         return;
       }
       setStep('done');
-      await loadMembers();
+      await refetch();
     } finally {
       setSaving(false);
     }
   };
 
-  // Step 2 → verify the relayed code, capture the new id, discard the ephemeral
-  // session, then save the profile.
   const handleVerifyAndCreate = async () => {
     setEnrollError('');
     if (otpToken.length !== 6) {
@@ -289,7 +251,6 @@ export default function AdminTeamScreen({
       if (!id) throw new Error('Verification failed — no user returned.');
       setNewAuthUserId(id);
       setVerified(true);
-      // Discard the ephemeral session immediately; never touch the manager's.
       try {
         await enrollClient.auth.signOut();
       } catch {}
@@ -306,87 +267,89 @@ export default function AdminTeamScreen({
     await saveProfile(newAuthUserId);
   };
 
-  const managerName =
-    managers.find((m) => m.id === newManagerId)?.name || null;
+  const managerName = managers.find((m) => m.id === newManagerId)?.name || null;
 
   return (
     <View style={styles.container}>
-      <View style={styles.headerPad}>
-        <Text style={styles.title}>Team</Text>
+      <View style={[styles.headerPad, { paddingTop: insets.top + Space.md }]}>
+        <Text style={[Type.title, { color: Colors.text, marginBottom: Space.md }]}>Team</Text>
         {isManagement && (
-          <Button
-            title="+ Add User"
-            onPress={openAddModal}
-            style={styles.addBtn}
-          />
+          <Button title="Add user" spotlight onPress={openAddModal} style={{ marginBottom: Space.md }} />
         )}
+        <Autocomplete
+          placeholder="Find a team member"
+          results={searchResults}
+          debounceMs={0}
+          onQueryChange={setMemberQuery}
+          onSelect={(item) => {
+            const m = members.find((x) => x.id === item.id);
+            if (m) navigation.navigate('RepDetail', { rep: m });
+          }}
+        />
       </View>
 
-      <SectionList
-        sections={sections}
-        keyExtractor={(item) => item.id}
-        contentContainerStyle={styles.list}
-        stickySectionHeadersEnabled={false}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-        }
-        renderSectionHeader={({ section }) => (
-          <TouchableOpacity
-            style={styles.sectionHeaderRow}
-            onPress={() => toggleSection(section.title)}
-          >
-            <Text style={styles.sectionHeader}>
-              {section.title} ({section.count})
-            </Text>
-            <Ionicons
-              name={
-                expanded.has(section.title) ? 'chevron-down' : 'chevron-forward'
-              }
-              size={16}
-              color={Colors.muted}
-            />
-          </TouchableOpacity>
-        )}
-        renderItem={({ item }) => (
-          <Card style={item.is_active ? undefined : styles.inactiveCard}>
-            <View style={styles.memberRow}>
-              <TouchableOpacity
-                style={styles.memberMain}
-                onPress={() => navigation.navigate('RepDetail', { rep: item })}
-              >
-                <Text style={styles.memberName}>{item.name}</Text>
-                {item.phone ? (
-                  <Text style={styles.memberMeta}>{item.phone}</Text>
-                ) : null}
-                {item.email ? (
-                  <Text style={styles.memberMeta}>{item.email}</Text>
-                ) : null}
-                {!item.is_active ? (
-                  <Text style={styles.deactivatedBadge}>DEACTIVATED</Text>
-                ) : null}
-                <Text style={styles.tapHint}>Tap to view details →</Text>
-              </TouchableOpacity>
-
-              {item.phone ? (
-                <TouchableOpacity
-                  style={styles.callBtn}
-                  onPress={() => Linking.openURL(`tel:${item.phone}`)}
-                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                >
-                  <Ionicons name="call" size={22} color={Colors.accent} />
-                </TouchableOpacity>
-              ) : null}
+      {isPending && !data ? (
+        <ListSkeleton />
+      ) : isError && !data ? (
+        <ErrorState onRetry={refetch} />
+      ) : (
+        <SectionList
+          sections={sections}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={[
+            styles.list,
+            { paddingBottom: Layout.tabBar + insets.bottom + Space.md },
+          ]}
+          stickySectionHeadersEnabled={false}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+          renderSectionHeader={({ section }) => (
+            <Pressable style={styles.sectionHeaderRow} onPress={() => toggleSection(section.title)}>
+              <Text style={[Type.section, { color: Colors.text }]}>
+                {section.title} ({section.count})
+              </Text>
+              <Ionicons
+                name={expanded.has(section.title) ? 'chevron-down' : 'chevron-forward'}
+                size={16}
+                color={Colors.textMuted}
+              />
+            </Pressable>
+          )}
+          renderItem={({ item }) => (
+            <View style={styles.rowWrap}>
+              <BentoTile style={item.is_active ? undefined : styles.inactiveCard}>
+                <View style={styles.memberRow}>
+                  <View style={[styles.dot, { backgroundColor: item.is_active ? Colors.success : Colors.alert }]} />
+                  <Pressable
+                    style={styles.memberMain}
+                    onPress={() => navigation.navigate('RepDetail', { rep: item })}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${item.name}, ${ROLE_TITLE[item.role]}`}
+                  >
+                    <Text style={[Type.bodyMed, { color: Colors.text }]}>{item.name}</Text>
+                    {item.phone ? (
+                      <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]}>{item.phone}</Text>
+                    ) : null}
+                    {!item.is_active ? <Text style={styles.deactivatedBadge}>Deactivated</Text> : null}
+                  </Pressable>
+                  {item.phone ? (
+                    <Pressable
+                      style={styles.callBtn}
+                      onPress={() => Linking.openURL(`tel:${item.phone}`)}
+                      hitSlop={10}
+                      accessibilityLabel={`Call ${item.name}`}
+                    >
+                      <Ionicons name="call" size={20} color={Colors.accent} />
+                    </Pressable>
+                  ) : null}
+                </View>
+              </BentoTile>
             </View>
-          </Card>
-        )}
-        ListEmptyComponent={
-          <Card>
-            <Text style={styles.emptyText}>No team members yet.</Text>
-          </Card>
-        }
-      />
+          )}
+          ListEmptyComponent={<EmptyState icon="people-outline" title="No team members yet" />}
+        />
+      )}
 
-      {/* Add User Modal (management only) — OTP enrollment */}
+      {/* Add User modal — OTP enrollment (management only) */}
       <Modal
         visible={showAddModal}
         animationType="slide"
@@ -394,156 +357,127 @@ export default function AdminTeamScreen({
         onRequestClose={closeAddModal}
       >
         <View style={styles.modalContainer}>
-          <Header
-            title="Add User"
-            onBack={step === 'otp' ? () => setStep('form') : closeAddModal}
-          />
-          <ScrollView style={styles.modalContent}>
+          <Header title="Add user" onBack={step === 'otp' ? () => setStep('form') : closeAddModal} />
+
+          {step !== 'done' && (
+            <View style={styles.miniStepper}>
+              <View style={styles.miniTrack}>
+                {['form', 'otp'].map((s, i) => {
+                  const idx = step === 'form' ? 0 : 1;
+                  return <View key={s} style={[styles.miniSeg, { backgroundColor: i <= idx ? Colors.accent : Colors.border }]} />;
+                })}
+              </View>
+              <Text style={[Type.label, { color: Colors.text }]}>
+                Step {step === 'form' ? 1 : 2} of 2 · {step === 'form' ? 'Details' : 'Verify'}
+              </Text>
+            </View>
+          )}
+
+          <ScrollView contentContainerStyle={styles.modalContent} keyboardShouldPersistTaps="handled">
             {step === 'form' && (
               <>
-                <Text style={styles.fieldLabel}>NAME</Text>
+                <Text style={styles.fieldLabel}>Name</Text>
                 <TextInput
                   style={styles.input}
                   value={newName}
                   onChangeText={setNewName}
                   placeholder="Full name"
-                  placeholderTextColor={Colors.muted}
+                  placeholderTextColor={Colors.textMuted}
                 />
 
-                <Text style={styles.fieldLabel}>ROLE</Text>
+                <Text style={[styles.fieldLabel, { marginTop: Space.lg }]}>Role</Text>
                 <View style={styles.roleGrid}>
                   {ADD_ROLES.map((r) => (
-                    <TouchableOpacity
+                    <Pressable
                       key={r.value}
-                      style={[
-                        styles.roleCard,
-                        newRole === r.value && styles.roleCardSelected,
-                      ]}
+                      style={[styles.roleCard, newRole === r.value && styles.roleCardSelected]}
                       onPress={() => {
                         setNewRole(r.value);
                         if (r.value !== 'rep') setNewManagerId(null);
                       }}
                     >
-                      <Text
-                        style={[
-                          styles.roleLabel,
-                          newRole === r.value && styles.roleLabelSelected,
-                        ]}
-                      >
+                      <Text style={[styles.roleLabel, newRole === r.value && styles.roleLabelSelected]}>
                         {r.label}
                       </Text>
-                    </TouchableOpacity>
+                    </Pressable>
                   ))}
                 </View>
 
-                <Text style={styles.fieldLabel}>PHONE (INDIA +91)</Text>
+                <Text style={[styles.fieldLabel, { marginTop: Space.lg }]}>Phone (India +91)</Text>
                 <TextInput
                   style={styles.input}
                   value={newPhone}
                   onChangeText={setNewPhone}
                   placeholder="10-digit mobile number"
-                  placeholderTextColor={Colors.muted}
+                  placeholderTextColor={Colors.textMuted}
                   keyboardType="phone-pad"
                   maxLength={15}
                 />
 
                 {newRole === 'rep' && (
                   <>
-                    <Text style={styles.fieldLabel}>
-                      ASSIGN TO MANAGER (OPTIONAL)
-                    </Text>
+                    <Text style={[styles.fieldLabel, { marginTop: Space.lg }]}>Assign to manager (optional)</Text>
                     <View style={styles.chipWrap}>
-                      <TouchableOpacity
-                        style={[
-                          styles.chip,
-                          newManagerId === null && styles.chipSelected,
-                        ]}
+                      <Pressable
+                        style={[styles.chip, newManagerId === null && styles.chipSelected]}
                         onPress={() => setNewManagerId(null)}
                       >
-                        <Text
-                          style={[
-                            styles.chipText,
-                            newManagerId === null && styles.chipTextSelected,
-                          ]}
-                        >
-                          None
-                        </Text>
-                      </TouchableOpacity>
+                        <Text style={[styles.chipText, newManagerId === null && styles.chipTextSelected]}>None</Text>
+                      </Pressable>
                       {managers.map((m) => (
-                        <TouchableOpacity
+                        <Pressable
                           key={m.id}
-                          style={[
-                            styles.chip,
-                            newManagerId === m.id && styles.chipSelected,
-                          ]}
+                          style={[styles.chip, newManagerId === m.id && styles.chipSelected]}
                           onPress={() => setNewManagerId(m.id)}
                         >
-                          <Text
-                            style={[
-                              styles.chipText,
-                              newManagerId === m.id && styles.chipTextSelected,
-                            ]}
-                          >
+                          <Text style={[styles.chipText, newManagerId === m.id && styles.chipTextSelected]}>
                             {m.name}
                           </Text>
-                        </TouchableOpacity>
+                        </Pressable>
                       ))}
                     </View>
                   </>
                 )}
 
                 <Text style={styles.resumeHint}>
-                  A one-time code is sent to this number. If this employee was
-                  partially added before, re-entering their number finishes
-                  their setup.
+                  A one-time code is sent to this number. If this employee was partially added before,
+                  re-entering their number finishes their setup.
                 </Text>
+                {enrollError ? <Text style={styles.enrollError}>{enrollError}</Text> : null}
 
-                {enrollError ? (
-                  <Text style={styles.enrollError}>{enrollError}</Text>
-                ) : null}
-
-                <Button
-                  title="Send Code"
-                  onPress={handleSendOtp}
-                  loading={sending}
-                  style={styles.submitBtn}
-                />
+                <Button title="Send code" spotlight onPress={handleSendOtp} loading={sending} style={styles.submitBtn} />
               </>
             )}
 
             {step === 'otp' && (
               <>
-                <Text style={styles.otpInstruction}>
+                <Text style={[Type.body, { color: Colors.textSecondary, marginTop: Space.sm }]}>
                   Ask {newName.trim()} for the 6-digit code just sent to
                 </Text>
-                <Text style={styles.otpPhone}>{newPhoneE164}</Text>
+                <Text style={[Type.section, { color: Colors.text, marginTop: 2, marginBottom: Space.lg }]}>
+                  {newPhoneE164}
+                </Text>
 
                 <TextInput
                   style={styles.otpInput}
                   value={otpToken}
                   onChangeText={setOtpToken}
                   placeholder="000000"
-                  placeholderTextColor={Colors.muted}
+                  placeholderTextColor={Colors.textMuted}
                   keyboardType="number-pad"
                   maxLength={6}
                   textAlign="center"
                   editable={!verified}
                 />
 
-                {enrollError ? (
-                  <Text style={styles.enrollError}>{enrollError}</Text>
-                ) : null}
+                {enrollError ? <Text style={styles.enrollError}>{enrollError}</Text> : null}
 
                 {verified ? (
-                  <Button
-                    title="Retry Save"
-                    onPress={handleRetrySave}
-                    loading={saving}
-                    style={styles.submitBtn}
-                  />
+                  <Button title="Retry save" spotlight onPress={handleRetrySave} loading={saving} style={styles.submitBtn} />
                 ) : (
                   <Button
-                    title="Verify & Create"
+                    title="Verify & create"
+                    spotlight
                     onPress={handleVerifyAndCreate}
                     loading={verifying || saving}
                     style={styles.submitBtn}
@@ -554,21 +488,15 @@ export default function AdminTeamScreen({
 
             {step === 'done' && (
               <View style={styles.doneWrap}>
-                <Ionicons
-                  name="checkmark-circle"
-                  size={56}
-                  color={Colors.success}
-                />
-                <Text style={styles.doneTitle}>{newName.trim()} added</Text>
-                <Text style={styles.doneSub}>
+                <Ionicons name="checkmark-circle" size={56} color={Colors.success} />
+                <Text style={[Type.section, { color: Colors.text, marginTop: Space.md }]}>
+                  {newName.trim()} added
+                </Text>
+                <Text style={[Type.body, { color: Colors.textSecondary, textAlign: 'center', marginTop: Space.sm }]}>
                   {newName.trim()} can now log in with their phone number
                   {managerName ? ` · Manager: ${managerName}` : ''}.
                 </Text>
-                <Button
-                  title="Done"
-                  onPress={closeAddModal}
-                  style={styles.submitBtn}
-                />
+                <Button title="Done" onPress={closeAddModal} style={styles.submitBtn} />
               </View>
             )}
           </ScrollView>
@@ -580,190 +508,97 @@ export default function AdminTeamScreen({
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
-  headerPad: { paddingHorizontal: 24, paddingTop: 60, paddingBottom: 8 },
-  title: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.pageTitle,
-    color: Colors.text,
-    marginBottom: 12,
-  },
-  addBtn: { marginBottom: 8 },
-  list: { paddingHorizontal: 24, paddingBottom: 24 },
+  headerPad: { paddingHorizontal: Layout.screenPad, paddingBottom: Space.sm },
+  list: { paddingHorizontal: Layout.screenPad, paddingTop: Space.sm },
   sectionHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginTop: 16,
-    marginBottom: 8,
-    paddingVertical: 4,
+    marginTop: Space.md,
+    marginBottom: Space.sm,
+    minHeight: Layout.tap,
   },
-  sectionHeader: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.accordionHeader,
-    color: Colors.text,
-  },
-  memberRow: { flexDirection: 'row', alignItems: 'center' },
-  memberMain: { flex: 1 },
+  rowWrap: { marginBottom: Space.md },
   inactiveCard: { opacity: 0.6 },
-  memberName: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.cardTitle,
-    color: Colors.text,
-  },
-  memberMeta: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 14,
-    color: Colors.muted,
-    marginTop: 2,
-  },
-  deactivatedBadge: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0.5,
-    color: Colors.alert,
-    marginTop: 6,
-  },
-  tapHint: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 12,
-    color: Colors.accent,
-    marginTop: 8,
-  },
+  memberRow: { flexDirection: 'row', alignItems: 'center', gap: Space.md },
+  dot: { width: 10, height: 10, borderRadius: 5 },
+  memberMain: { flex: 1 },
+  deactivatedBadge: { ...Type.caption, fontWeight: '700', color: Colors.alert, marginTop: 4 },
   callBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: Layout.tap,
+    height: Layout.tap,
+    borderRadius: Radius.pill,
     borderWidth: 1,
     borderColor: Colors.accent,
     alignItems: 'center',
     justifyContent: 'center',
-    marginLeft: 12,
   },
-  emptyText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-  },
-  // Add User modal
+  // Modal
   modalContainer: { flex: 1, backgroundColor: Colors.background },
-  modalContent: { padding: 24 },
-  fieldLabel: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginBottom: 8,
-    marginTop: 20,
+  miniStepper: {
+    paddingHorizontal: Layout.screenPad,
+    paddingVertical: Space.md,
+    gap: Space.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
   },
+  miniTrack: { flexDirection: 'row', gap: 4 },
+  miniSeg: { flex: 1, height: 5, borderRadius: Radius.pill },
+  modalContent: { padding: Layout.screenPad, paddingBottom: Space.xxl },
+  fieldLabel: { ...Type.label, color: Colors.textMuted, marginBottom: Space.sm },
   input: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 16,
+    ...Type.body,
     color: Colors.text,
-    backgroundColor: Colors.white,
+    backgroundColor: Colors.surface,
     borderWidth: 1,
     borderColor: Colors.border,
-    borderRadius: 4,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
+    borderRadius: Radius.md,
+    paddingHorizontal: Space.lg,
+    paddingVertical: Space.md,
   },
-  roleGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
+  roleGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: Space.sm },
   roleCard: {
     flexGrow: 1,
     minWidth: '30%',
-    backgroundColor: Colors.white,
+    backgroundColor: Colors.surface,
     borderWidth: 1.5,
     borderColor: Colors.border,
-    borderRadius: 4,
-    paddingVertical: 14,
+    borderRadius: Radius.md,
+    paddingVertical: Space.md,
     alignItems: 'center',
+    minHeight: Layout.tap,
+    justifyContent: 'center',
   },
-  roleCardSelected: {
-    borderColor: Colors.accent,
-    backgroundColor: Colors.accent,
-  },
-  roleLabel: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 14,
-    color: Colors.text,
-    fontWeight: '600',
-  },
+  roleCardSelected: { borderColor: Colors.accent, backgroundColor: Colors.accent },
+  roleLabel: { ...Type.label, color: Colors.text },
   roleLabelSelected: { color: Colors.white },
-  chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: Space.sm },
   chip: {
-    backgroundColor: Colors.white,
+    backgroundColor: Colors.surface,
     borderWidth: 1.5,
     borderColor: Colors.border,
-    borderRadius: 20,
-    paddingVertical: 8,
-    paddingHorizontal: 16,
+    borderRadius: Radius.pill,
+    paddingVertical: Space.sm,
+    paddingHorizontal: Space.md,
+    minHeight: Layout.tap,
+    justifyContent: 'center',
   },
   chipSelected: { borderColor: Colors.accent, backgroundColor: Colors.accent },
-  chipText: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 14,
-    color: Colors.text,
-    fontWeight: '600',
-  },
+  chipText: { ...Type.label, color: Colors.text },
   chipTextSelected: { color: Colors.white },
-  resumeHint: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 12,
-    color: Colors.muted,
-    marginTop: 20,
-    lineHeight: 18,
-  },
-  enrollError: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 14,
-    color: Colors.alert,
-    marginTop: 16,
-  },
-  submitBtn: { marginTop: 24 },
-  // OTP step
-  otpInstruction: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-    marginTop: 12,
-  },
-  otpPhone: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.sectionTitle,
-    color: Colors.text,
-    marginTop: 4,
-    marginBottom: 24,
-  },
+  resumeHint: { ...Type.caption, color: Colors.textMuted, marginTop: Space.lg, lineHeight: 18 },
+  enrollError: { ...Type.body, color: Colors.alert, marginTop: Space.md },
+  submitBtn: { marginTop: Space.xl },
   otpInput: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 32,
-    fontWeight: '700',
+    ...Type.title,
     color: Colors.text,
-    backgroundColor: Colors.white,
+    backgroundColor: Colors.surface,
     borderWidth: 1,
     borderColor: Colors.border,
-    borderRadius: 4,
-    paddingHorizontal: 16,
-    paddingVertical: 16,
+    borderRadius: Radius.md,
+    paddingHorizontal: Space.lg,
+    paddingVertical: Space.lg,
     letterSpacing: 12,
   },
-  // Done step
-  doneWrap: { alignItems: 'center', paddingTop: 48 },
-  doneTitle: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.sectionTitle,
-    color: Colors.text,
-    marginTop: 16,
-  },
-  doneSub: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-    textAlign: 'center',
-    marginTop: 8,
-    lineHeight: 22,
-  },
+  doneWrap: { alignItems: 'center', paddingTop: Space.xxl },
 });

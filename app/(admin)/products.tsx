@@ -4,7 +4,7 @@ import {
   Text,
   StyleSheet,
   SectionList,
-  TouchableOpacity,
+  Pressable,
   TextInput,
   Alert,
   Modal,
@@ -12,32 +12,27 @@ import {
   RefreshControl,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors, Typography } from '../../constants/colors';
-import Card from '../../components/Card';
+import { Colors, Type, Space, Radius, Layout } from '../../constants/colors';
 import Button from '../../components/Button';
 import Header from '../../components/Header';
+import BentoTile from '../../components/BentoTile';
+import EmptyState from '../../components/EmptyState';
+import ErrorState from '../../components/ErrorState';
+import { ListSkeleton } from '../../components/skeleton/ListSkeleton';
 import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
+import { useProducts, Product } from '../../hooks/useProducts';
 
-interface Product {
-  id: string;
-  name: string;
-  unit: string;
-  qty_per_carton: number;
-  product_code: string | null;
-  price_per_case: number | null;
-  price_per_bottle: number | null;
-  is_active: boolean;
-}
-
-const fmtPrice = (n: number) =>
-  `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+const fmtPrice = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 
 export default function ProductsScreen() {
   const { profile } = useAuthStore();
-  const [products, setProducts] = useState<Product[]>([]);
+  const insets = useSafeAreaInsets();
+  const { data, refetch, isPending, isError } = useProducts();
+  const products = data ?? [];
   const [archivedExpanded, setArchivedExpanded] = useState(false);
 
   // Add/Edit modal
@@ -50,29 +45,21 @@ export default function ProductsScreen() {
   const [priceCase, setPriceCase] = useState('');
   const [priceBottle, setPriceBottle] = useState('');
   const [saving, setSaving] = useState(false);
-
-  const load = useCallback(async () => {
-    const { data } = await supabase.from('products').select('*').order('name');
-    setProducts((data as Product[]) || []);
-  }, []);
+  const [errors, setErrors] = useState<Record<string, string>>({});
 
   useFocusEffect(
     useCallback(() => {
-      load();
-    }, [load])
+      refetch();
+    }, [refetch])
   );
-
-  const { refreshing, onRefresh } = usePullToRefresh(load);
+  const { refreshing, onRefresh } = usePullToRefresh(refetch);
 
   const sections = useMemo(() => {
     const active = products.filter((p) => p.is_active);
     const archived = products.filter((p) => !p.is_active);
-    const secs: {
-      title: string;
-      collapsible: boolean;
-      count: number;
-      data: Product[];
-    }[] = [{ title: 'Active', collapsible: false, count: active.length, data: active }];
+    const secs: { title: string; collapsible: boolean; count: number; data: Product[] }[] = [
+      { title: 'Active', collapsible: false, count: active.length, data: active },
+    ];
     if (archived.length) {
       secs.push({
         title: 'Archived',
@@ -92,6 +79,7 @@ export default function ProductsScreen() {
     setCode('');
     setPriceCase('');
     setPriceBottle('');
+    setErrors({});
     setShowModal(true);
   };
 
@@ -103,27 +91,22 @@ export default function ProductsScreen() {
     setCode(p.product_code || '');
     setPriceCase(p.price_per_case != null ? String(p.price_per_case) : '');
     setPriceBottle(p.price_per_bottle != null ? String(p.price_per_bottle) : '');
+    setErrors({});
     setShowModal(true);
   };
 
   const handleSave = async () => {
     const n = name.trim();
     const u = unit.trim();
-    if (!n || !u) {
-      Alert.alert('Error', 'Name and unit are required.');
-      return;
-    }
+    const errs: Record<string, string> = {};
+    if (!n) errs.name = 'Name is required.';
+    if (!u) errs.unit = 'Unit is required.';
     const qtyNum = parseInt(qty, 10);
-    if (!Number.isFinite(qtyNum) || qtyNum <= 0) {
-      Alert.alert('Error', 'Qty per carton must be a whole number greater than 0.');
-      return;
-    }
-    if (priceCase.trim() && !Number.isFinite(Number(priceCase.trim()))) {
-      Alert.alert('Error', 'Price per case must be a number.');
-      return;
-    }
-    if (priceBottle.trim() && !Number.isFinite(Number(priceBottle.trim()))) {
-      Alert.alert('Error', 'Price per bottle must be a number.');
+    if (!Number.isFinite(qtyNum) || qtyNum <= 0) errs.qty = 'Enter a whole number greater than 0.';
+    if (priceCase.trim() && !Number.isFinite(Number(priceCase.trim()))) errs.priceCase = 'Must be a number.';
+    if (priceBottle.trim() && !Number.isFinite(Number(priceBottle.trim()))) errs.priceBottle = 'Must be a number.';
+    if (Object.keys(errs).length) {
+      setErrors(errs);
       return;
     }
     const payload = {
@@ -137,10 +120,7 @@ export default function ProductsScreen() {
     setSaving(true);
     try {
       if (editing) {
-        const { error } = await supabase
-          .from('products')
-          .update(payload)
-          .eq('id', editing.id);
+        const { error } = await supabase.from('products').update(payload).eq('id', editing.id);
         if (error) throw error;
       } else {
         const { error } = await supabase
@@ -149,9 +129,9 @@ export default function ProductsScreen() {
         if (error) throw error;
       }
       setShowModal(false);
-      await load();
+      await refetch();
     } catch (err: any) {
-      Alert.alert('Error', err.message || 'Failed to save product.');
+      Alert.alert('Couldn’t save the product', err.message || 'Try again.');
     }
     setSaving(false);
   };
@@ -175,11 +155,11 @@ export default function ProductsScreen() {
               .update({ is_active: !archiving })
               .eq('id', editing.id);
             if (error) {
-              Alert.alert('Error', error.message || 'Update failed.');
+              Alert.alert('Couldn’t update', error.message || 'Try again.');
               return;
             }
             setShowModal(false);
-            await load();
+            await refetch();
           },
         },
       ]
@@ -191,75 +171,79 @@ export default function ProductsScreen() {
     if (p.product_code) parts.push(`Code ${p.product_code}`);
     return parts.join(' · ');
   };
-
   const priceLine = (p: Product) => {
     const parts: string[] = [];
     if (p.price_per_case != null) parts.push(`${fmtPrice(p.price_per_case)}/case`);
-    if (p.price_per_bottle != null)
-      parts.push(`${fmtPrice(p.price_per_bottle)}/bottle`);
+    if (p.price_per_bottle != null) parts.push(`${fmtPrice(p.price_per_bottle)}/bottle`);
     return parts.join(' · ');
   };
 
   return (
     <View style={styles.container}>
-      <View style={styles.headerPad}>
-        <Text style={styles.title}>Products</Text>
-        <Button title="+ Add Product" onPress={openAdd} style={styles.addBtn} />
+      <View style={[styles.headerPad, { paddingTop: insets.top + Space.md }]}>
+        <Text style={[Type.title, { color: Colors.text, marginBottom: Space.md }]}>Products</Text>
+        {/* Spotlight = Add product */}
+        <Button title="Add product" spotlight onPress={openAdd} />
       </View>
 
-      <SectionList
-        sections={sections}
-        keyExtractor={(item) => item.id}
-        contentContainerStyle={styles.list}
-        stickySectionHeadersEnabled={false}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-        }
-        renderSectionHeader={({ section }) =>
-          section.collapsible ? (
-            <TouchableOpacity
-              style={styles.sectionHeaderRow}
-              onPress={() => setArchivedExpanded((v) => !v)}
-            >
-              <Text style={styles.sectionHeader}>
+      {isPending && !data ? (
+        <ListSkeleton />
+      ) : isError && !data ? (
+        <ErrorState onRetry={refetch} />
+      ) : (
+        <SectionList
+          sections={sections}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={[
+            styles.list,
+            { paddingBottom: Layout.tabBar + insets.bottom + Space.md },
+          ]}
+          stickySectionHeadersEnabled={false}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+          renderSectionHeader={({ section }) =>
+            section.collapsible ? (
+              <Pressable style={styles.sectionHeaderRow} onPress={() => setArchivedExpanded((v) => !v)}>
+                <Text style={[Type.section, { color: Colors.text }]}>
+                  {section.title} ({section.count})
+                </Text>
+                <Ionicons
+                  name={archivedExpanded ? 'chevron-down' : 'chevron-forward'}
+                  size={16}
+                  color={Colors.textMuted}
+                />
+              </Pressable>
+            ) : (
+              <Text style={[Type.section, styles.sectionHeaderPlain]}>
                 {section.title} ({section.count})
               </Text>
-              <Ionicons
-                name={archivedExpanded ? 'chevron-down' : 'chevron-forward'}
-                size={16}
-                color={Colors.muted}
+            )
+          }
+          renderItem={({ item }) => (
+            <Pressable onPress={() => openEdit(item)} style={styles.rowWrap}>
+              <BentoTile style={item.is_active ? undefined : styles.inactiveCard}>
+                <Text style={[Type.bodyMed, { color: Colors.text }]}>{item.name}</Text>
+                <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]}>{metaLine(item)}</Text>
+                {priceLine(item) ? (
+                  <Text style={[Type.caption, { color: Colors.text, marginTop: 2 }]}>{priceLine(item)}</Text>
+                ) : null}
+              </BentoTile>
+            </Pressable>
+          )}
+          renderSectionFooter={({ section }) =>
+            section.title === 'Active' && section.count === 0 ? (
+              <EmptyState
+                icon="cube-outline"
+                title="No active products"
+                message="Add your first product to start taking orders."
+                actionLabel="Add product"
+                onAction={openAdd}
               />
-            </TouchableOpacity>
-          ) : (
-            <Text style={styles.sectionHeaderPlain}>
-              {section.title} ({section.count})
-            </Text>
-          )
-        }
-        renderItem={({ item }) => (
-          <TouchableOpacity onPress={() => openEdit(item)}>
-            <Card style={item.is_active ? undefined : styles.inactiveCard}>
-              <Text style={styles.productName}>{item.name}</Text>
-              <Text style={styles.productMeta}>{metaLine(item)}</Text>
-              {priceLine(item) ? (
-                <Text style={styles.productPrice}>{priceLine(item)}</Text>
-              ) : null}
-              <Text style={styles.tapHint}>Tap to edit →</Text>
-            </Card>
-          </TouchableOpacity>
-        )}
-        renderSectionFooter={({ section }) =>
-          section.title === 'Active' && section.count === 0 ? (
-            <Card>
-              <Text style={styles.emptyText}>
-                No active products. Add one to get started.
-              </Text>
-            </Card>
-          ) : null
-        }
-      />
+            ) : null
+          }
+        />
+      )}
 
-      {/* Add/Edit Modal */}
+      {/* Add/Edit modal */}
       <Modal
         visible={showModal}
         animationType="slide"
@@ -267,85 +251,90 @@ export default function ProductsScreen() {
         onRequestClose={() => setShowModal(false)}
       >
         <View style={styles.modalContainer}>
-          <Header
-            title={editing ? 'Edit Product' : 'Add Product'}
-            onBack={() => setShowModal(false)}
-          />
-          <ScrollView style={styles.modalContent}>
-            <Text style={styles.fieldLabel}>NAME</Text>
-            <TextInput
-              style={styles.input}
-              value={name}
-              onChangeText={setName}
-              placeholder="Product name"
-              placeholderTextColor={Colors.muted}
-            />
+          <Header title={editing ? 'Edit product' : 'Add product'} onBack={() => setShowModal(false)} />
+          <ScrollView contentContainerStyle={styles.modalContent} keyboardShouldPersistTaps="handled">
+            <ProductField label="Name" error={errors.name}>
+              <TextInput
+                style={[styles.input, errors.name && styles.inputError]}
+                value={name}
+                onChangeText={(t) => { setName(t); if (errors.name) setErrors((e) => ({ ...e, name: '' })); }}
+                placeholder="Product name"
+                placeholderTextColor={Colors.textMuted}
+              />
+            </ProductField>
 
-            <Text style={styles.fieldLabel}>UNIT</Text>
-            <TextInput
-              style={styles.input}
-              value={unit}
-              onChangeText={setUnit}
-              placeholder="e.g. ml, kg, pieces"
-              placeholderTextColor={Colors.muted}
-              autoCapitalize="none"
-            />
+            <ProductField label="Unit" error={errors.unit}>
+              <TextInput
+                style={[styles.input, errors.unit && styles.inputError]}
+                value={unit}
+                onChangeText={(t) => { setUnit(t); if (errors.unit) setErrors((e) => ({ ...e, unit: '' })); }}
+                placeholder="e.g. ml, kg, pieces"
+                placeholderTextColor={Colors.textMuted}
+                autoCapitalize="none"
+              />
+            </ProductField>
 
-            <Text style={styles.fieldLabel}>QTY PER CARTON</Text>
-            <TextInput
-              style={styles.input}
-              value={qty}
-              onChangeText={setQty}
-              placeholder="e.g. 12"
-              placeholderTextColor={Colors.muted}
-              keyboardType="number-pad"
-            />
+            <ProductField label="Qty per carton" error={errors.qty}>
+              <TextInput
+                style={[styles.input, errors.qty && styles.inputError]}
+                value={qty}
+                onChangeText={(t) => { setQty(t); if (errors.qty) setErrors((e) => ({ ...e, qty: '' })); }}
+                placeholder="e.g. 12"
+                placeholderTextColor={Colors.textMuted}
+                keyboardType="number-pad"
+              />
+            </ProductField>
 
-            <Text style={styles.fieldLabel}>PRODUCT CODE (OPTIONAL)</Text>
-            <TextInput
-              style={styles.input}
-              value={code}
-              onChangeText={setCode}
-              placeholder="SKU / code"
-              placeholderTextColor={Colors.muted}
-              autoCapitalize="characters"
-            />
+            <ProductField label="Product code (optional)">
+              <TextInput
+                style={styles.input}
+                value={code}
+                onChangeText={setCode}
+                placeholder="SKU / code"
+                placeholderTextColor={Colors.textMuted}
+                autoCapitalize="characters"
+              />
+            </ProductField>
 
-            <Text style={styles.fieldLabel}>PRICE PER CASE (OPTIONAL)</Text>
-            <TextInput
-              style={styles.input}
-              value={priceCase}
-              onChangeText={setPriceCase}
-              placeholder="₹ per case"
-              placeholderTextColor={Colors.muted}
-              keyboardType="decimal-pad"
-            />
+            <ProductField label="Price per case (optional)" error={errors.priceCase}>
+              <TextInput
+                style={[styles.input, errors.priceCase && styles.inputError]}
+                value={priceCase}
+                onChangeText={(t) => { setPriceCase(t); if (errors.priceCase) setErrors((e) => ({ ...e, priceCase: '' })); }}
+                placeholder="₹ per case"
+                placeholderTextColor={Colors.textMuted}
+                keyboardType="decimal-pad"
+              />
+            </ProductField>
 
-            <Text style={styles.fieldLabel}>PRICE PER BOTTLE (OPTIONAL)</Text>
-            <TextInput
-              style={styles.input}
-              value={priceBottle}
-              onChangeText={setPriceBottle}
-              placeholder="₹ per bottle"
-              placeholderTextColor={Colors.muted}
-              keyboardType="decimal-pad"
-            />
+            <ProductField label="Price per bottle (optional)" error={errors.priceBottle}>
+              <TextInput
+                style={[styles.input, errors.priceBottle && styles.inputError]}
+                value={priceBottle}
+                onChangeText={(t) => { setPriceBottle(t); if (errors.priceBottle) setErrors((e) => ({ ...e, priceBottle: '' })); }}
+                placeholder="₹ per bottle"
+                placeholderTextColor={Colors.textMuted}
+                keyboardType="decimal-pad"
+              />
+            </ProductField>
 
             <Button
-              title={editing ? 'Save Changes' : 'Create Product'}
+              title={editing ? 'Save changes' : 'Create product'}
+              spotlight
               onPress={handleSave}
               loading={saving}
-              style={styles.submitBtn}
+              style={{ marginTop: Space.xl }}
             />
 
             {editing ? (
               <Button
-                title={editing.is_active ? 'Archive Product' : 'Unarchive Product'}
+                title={editing.is_active ? 'Archive product' : 'Unarchive product'}
                 onPress={handleArchiveToggle}
                 variant={editing.is_active ? 'danger' : 'secondary'}
-                style={styles.archiveBtn}
+                style={{ marginTop: Space.md }}
               />
             ) : null}
+            <View style={{ height: Space.xxl }} />
           </ScrollView>
         </View>
       </Modal>
@@ -353,87 +342,46 @@ export default function ProductsScreen() {
   );
 }
 
+function ProductField({ label, error, children }: { label: string; error?: string; children: React.ReactNode }) {
+  return (
+    <View style={styles.field}>
+      <Text style={styles.fieldLabel}>{label}</Text>
+      {children}
+      {error ? <Text style={styles.errorText}>{error}</Text> : null}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
-  headerPad: { paddingHorizontal: 24, paddingTop: 60, paddingBottom: 8 },
-  title: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.pageTitle,
-    color: Colors.text,
-    marginBottom: 12,
-  },
-  addBtn: { marginBottom: 8 },
-  list: { paddingHorizontal: 24, paddingBottom: 24 },
+  headerPad: { paddingHorizontal: Layout.screenPad, paddingBottom: Space.sm },
+  list: { paddingHorizontal: Layout.screenPad, paddingTop: Space.sm },
   sectionHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginTop: 16,
-    marginBottom: 8,
-    paddingVertical: 4,
+    marginTop: Space.md,
+    marginBottom: Space.sm,
+    minHeight: Layout.tap,
   },
-  sectionHeader: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.accordionHeader,
-    color: Colors.text,
-  },
-  sectionHeaderPlain: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.accordionHeader,
-    color: Colors.text,
-    marginTop: 8,
-    marginBottom: 8,
-  },
+  sectionHeaderPlain: { color: Colors.text, marginTop: Space.sm, marginBottom: Space.sm },
   inactiveCard: { opacity: 0.6 },
-  productName: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.cardTitle,
-    color: Colors.text,
-  },
-  productMeta: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 14,
-    color: Colors.muted,
-    marginTop: 2,
-  },
-  productPrice: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 14,
-    color: Colors.text,
-    marginTop: 2,
-  },
-  tapHint: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 12,
-    color: Colors.accent,
-    marginTop: 8,
-  },
-  emptyText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-  },
+  rowWrap: { marginBottom: Space.md },
   // Modal
   modalContainer: { flex: 1, backgroundColor: Colors.background },
-  modalContent: { padding: 24 },
-  fieldLabel: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginBottom: 8,
-    marginTop: 20,
-  },
+  modalContent: { padding: Layout.screenPad },
+  field: { marginTop: Space.lg },
+  fieldLabel: { ...Type.label, color: Colors.textMuted, marginBottom: Space.sm },
   input: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 16,
+    ...Type.body,
     color: Colors.text,
-    backgroundColor: Colors.white,
+    backgroundColor: Colors.surface,
     borderWidth: 1,
     borderColor: Colors.border,
-    borderRadius: 4,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
+    borderRadius: Radius.md,
+    paddingHorizontal: Space.lg,
+    paddingVertical: Space.md,
   },
-  submitBtn: { marginTop: 32 },
-  archiveBtn: { marginTop: 12 },
+  inputError: { borderColor: Colors.alert },
+  errorText: { ...Type.caption, color: Colors.alert, marginTop: Space.xs },
 });

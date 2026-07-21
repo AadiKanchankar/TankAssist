@@ -1,17 +1,12 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  Image,
-  Alert,
-  ActivityIndicator,
-} from 'react-native';
-import { Colors, Typography } from '../../constants/colors';
-import Card from '../../components/Card';
+import { View, Text, StyleSheet, ScrollView, Pressable, Image, Alert } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
+import { Colors, Type, Space, Radius, Layout } from '../../constants/colors';
 import Button from '../../components/Button';
+import BentoTile from '../../components/BentoTile';
+import Metric from '../../components/Metric';
+import { SkelBlock } from '../../components/skeleton/Skeleton';
 import { supabase } from '../../lib/supabase';
 import { getSignedUrls } from '../../lib/storage';
 import {
@@ -34,21 +29,18 @@ interface RepParam {
   id: string;
   name: string;
 }
-
 interface VisitDetail {
   id: string;
   storeName: string;
   cases_sold: number | null;
   check_in_time: string;
-  photoUrls: string[]; // 1-hour signed URLs for in-app display
+  photoUrls: string[];
 }
-
 interface DayReport {
   report_date: string;
   notes: string | null;
   challenges: string | null;
 }
-
 interface Stats {
   marketTimeMinutes: number | null;
   distanceKm: number | null;
@@ -56,64 +48,38 @@ interface Stats {
   storesVisited: number | null;
 }
 
-const EMPTY_STATS: Stats = {
-  marketTimeMinutes: null,
-  distanceKm: null,
-  casesSold: null,
-  storesVisited: null,
-};
+const EMPTY_STATS: Stats = { marketTimeMinutes: null, distanceKm: null, casesSold: null, storesVisited: null };
 
 function startOfToday(): Date {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
   return d;
 }
-
-/** First of the month `n` months from `d` (n may be negative). */
 function addMonths(d: Date, n: number): Date {
   return new Date(d.getFullYear(), d.getMonth() + n, 1);
 }
 
 /**
  * Rep Report section — Daily / Weekly / Monthly views over one rep's activity.
- * Rendered as the "Report" tab inside RepDetailScreen (no Header of its own;
- * the parent screen owns the rep-name header).
- *
- * Period semantics + navigator arrow step (per period):
- * - Daily   = the single selected date; arrows step ±1 day.
- * - Weekly  = rolling 7 days ENDING on the anchor date (not Mon–Sun); arrows
- *             step ±7 days on the anchor.
- * - Monthly = a separate month cursor, independent of the daily/weekly anchor;
- *             arrows step ±1 calendar month. Rollup numbers come from the
- *             monthly_ta_summary view (security_invoker).
- * "Download Detail Report" always exports the FULL CALENDAR MONTH currently in
- * view (the month cursor in Monthly, else the anchor date's month).
+ * Period semantics + export logic unchanged; presentation only. The generated
+ * CSV/PDF documents (lib/reportExport, lib/reportPdf) are intentionally untouched.
  */
 export default function RepReportSection({ rep }: { rep: RepParam }) {
+  const insets = useSafeAreaInsets();
   const [period, setPeriod] = useState<Period>('daily');
   const [selectedDate, setSelectedDate] = useState<Date>(startOfToday);
-  // Monthly is navigated independently of the daily/weekly anchor.
-  const [monthCursor, setMonthCursor] = useState<Date>(() =>
-    monthStart(new Date())
-  );
+  const [monthCursor, setMonthCursor] = useState<Date>(() => monthStart(new Date()));
   const [stats, setStats] = useState<Stats>(EMPTY_STATS);
   const [visits, setVisits] = useState<VisitDetail[]>([]);
   const [dayReports, setDayReports] = useState<DayReport[]>([]);
   const [loading, setLoading] = useState(true);
   const [exportKind, setExportKind] = useState<'csv' | 'pdf' | null>(null);
 
-  // The month a download resolves to: the cursor in Monthly, else the anchor.
   const downloadMonthAnchor = period === 'monthly' ? monthCursor : selectedDate;
 
-  // Resolved inclusive range for the current period.
   const rangeStart =
-    period === 'daily'
-      ? selectedDate
-      : period === 'weekly'
-      ? addDays(selectedDate, -6)
-      : monthStart(monthCursor);
-  const rangeEnd =
-    period === 'monthly' ? addDays(nextMonthStart(monthCursor), -1) : selectedDate;
+    period === 'daily' ? selectedDate : period === 'weekly' ? addDays(selectedDate, -6) : monthStart(monthCursor);
+  const rangeEnd = period === 'monthly' ? addDays(nextMonthStart(monthCursor), -1) : selectedDate;
 
   const rangeLabel =
     period === 'daily'
@@ -127,15 +93,10 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
       ? toDateStr(monthCursor) < toDateStr(monthStart(new Date()))
       : toDateStr(selectedDate) < toDateStr(startOfToday());
 
-  // One tap of the navigator arrows, stepped by the active period.
   const step = (dir: -1 | 1) => {
-    if (period === 'monthly') {
-      setMonthCursor((d) => addMonths(d, dir));
-    } else if (period === 'weekly') {
-      setSelectedDate((d) => addDays(d, dir * 7));
-    } else {
-      setSelectedDate((d) => addDays(d, dir));
-    }
+    if (period === 'monthly') setMonthCursor((d) => addMonths(d, dir));
+    else if (period === 'weekly') setSelectedDate((d) => addDays(d, dir * 7));
+    else setSelectedDate((d) => addDays(d, dir));
   };
 
   const loadData = useCallback(async () => {
@@ -144,20 +105,15 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
       const startStr = toDateStr(rangeStart);
       const endExclusiveStr = toDateStr(addDays(rangeEnd, 1));
 
-      // Visits (+ stores) in range — used for the list in all periods,
-      // and for cases/visited stats in daily/weekly.
       const { data: visitRows } = await supabase
         .from('store_visits')
-        .select(
-          'id, cases_sold, check_in_time, check_out_time, photo_url, stores(name)'
-        )
+        .select('id, cases_sold, check_in_time, check_out_time, photo_url, stores(name)')
         .eq('user_id', rep.id)
         .gte('check_in_time', `${startStr}T00:00:00`)
         .lt('check_in_time', `${endExclusiveStr}T00:00:00`)
         .order('check_in_time', { ascending: true });
       const vRows = (visitRows as any[]) || [];
 
-      // Photos for those visits (batch), signed for 1 hour (in-app only).
       const visitIds = vRows.map((v) => v.id);
       const pathsByVisit: Record<string, string[]> = {};
       if (visitIds.length > 0) {
@@ -172,25 +128,20 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
         }
       }
       for (const v of vRows) {
-        if (!pathsByVisit[v.id] && v.photo_url) {
-          pathsByVisit[v.id] = [v.photo_url]; // legacy single-photo fallback
-        }
+        if (!pathsByVisit[v.id] && v.photo_url) pathsByVisit[v.id] = [v.photo_url];
       }
       const allPaths = Object.values(pathsByVisit).flat();
-      const signed = await getSignedUrls(allPaths); // default 1h expiry
+      const signed = await getSignedUrls(allPaths);
       setVisits(
         vRows.map((v) => ({
           id: v.id,
           storeName: v.stores?.name || 'Store',
           cases_sold: v.cases_sold,
           check_in_time: v.check_in_time,
-          photoUrls: (pathsByVisit[v.id] || [])
-            .map((p) => signed[p])
-            .filter((u): u is string => !!u),
+          photoUrls: (pathsByVisit[v.id] || []).map((p) => signed[p]).filter((u): u is string => !!u),
         }))
       );
 
-      // Notes / challenges in range.
       const { data: reportRows } = await supabase
         .from('daily_reports')
         .select('report_date, notes, challenges')
@@ -200,14 +151,9 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
         .order('report_date', { ascending: false });
       setDayReports((reportRows as DayReport[]) || []);
 
-      // Cases Sold — cutover semantics (orders on/after cutover, legacy visits
-      // before), uniform across all periods.
       const casesSold = await repCasesSold(rep.id, startStr, endExclusiveStr);
 
-      // Stats.
       if (period === 'monthly') {
-        // Reuse monthly_ta_summary for market time / distance / stores; cases
-        // now come from the cutover-aware helper above (not the view).
         const { data: summary } = await supabase
           .from('monthly_ta_summary')
           .select('*')
@@ -229,10 +175,7 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
           .lt('check_in_time', `${endExclusiveStr}T00:00:00`);
         const aRows = (attRows as any[]) || [];
         setStats({
-          marketTimeMinutes: aRows.reduce(
-            (s, a) => s + (a.total_market_time_minutes || 0),
-            0
-          ),
+          marketTimeMinutes: aRows.reduce((s, a) => s + (a.total_market_time_minutes || 0), 0),
           distanceKm: aRows.reduce((s, a) => s + (a.total_distance_km || 0), 0),
           casesSold,
           storesVisited: vRows.filter((v) => v.check_out_time).length,
@@ -254,7 +197,7 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
     try {
       await exportMonthlyReport(rep.id, rep.name, downloadMonthAnchor);
     } catch (err: any) {
-      Alert.alert('Export Failed', err.message || 'Could not generate report.');
+      Alert.alert('Export failed', err.message || 'Could not generate the report.');
     }
     setExportKind(null);
   };
@@ -264,185 +207,132 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
     try {
       await exportRepPdf(rep.id, rep.name, [downloadMonthAnchor]);
     } catch (err: any) {
-      Alert.alert('Export Failed', err.message || 'Could not generate report.');
+      Alert.alert('Export failed', err.message || 'Could not generate the report.');
     }
     setExportKind(null);
   };
 
   return (
     <View style={styles.container}>
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={[styles.content, { paddingBottom: Layout.tabBar + insets.bottom + Space.md }]}
+      >
         {/* Period selector */}
-        <View style={styles.periodRow}>
+        <View style={styles.segRow}>
           {(['daily', 'weekly', 'monthly'] as Period[]).map((p) => (
-            <TouchableOpacity
+            <Pressable
               key={p}
-              style={[styles.periodBtn, period === p && styles.periodBtnActive]}
+              style={[styles.segBtn, period === p && styles.segBtnActive]}
               onPress={() => setPeriod(p)}
             >
-              <Text
-                style={[
-                  styles.periodBtnText,
-                  period === p && styles.periodBtnTextActive,
-                ]}
-              >
+              <Text style={[styles.segText, period === p && styles.segTextActive]}>
                 {p.charAt(0).toUpperCase() + p.slice(1)}
               </Text>
-            </TouchableOpacity>
+            </Pressable>
           ))}
         </View>
 
-        {/* Date navigator — step size follows the active period (see step()) */}
+        {/* Date navigator */}
         <View style={styles.dateNav}>
-          <TouchableOpacity style={styles.dateArrow} onPress={() => step(-1)}>
-            <Text style={styles.dateArrowText}>‹</Text>
-          </TouchableOpacity>
-          <Text style={styles.dateLabel}>{rangeLabel}</Text>
-          <TouchableOpacity
+          <Pressable style={styles.dateArrow} onPress={() => step(-1)} accessibilityLabel="Previous">
+            <Ionicons name="chevron-back" size={20} color={Colors.accent} />
+          </Pressable>
+          <Text style={[Type.bodyMed, { color: Colors.text }]}>{rangeLabel}</Text>
+          <Pressable
             style={[styles.dateArrow, !canGoForward && styles.dateArrowDisabled]}
             disabled={!canGoForward}
             onPress={() => step(1)}
+            accessibilityLabel="Next"
           >
-            <Text
-              style={[
-                styles.dateArrowText,
-                !canGoForward && styles.dateArrowTextDisabled,
-              ]}
-            >
-              ›
-            </Text>
-          </TouchableOpacity>
+            <Ionicons name="chevron-forward" size={20} color={canGoForward ? Colors.accent : Colors.textMuted} />
+          </Pressable>
         </View>
 
         {loading ? (
-          <View style={styles.loadingWrap}>
-            <ActivityIndicator size="large" color={Colors.accent} />
+          <View style={styles.statsGrid}>
+            {[0, 1, 2, 3].map((i) => (
+              <SkelBlock key={i} w="48%" h={84} r={Radius.card} />
+            ))}
           </View>
         ) : (
           <>
-            {/* Stat cards */}
             <View style={styles.statsGrid}>
-              <Card style={styles.statCard}>
-                <Text style={styles.statValue}>
-                  {stats.marketTimeMinutes !== null
-                    ? fmtMinutes(stats.marketTimeMinutes) || '0h 0m'
-                    : '—'}
-                </Text>
-                <Text style={styles.statLabel}>MARKET TIME</Text>
-              </Card>
-              <Card style={styles.statCard}>
-                <Text style={styles.statValue}>
-                  {stats.distanceKm !== null
-                    ? `${Number(stats.distanceKm).toFixed(1)} km`
-                    : '—'}
-                </Text>
-                <Text style={styles.statLabel}>DISTANCE</Text>
-              </Card>
-              <Card style={styles.statCard}>
-                <Text style={styles.statValue}>{stats.casesSold ?? '—'}</Text>
-                <Text style={styles.statLabel}>CASES SOLD</Text>
-              </Card>
-              <Card style={styles.statCard}>
-                <Text style={styles.statValue}>{stats.storesVisited ?? '—'}</Text>
-                <Text style={styles.statLabel}>STORES VISITED</Text>
-              </Card>
+              <BentoTile style={styles.statCard}>
+                <Metric
+                  label="Market time"
+                  value={stats.marketTimeMinutes !== null ? fmtMinutes(stats.marketTimeMinutes) || '0h 0m' : '—'}
+                />
+              </BentoTile>
+              <BentoTile style={styles.statCard}>
+                <Metric label="Distance" value={stats.distanceKm !== null ? `${Number(stats.distanceKm).toFixed(1)} km` : '—'} />
+              </BentoTile>
+              <BentoTile style={styles.statCard}>
+                <Metric label="Cases sold" value={stats.casesSold ?? '—'} />
+              </BentoTile>
+              <BentoTile style={styles.statCard}>
+                <Metric label="Stores visited" value={stats.storesVisited ?? '—'} />
+              </BentoTile>
             </View>
 
-            {/* Store visits with photo gallery */}
             {visits.length > 0 && (
-              <View style={styles.detailSection}>
-                <Text style={styles.detailLabel}>STORE VISITS</Text>
+              <View style={styles.section}>
+                <Text style={styles.sectionLabel}>Store visits</Text>
                 {visits.map((v) => (
-                  <Card key={v.id} style={styles.visitCard}>
-                    <Text style={styles.visitStoreName}>{v.storeName}</Text>
-                    <Text style={styles.visitMeta}>
-                      {fmtDDMMYYYY(new Date(v.check_in_time))}
-                      {' • '}
-                      {new Date(v.check_in_time).toLocaleTimeString('en-US', {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })}
-                      {' • '}
-                      {v.cases_sold ?? 0} cases
-                      {' • '}
-                      {v.photoUrls.length}{' '}
-                      {v.photoUrls.length === 1 ? 'photo' : 'photos'}
+                  <BentoTile key={v.id} style={styles.card}>
+                    <Text style={[Type.bodyMed, { color: Colors.text }]}>{v.storeName}</Text>
+                    <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]}>
+                      {fmtDDMMYYYY(new Date(v.check_in_time))} ·{' '}
+                      {new Date(v.check_in_time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })} ·{' '}
+                      {v.cases_sold ?? 0} cases · {v.photoUrls.length} {v.photoUrls.length === 1 ? 'photo' : 'photos'}
                     </Text>
                     {v.photoUrls.length > 0 ? (
-                      <ScrollView
-                        horizontal
-                        showsHorizontalScrollIndicator={false}
-                        style={styles.galleryRow}
-                      >
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.galleryRow}>
                         {v.photoUrls.map((url, i) => (
-                          <Image
-                            key={`${v.id}-${i}`}
-                            source={{ uri: url }}
-                            style={styles.galleryPhoto}
-                          />
+                          <Image key={`${v.id}-${i}`} source={{ uri: url }} style={styles.galleryPhoto} />
                         ))}
                       </ScrollView>
                     ) : (
                       <View style={[styles.galleryPhoto, styles.photoEmpty]}>
-                        <Text style={styles.photoEmptyText}>No photo</Text>
+                        <Text style={[Type.caption, { color: Colors.textMuted }]}>No photo</Text>
                       </View>
                     )}
-                  </Card>
+                  </BentoTile>
                 ))}
               </View>
             )}
 
-            {/* Notes / challenges from submitted daily reports */}
             {dayReports.length > 0 && (
-              <View style={styles.detailSection}>
-                <Text style={styles.detailLabel}>NOTES & CHALLENGES</Text>
+              <View style={styles.section}>
+                <Text style={styles.sectionLabel}>Notes & challenges</Text>
                 {dayReports.map((r) => (
-                  <Card key={r.report_date} style={styles.visitCard}>
-                    <Text style={styles.reportDate}>{r.report_date}</Text>
-                    {r.notes ? (
-                      <Text style={styles.reportText}>{r.notes}</Text>
-                    ) : null}
+                  <BentoTile key={r.report_date} style={styles.card}>
+                    <Text style={[Type.label, { color: Colors.textMuted, marginBottom: Space.xs }]}>{r.report_date}</Text>
+                    {r.notes ? <Text style={[Type.body, { color: Colors.text }]}>{r.notes}</Text> : null}
                     {r.challenges ? (
-                      <Text style={styles.reportChallenges}>
-                        Challenges: {r.challenges}
-                      </Text>
+                      <Text style={[Type.body, { color: Colors.alert, marginTop: Space.xs }]}>Challenges: {r.challenges}</Text>
                     ) : null}
-                    {!r.notes && !r.challenges ? (
-                      <Text style={styles.reportText}>—</Text>
-                    ) : null}
-                  </Card>
+                    {!r.notes && !r.challenges ? <Text style={[Type.body, { color: Colors.text }]}>—</Text> : null}
+                  </BentoTile>
                 ))}
               </View>
             )}
 
             {visits.length === 0 && dayReports.length === 0 && (
-              <Card>
-                <Text style={styles.emptyText}>
-                  No activity in this period.
-                </Text>
-              </Card>
+              <BentoTile>
+                <Text style={[Type.body, { color: Colors.textMuted }]}>No activity in this period.</Text>
+              </BentoTile>
             )}
           </>
         )}
 
-        {/* Always exports the full calendar month currently in view */}
-        <Text style={styles.downloadHint}>
+        {/* CSV / PDF choice — always exports the full calendar month in view */}
+        <Text style={[Type.label, { color: Colors.textMuted, marginTop: Space.lg, marginBottom: Space.sm }]}>
           Download {monthName(downloadMonthAnchor)}
         </Text>
         <View style={styles.downloadRow}>
-          <Button
-            title="CSV (raw)"
-            onPress={handleExportCsv}
-            loading={exportKind === 'csv'}
-            variant="secondary"
-            style={styles.downloadHalf}
-          />
-          <Button
-            title="PDF (formatted)"
-            onPress={handleExportPdf}
-            loading={exportKind === 'pdf'}
-            style={styles.downloadHalf}
-          />
+          <Button title="CSV (raw)" onPress={handleExportCsv} loading={exportKind === 'csv'} variant="secondary" style={styles.downloadHalf} />
+          <Button title="PDF (formatted)" onPress={handleExportPdf} loading={exportKind === 'pdf'} style={styles.downloadHalf} />
         </View>
       </ScrollView>
     </View>
@@ -452,153 +342,41 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
   scroll: { flex: 1 },
-  content: { padding: 24, paddingBottom: 48 },
-  loadingWrap: { paddingVertical: 48, alignItems: 'center' },
-  // Period selector
-  periodRow: {
+  content: { padding: Layout.screenPad },
+  segRow: {
     flexDirection: 'row',
-    backgroundColor: Colors.white,
+    backgroundColor: Colors.surface,
     borderWidth: 1,
     borderColor: Colors.border,
-    borderRadius: 4,
-    marginBottom: 12,
+    borderRadius: Radius.md,
+    marginBottom: Space.md,
     overflow: 'hidden',
   },
-  periodBtn: {
-    flex: 1,
-    paddingVertical: 10,
-    alignItems: 'center',
-  },
-  periodBtnActive: { backgroundColor: Colors.accent },
-  periodBtnText: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 14,
-    fontWeight: '600',
-    color: Colors.text,
-  },
-  periodBtnTextActive: { color: Colors.white },
-  // Date navigator
+  segBtn: { flex: 1, paddingVertical: Space.sm, alignItems: 'center', minHeight: Layout.tap, justifyContent: 'center' },
+  segBtnActive: { backgroundColor: Colors.accent },
+  segText: { ...Type.label, color: Colors.text },
+  segTextActive: { color: Colors.white },
   dateNav: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: Colors.white,
+    backgroundColor: Colors.surface,
     borderWidth: 1,
     borderColor: Colors.border,
-    borderRadius: 4,
-    marginBottom: 16,
-    paddingHorizontal: 8,
+    borderRadius: Radius.md,
+    marginBottom: Space.lg,
+    paddingHorizontal: Space.sm,
   },
-  dateArrow: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-  },
-  dateArrowDisabled: { opacity: 0.3 },
-  dateArrowText: {
-    fontSize: 24,
-    color: Colors.accent,
-    fontWeight: '700',
-  },
-  dateArrowTextDisabled: { color: Colors.muted },
-  dateLabel: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 15,
-    fontWeight: '600',
-    color: Colors.text,
-  },
-  // Stats
-  statsGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
-    marginBottom: 16,
-  },
-  statCard: {
-    width: '47%',
-    alignItems: 'center',
-    paddingVertical: 16,
-  },
-  statValue: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 22,
-    fontWeight: '700',
-    color: Colors.text,
-  },
-  statLabel: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginTop: 4,
-  },
-  // Sections
-  detailSection: { marginBottom: 20 },
-  detailLabel: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginBottom: 6,
-  },
-  visitCard: { marginBottom: 12 },
-  visitStoreName: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.cardTitle,
-    color: Colors.text,
-  },
-  visitMeta: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 13,
-    color: Colors.muted,
-    marginTop: 2,
-  },
-  galleryRow: { marginTop: 10 },
-  galleryPhoto: {
-    width: 96,
-    height: 96,
-    borderRadius: 4,
-    backgroundColor: Colors.background,
-    marginRight: 8,
-  },
-  photoEmpty: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: Colors.border,
-    marginTop: 10,
-  },
-  photoEmptyText: {
-    fontFamily: Typography.fontFamily,
-    fontSize: 10,
-    color: Colors.muted,
-  },
-  reportDate: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginBottom: 4,
-  },
-  reportText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.text,
-  },
-  reportChallenges: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.alert,
-    marginTop: 4,
-  },
-  emptyText: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.body,
-    color: Colors.muted,
-  },
-  downloadHint: {
-    fontFamily: Typography.fontFamily,
-    ...Typography.label,
-    color: Colors.muted,
-    marginTop: 8,
-    marginBottom: 8,
-  },
-  downloadRow: { flexDirection: 'row', gap: 12 },
+  dateArrow: { padding: Space.md, minWidth: Layout.tap, alignItems: 'center' },
+  dateArrowDisabled: { opacity: 0.4 },
+  statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: Layout.gridGap, marginBottom: Space.lg },
+  statCard: { width: '48%' },
+  section: { marginBottom: Space.lg },
+  sectionLabel: { ...Type.label, color: Colors.textMuted, marginBottom: Space.sm },
+  card: { marginBottom: Space.md },
+  galleryRow: { marginTop: Space.sm },
+  galleryPhoto: { width: 96, height: 96, borderRadius: Radius.md, backgroundColor: Colors.surfaceAlt, marginRight: Space.sm },
+  photoEmpty: { alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: Colors.border },
+  downloadRow: { flexDirection: 'row', gap: Space.md },
   downloadHalf: { flex: 1 },
 });
