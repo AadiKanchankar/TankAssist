@@ -96,6 +96,16 @@ export async function uploadDeliveredPhoto(
 }
 
 /**
+ * Upload a product master image (management add/edit). Client-keyed path so it
+ * doesn't need the product id (works before the row is inserted).
+ * Path: product-images/{timestamp}-{rand}.jpg
+ */
+export async function uploadProductImage(uri: string): Promise<string> {
+  const path = `product-images/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+  return uploadToPath(uri, path);
+}
+
+/**
  * Gets a signed URL for a private photo.
  * Default expiry is 1 hour (in-app display). The CSV export passes a
  * 90-day expiry explicitly — see lib/reportExport.ts.

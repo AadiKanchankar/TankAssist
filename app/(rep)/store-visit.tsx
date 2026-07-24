@@ -56,6 +56,7 @@ interface ProductRow {
   qty_per_carton: number;
   price_per_case: number | null;
   price_per_bottle: number | null;
+  is_out_of_stock: boolean;
 }
 
 interface PrevOrderItem {
@@ -239,7 +240,7 @@ export default function StoreVisitScreen({
     // Active catalog
     const { data: prods } = await supabase
       .from('products')
-      .select('id, name, unit, qty_per_carton, price_per_case, price_per_bottle')
+      .select('id, name, unit, qty_per_carton, price_per_case, price_per_bottle, is_out_of_stock')
       .eq('is_active', true)
       .order('name');
     setProducts((prods as ProductRow[]) || []);
@@ -445,7 +446,10 @@ export default function StoreVisitScreen({
     const lines = products
       .map((p) => ({ p, l: orderLines[p.id] }))
       .filter(
-        ({ l }) =>
+        ({ p, l }) =>
+          // OOS products can't be ordered (the DB trigger is the real guard; this
+          // just avoids a doomed submit if a product went OOS mid-session).
+          !p.is_out_of_stock &&
           l &&
           (toInt(l.cases) > 0 ||
             toInt(l.bottles) > 0 ||
@@ -1000,6 +1004,18 @@ function OrderStep({
       <Text style={styles.helpText}>Optional — add products the store wants to order.</Text>
       {products.map((p: ProductRow) => {
         const l = lines[p.id] || {};
+        // OOS products are DISABLED, not hidden (brief §1) — visibly unavailable.
+        if (p.is_out_of_stock) {
+          return (
+            <BentoTile key={p.id} style={styles.oosCard}>
+              <View style={styles.oosHeadRow}>
+                <Text style={[Type.bodyMed, { color: Colors.textMuted }]}>{p.name}</Text>
+                <Text style={styles.oosTag}>Out of stock</Text>
+              </View>
+              <Text style={styles.subHint}>Temporarily unavailable to order.</Text>
+            </BentoTile>
+          );
+        }
         return (
           <BentoTile key={p.id}>
             <Text style={[Type.bodyMed, { color: Colors.text }]}>{p.name}</Text>
@@ -1140,6 +1156,9 @@ const styles = StyleSheet.create({
   // stock/order
   touchedCard: { borderColor: Colors.accent, backgroundColor: Colors.surfaceAlt },
   subHint: { ...Type.caption, color: Colors.textMuted, marginTop: 2, marginBottom: Space.sm },
+  oosCard: { opacity: 0.6 },
+  oosHeadRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  oosTag: { ...Type.caption, fontWeight: '700', color: Colors.warning, borderWidth: 1, borderColor: Colors.warning, borderRadius: Radius.sm, paddingHorizontal: 6, paddingVertical: 1 },
   qtyRow: { flexDirection: 'row', gap: Space.md, marginTop: Space.xs },
   qtyField: { flex: 1 },
   qtyLabel: { ...Type.caption, color: Colors.textMuted, marginBottom: Space.xs },

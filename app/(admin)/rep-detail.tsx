@@ -7,6 +7,7 @@ import Button from '../../components/Button';
 import Header from '../../components/Header';
 import BentoTile from '../../components/BentoTile';
 import Breadcrumbs from '../../components/Breadcrumbs';
+import GetLocationButton from '../../components/GetLocationButton';
 import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import RepReportSection from './rep-report-detail';
@@ -148,6 +149,14 @@ export default function RepDetailScreen({ route, navigation }: { route: any; nav
               </Pressable>
             </View>
           </BentoTile>
+        )}
+
+        {/* On-demand live location (management + sales_manager, reps only).
+            RLS is the real gate on who may request whom. */}
+        {isRep && !isSelf && (
+          <View style={{ marginTop: Space.md }}>
+            <GetLocationButton repId={rep.id} repName={rep.name} />
+          </View>
         )}
 
         {/* Rep: Assign / Report segmented control */}

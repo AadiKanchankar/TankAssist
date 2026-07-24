@@ -62,6 +62,33 @@ After it installs, OTA is live for future JS-only changes: **`eas update --chann
 ## Deferred optional items (parked, not forgotten)
 - **Instant-kill deactivation via a service-role Edge Function** — deliberately not built (keeps the anon-key-only architecture); soft-ban + short JWT TTL is the current mechanism. New-secret STOP POINT if ever taken up.
 - **`get_user_names(ids[])` RPC** — would let reps see teammate names on "last recorded by" / stock recorder (RLS currently limits reps to their own name). Small SECURITY DEFINER RPC; not built.
+- **Tester role-switch (self-elevation for whitelisted accounts)** — `public.users.is_tester` + `public.switch_tester_role(text)` (SECURITY DEFINER, `search_path=''`, gated on `is_tester AND is_active`, **self-only, role-only, never touches `is_active`**, validates against the 3 real roles). Whitelisted to **two** ids by owner decision: `6afd4118-8a62-40c3-8451-cf1c6f6181f2` (Aadi, +918080234657) and `8f8a2a7a-3870-487a-bd0f-024674b82c19` (Pranoy, +916291313585). Lets those accounts flip rep/sales_manager/management to test all three workflows with full, real RLS/RPC rights (impersonation-verified allow + deny). **⚠️ MUST be removed before production — it is a standing self-elevation path to `management`.**
+  - **Undo the mechanism (one migration):**
+    ```sql
+    drop function if exists public.switch_tester_role(text);
+    alter table public.users drop column if exists is_tester;
+    ```
+  - **Undo the test data** — real rows these accounts create while testing as rep/management. Scoped to the tester ids; ⚠️ removes ALL data attributed to these accounts (review first), run in the SQL editor / as service role (RLS-free), in this FK-safe order. The `in (…)` list covers both testers:
+    ```sql
+    -- tester ids: Aadi 6afd4118-8a62-40c3-8451-cf1c6f6181f2, Pranoy 8f8a2a7a-3870-487a-bd0f-024674b82c19
+    with testers(id) as (values
+      ('6afd4118-8a62-40c3-8451-cf1c6f6181f2'::uuid),
+      ('8f8a2a7a-3870-487a-bd0f-024674b82c19'::uuid))
+    , tester_orders as (select id from public.orders where placed_by in (select id from testers))
+    -- (CTE for reference; run the deletes below in order)
+    select 1;
+    delete from public.store_visit_photos    where user_id     in ('6afd4118-8a62-40c3-8451-cf1c6f6181f2','8f8a2a7a-3870-487a-bd0f-024674b82c19');
+    delete from public.store_stock_snapshots where recorded_by in ('6afd4118-8a62-40c3-8451-cf1c6f6181f2','8f8a2a7a-3870-487a-bd0f-024674b82c19');
+    delete from public.order_status_history  where order_id in (select id from public.orders where placed_by in ('6afd4118-8a62-40c3-8451-cf1c6f6181f2','8f8a2a7a-3870-487a-bd0f-024674b82c19'));
+    delete from public.order_items           where order_id in (select id from public.orders where placed_by in ('6afd4118-8a62-40c3-8451-cf1c6f6181f2','8f8a2a7a-3870-487a-bd0f-024674b82c19'));
+    delete from public.orders                where placed_by  in ('6afd4118-8a62-40c3-8451-cf1c6f6181f2','8f8a2a7a-3870-487a-bd0f-024674b82c19');
+    delete from public.store_visits          where user_id     in ('6afd4118-8a62-40c3-8451-cf1c6f6181f2','8f8a2a7a-3870-487a-bd0f-024674b82c19');
+    delete from public.attendance            where user_id     in ('6afd4118-8a62-40c3-8451-cf1c6f6181f2','8f8a2a7a-3870-487a-bd0f-024674b82c19');
+    delete from public.daily_reports         where user_id     in ('6afd4118-8a62-40c3-8451-cf1c6f6181f2','8f8a2a7a-3870-487a-bd0f-024674b82c19');
+    delete from public.store_assignments     where user_id     in ('6afd4118-8a62-40c3-8451-cf1c6f6181f2','8f8a2a7a-3870-487a-bd0f-024674b82c19');
+    -- products created while testing as management (archive-only in-app; delete here only if unreferenced by order_items):
+    -- delete from public.products where created_by in ('6afd4118-8a62-40c3-8451-cf1c6f6181f2','8f8a2a7a-3870-487a-bd0f-024674b82c19');
+    ```
 
 ## Open decision
 - **`ORDERS_CUTOVER_DATE`** value — set to the actual go-live install date at build time.

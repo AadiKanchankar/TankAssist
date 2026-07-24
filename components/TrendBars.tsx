@@ -14,23 +14,42 @@ interface TrendBarsProps {
   height?: number;
   barWidth?: number;
   spacing?: number;
+  /** allow horizontal scroll (long ranges with many buckets) */
+  scrollable?: boolean;
+  /** tap a bar → index */
+  onBarPress?: (index: number) => void;
+  /** highlighted bucket (olive) when nothing tapped defaults to the spotlight */
+  selectedIndex?: number;
 }
 
-/** Cases-per-day trend — wraps gifted-charts BarChart, spotlights the latest bar. */
+/** Cases trend — wraps gifted-charts BarChart, spotlights the latest bar. */
 export default function TrendBars({
   data,
   spotlightLast = true,
   height = 100,
   barWidth = 12,
   spacing = 8,
+  scrollable = false,
+  onBarPress,
+  selectedIndex,
 }: TrendBarsProps) {
-  const barData = data.map((d, i) => ({
-    value: d.value,
-    label: d.label,
-    frontColor:
-      spotlightLast && i === data.length - 1 ? Colors.spotlight : Colors.accent,
-    labelTextStyle: { color: Colors.textMuted, fontSize: 9 },
-  }));
+  const barData = data.map((d, i) => {
+    const isLast = i === data.length - 1;
+    const isSelected = selectedIndex === i;
+    const frontColor =
+      spotlightLast && isLast
+        ? Colors.spotlight
+        : isSelected
+        ? Colors.text
+        : Colors.accent;
+    return {
+      value: d.value,
+      label: d.label,
+      frontColor,
+      labelTextStyle: { color: Colors.textMuted, fontSize: 9 },
+      onPress: onBarPress ? () => onBarPress(i) : undefined,
+    };
+  });
 
   return (
     <BarChart
@@ -46,7 +65,9 @@ export default function TrendBars({
       yAxisThickness={0}
       xAxisThickness={0}
       xAxisLabelTextStyle={{ ...Type.caption, color: Colors.textMuted }}
-      disableScroll
+      rotateLabel={scrollable}
+      disableScroll={!scrollable}
+      scrollToEnd={scrollable}
     />
   );
 }

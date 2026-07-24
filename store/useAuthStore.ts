@@ -10,6 +10,7 @@ interface UserProfile {
   phone: string | null;
   assigned_manager_id: string | null;
   is_active: boolean;
+  is_tester: boolean;
 }
 
 interface AuthState {

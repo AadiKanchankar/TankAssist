@@ -39,6 +39,8 @@ import ManagementDashboard from './app/(admin)/management-dashboard';
 import ProfileScreen from './app/(shared)/profile';
 import StoreDetailScreen from './app/(shared)/store-detail';
 import OrderDetailScreen from './app/(shared)/order-detail';
+import TesterBadge from './components/TesterBadge';
+import LocationResponder from './components/LocationResponder';
 
 const Stack = createNativeStackNavigator();
 const RepTab = createBottomTabNavigator();
@@ -137,7 +139,10 @@ const getTabScreenOptions = (bottomInset: number) => ({
 function RepTabs() {
   const insets = useSafeAreaInsets();
   return (
-    <RepTab.Navigator screenOptions={getTabScreenOptions(insets.bottom)}>
+    <>
+      {/* Rep-side live-location responder (active only while checked in). */}
+      <LocationResponder />
+      <RepTab.Navigator screenOptions={getTabScreenOptions(insets.bottom)}>
       <RepTab.Screen
         name="Dashboard"
         component={RepDashboardStack}
@@ -178,7 +183,8 @@ function RepTabs() {
           ),
         }}
       />
-    </RepTab.Navigator>
+      </RepTab.Navigator>
+    </>
   );
 }
 
@@ -330,15 +336,20 @@ export default function App() {
           // Calm full-screen; session was revoked server-side (single-session).
           <KickedOutScreen />
         ) : (
-          <NavigationContainer>
-            {!session || !profile ? (
-              <AuthStack />
-            ) : profile.role === 'rep' ? (
-              <RepTabs />
-            ) : (
-              <AdminTabs />
-            )}
-          </NavigationContainer>
+          <>
+            <NavigationContainer>
+              {!session || !profile ? (
+                <AuthStack />
+              ) : profile.role === 'rep' ? (
+                // key on role so a tester role-switch fully remounts the tree at
+                // its root (lands on the new role's Dashboard, like a fresh login).
+                <RepTabs key={profile.role} />
+              ) : (
+                <AdminTabs key={profile.role} />
+              )}
+            </NavigationContainer>
+            <TesterBadge />
+          </>
         )}
         <StatusBar style="dark" />
       </QueryClientProvider>

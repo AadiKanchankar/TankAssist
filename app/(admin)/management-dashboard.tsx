@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   View,
   Text,
@@ -6,7 +6,6 @@ import {
   ScrollView,
   RefreshControl,
   Pressable,
-  Dimensions,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -32,6 +31,7 @@ import { usePullToRefresh } from '../../hooks/usePullToRefresh';
 import { OrderFilter } from '../../lib/orders';
 import { monthName } from '../../lib/reportExport';
 import { useManagementDashboard } from '../../hooks/useManagementDashboard';
+import { useCasesTrend, TREND_RANGES, TrendRange } from '../../hooks/useCasesTrend';
 
 // Pipeline buckets with DISTINCT on-brand colours (order metadata collides
 // dispatched/in_transit on ink, so the donut/legend use this explicit set).
@@ -58,12 +58,18 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
   };
   const casesThisMonth = data?.casesThisMonth ?? 0;
   const casesLastMonth = data?.casesLastMonth ?? 0;
-  const trend = data?.trend ?? [];
   const repsCheckedIn = data?.repsCheckedIn ?? 0;
   const visitsToday = data?.visitsToday ?? 0;
   const attention = data?.attention ?? [];
   const topStores = data?.topStores ?? [];
   const monthTitle = data?.monthTitle ?? monthName(new Date());
+  // Today's actual date — same greeting/date pattern as the rep dashboard.
+  const formattedDate = new Date().toLocaleDateString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
 
   useFocusEffect(
     useCallback(() => {
@@ -84,12 +90,14 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
     color: b.color,
   }));
 
-  // Fit a full month of per-day bars to the card width (no horizontal scroll).
-  const innerW = Dimensions.get('window').width - 2 * Layout.screenPad - 2 * Layout.cardPad;
-  const n = Math.max(1, trend.length);
-  const trendSpacing = 2;
-  const barWidth = Math.max(3, Math.floor((innerW - (n + 1) * trendSpacing) / n));
-  const trendData = trend.map((v) => ({ label: '', value: v }));
+  // Cases trend — range-selectable, one hybrid call per range (see useCasesTrend).
+  const [range, setRange] = useState<TrendRange>('1M');
+  const [selBar, setSelBar] = useState<number | null>(null);
+  const { data: trend } = useCasesTrend(range);
+  const buckets = trend?.buckets ?? [];
+  const many = buckets.length > 12; // scroll + wider bars past ~12 buckets
+  const selIdx = selBar != null && selBar < buckets.length ? selBar : buckets.length - 1;
+  const selected = buckets[selIdx];
 
   if (isPending && !data) {
     return (
@@ -127,7 +135,7 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
               {getGreeting()}, {profile?.name || 'Team'}
             </Text>
             <Text style={[Type.body, { color: Colors.textSecondary, marginTop: 2 }]}>
-              {monthTitle}
+              {formattedDate}
             </Text>
           </View>
           <Text style={styles.brandMark}>Tank No. 90</Text>
@@ -153,15 +161,60 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
           </BentoTile>
         </MotiView>
 
-        {/* Cases per day — the one lime spotlight (latest bar) */}
+        {/* Cases trend — real dates, range selector, one lime spotlight (latest bar) */}
         <MotiView {...entrance(section++, reduce)}>
           <BentoTile style={{ marginTop: Space.md }}>
-            <Text style={[Type.label, { color: Colors.textMuted }]}>Cases per day</Text>
-            <View style={{ marginTop: Space.md }}>
-              {trendData.length > 0 ? (
-                <TrendBars data={trendData} barWidth={barWidth} spacing={trendSpacing} height={110} />
+            <View style={styles.trendHead}>
+              <View style={{ flex: 1 }}>
+                <Text style={[Type.label, { color: Colors.textMuted }]}>Cases sold</Text>
+                <Text style={[Type.bodyMed, { color: Colors.text }]}>{trend?.rangeLabel ?? '—'}</Text>
+              </View>
+              <View style={{ alignItems: 'flex-end' }}>
+                <Text style={[Type.metric, tabularNums, { color: Colors.text }]}>{trend?.total ?? 0}</Text>
+                <Text style={[Type.caption, { color: Colors.textMuted }]}>total</Text>
+              </View>
+            </View>
+
+            {/* Range selector */}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.rangeRow}
+            >
+              {TREND_RANGES.map((r) => (
+                <Pressable
+                  key={r}
+                  onPress={() => { setRange(r); setSelBar(null); }}
+                  style={[styles.rangeChip, range === r && styles.rangeChipActive]}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: range === r }}
+                  accessibilityLabel={`Range ${r}`}
+                >
+                  <Text style={[styles.rangeText, range === r && styles.rangeTextActive]}>{r}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+
+            {/* Tapped-bucket readout (defaults to the latest bucket) */}
+            {selected ? (
+              <Text style={[Type.caption, { color: Colors.textSecondary, marginTop: Space.sm }]}>
+                {selected.rangeText} · {selected.value} cases
+              </Text>
+            ) : null}
+
+            <View style={{ marginTop: Space.sm }}>
+              {buckets.length > 0 ? (
+                <TrendBars
+                  data={buckets.map((b) => ({ label: b.label, value: b.value }))}
+                  height={120}
+                  barWidth={many ? 14 : 18}
+                  spacing={many ? 8 : 10}
+                  scrollable={many}
+                  onBarPress={setSelBar}
+                  selectedIndex={selIdx}
+                />
               ) : (
-                <Text style={[Type.body, { color: Colors.textMuted }]}>No cases yet this month.</Text>
+                <Text style={[Type.body, { color: Colors.textMuted }]}>No cases in this range.</Text>
               )}
             </View>
           </BentoTile>
@@ -299,6 +352,22 @@ const styles = StyleSheet.create({
   brandMark: { ...Type.label, color: Colors.accent },
   onDarkMuted: { color: Colors.textOnDark, opacity: 0.7 },
   deltaRow: { flexDirection: 'row', alignItems: 'center', gap: Space.xs, marginTop: Space.sm },
+  trendHead: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: Space.md },
+  rangeRow: { gap: Space.xs, paddingVertical: Space.xs },
+  rangeChip: {
+    minWidth: 40,
+    minHeight: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: Space.sm,
+    borderRadius: Radius.pill,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    backgroundColor: Colors.surface,
+  },
+  rangeChipActive: { backgroundColor: Colors.accent, borderColor: Colors.accent },
+  rangeText: { ...Type.label, color: Colors.textMuted },
+  rangeTextActive: { color: Colors.white },
   dot: { width: 10, height: 10, borderRadius: 5 },
   pipelineRow: { flexDirection: 'row', alignItems: 'center', gap: Space.lg },
   legend: { flex: 1, gap: 2 },

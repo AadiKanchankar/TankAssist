@@ -1,20 +1,28 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, Alert, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, Alert, ActivityIndicator, Pressable } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 import { Colors, Type, Space, Radius, Layout } from '../../constants/colors';
 import Button from '../../components/Button';
 import BentoTile from '../../components/BentoTile';
 import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
 
+const TESTER_ROLES: { value: 'rep' | 'sales_manager' | 'management'; label: string }[] = [
+  { value: 'rep', label: 'Rep' },
+  { value: 'sales_manager', label: 'Sales manager' },
+  { value: 'management', label: 'Management' },
+];
+
 const APP_VERSION = 'v1.0.0';
 
 export default function ProfileScreen() {
-  const { profile, logout } = useAuthStore();
+  const { profile, logout, refreshProfile } = useAuthStore();
   const insets = useSafeAreaInsets();
   const [managerName, setManagerName] = useState<string | null>(null);
   const [loadingManager, setLoadingManager] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [switching, setSwitching] = useState<string | null>(null);
 
   useEffect(() => {
     if (profile?.role === 'rep' && profile.assigned_manager_id) {
@@ -69,6 +77,21 @@ export default function ProfileScreen() {
     ]);
   };
 
+  // Tester-only: self-switch role via the whitelisted RPC, then refresh the
+  // profile — App.tsx keys the nav tree on role, so it remounts at the new
+  // role's Dashboard (like a fresh login). This screen unmounts as part of that.
+  const handleSwitchRole = async (newRole: string) => {
+    if (!profile || newRole === profile.role || switching) return;
+    setSwitching(newRole);
+    const { error } = await supabase.rpc('switch_tester_role', { new_role: newRole });
+    if (error) {
+      setSwitching(null);
+      Alert.alert('Couldn’t switch role', error.message || 'Try again.');
+      return;
+    }
+    await refreshProfile();
+  };
+
   if (!profile) {
     return (
       <View style={styles.centered}>
@@ -121,6 +144,40 @@ export default function ProfileScreen() {
         )}
       </BentoTile>
 
+      {profile.is_tester && (
+        <BentoTile style={{ marginTop: Space.md }}>
+          <View style={styles.testerHeader}>
+            <Ionicons name="flask" size={16} color={Colors.accent} />
+            <Text style={[Type.label, { color: Colors.text }]}>Testing tools</Text>
+          </View>
+          <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2, marginBottom: Space.md }]}>
+            Switch your role to test each workflow end-to-end. Full access — actions write real data.
+          </Text>
+          <View style={styles.roleRow}>
+            {TESTER_ROLES.map((r) => {
+              const active = profile.role === r.value;
+              return (
+                <Pressable
+                  key={r.value}
+                  onPress={() => handleSwitchRole(r.value)}
+                  disabled={active || switching !== null}
+                  style={[styles.roleBtn, active && styles.roleBtnActive]}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Switch to ${r.label}`}
+                  accessibilityState={{ selected: active }}
+                >
+                  {switching === r.value ? (
+                    <ActivityIndicator size="small" color={Colors.white} />
+                  ) : (
+                    <Text style={[styles.roleText, active && styles.roleTextActive]}>{r.label}</Text>
+                  )}
+                </Pressable>
+              );
+            })}
+          </View>
+        </BentoTile>
+      )}
+
       <BentoTile style={styles.appCard}>
         <Text style={[Type.label, { color: Colors.accent }]}>Tank No. 90</Text>
         <Text style={[Type.section, { color: Colors.text, marginTop: 2 }]}>TankAssist</Text>
@@ -159,4 +216,19 @@ const styles = StyleSheet.create({
   fieldLabel: { ...Type.label, color: Colors.textMuted, marginBottom: 2 },
   divider: { height: 1, backgroundColor: Colors.border },
   appCard: { alignItems: 'center', marginTop: Space.md },
+  // Testing tools
+  testerHeader: { flexDirection: 'row', alignItems: 'center', gap: Space.xs },
+  roleRow: {
+    flexDirection: 'row',
+    backgroundColor: Colors.surfaceAlt,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: Radius.md,
+    overflow: 'hidden',
+  },
+  roleBtn: { flex: 1, minHeight: Layout.tap, alignItems: 'center', justifyContent: 'center', paddingVertical: Space.sm },
+  roleBtnActive: { backgroundColor: Colors.accent },
+  roleText: { ...Type.label, color: Colors.text },
+  roleTextActive: { color: Colors.white },
 });
+
