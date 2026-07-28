@@ -8,6 +8,7 @@ import BentoTile from '../../components/BentoTile';
 import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
 import FacilitiesScreen from '../(admin)/facilities';
+import PermitsScreen from '../(admin)/permits';
 
 const TESTER_ROLES: { value: 'rep' | 'sales_manager' | 'management'; label: string }[] = [
   { value: 'rep', label: 'Rep' },
@@ -25,6 +26,7 @@ export default function ProfileScreen() {
   const [loggingOut, setLoggingOut] = useState(false);
   const [switching, setSwitching] = useState<string | null>(null);
   const [showFacilities, setShowFacilities] = useState(false);
+  const [showPermits, setShowPermits] = useState(false);
 
   useEffect(() => {
     if (profile?.role === 'rep' && profile.assigned_manager_id) {
@@ -148,6 +150,23 @@ export default function ProfileScreen() {
 
       {/* Management-only admin config */}
       {profile.role === 'management' && (
+        <Pressable onPress={() => setShowPermits(true)} accessibilityRole="button" accessibilityLabel="Excise permits">
+          <BentoTile style={{ marginTop: Space.md }}>
+            <View style={styles.adminRow}>
+              <Ionicons name="document-text-outline" size={20} color={Colors.accent} />
+              <View style={{ flex: 1 }}>
+                <Text style={[Type.bodyMed, { color: Colors.text }]}>Excise permits</Text>
+                <Text style={[Type.caption, { color: Colors.textMuted }]}>
+                  Upload, review and approve permits
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
+            </View>
+          </BentoTile>
+        </Pressable>
+      )}
+
+      {profile.role === 'management' && (
         <Pressable onPress={() => setShowFacilities(true)} accessibilityRole="button" accessibilityLabel="Excise facilities">
           <BentoTile style={{ marginTop: Space.md }}>
             <View style={styles.adminRow}>
@@ -207,6 +226,7 @@ export default function ProfileScreen() {
       <Button title="Log out" onPress={handleLogout} variant="danger" loading={loggingOut} style={{ marginTop: Space.md }} />
 
       <FacilitiesScreen visible={showFacilities} onClose={() => setShowFacilities(false)} />
+      <PermitsScreen visible={showPermits} onClose={() => setShowPermits(false)} />
     </ScrollView>
   );
 }

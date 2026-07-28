@@ -20,6 +20,7 @@
       "expo-font",
       "expo-secure-store",
       "expo-sharing",
+      "expo-document-picker",
       [
         "expo-speech-recognition",
         {
