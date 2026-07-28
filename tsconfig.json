@@ -2,5 +2,10 @@
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
     "strict": true
-  }
+  },
+  // Supabase Edge Functions are Deno, not React Native: they use jsr:/npm:
+  // specifiers, .ts import extensions and the Deno global, none of which this
+  // config knows about. They are type-checked by the Deno runtime at deploy
+  // time and covered by parsers.test.ts.
+  "exclude": ["node_modules", "supabase/functions"]
 }

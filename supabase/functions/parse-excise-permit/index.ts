@@ -28,8 +28,10 @@ const BUCKET = 'excise-permits';
 const CONVERSION_FORMULA_VERSION = 'bl-v1';
 /**
  * How far the raw bottle count may sit from a whole bottle before we suspect the
- * permit was matched to the wrong product. Normal rounding noise is far below
- * this; a mismatched bottle size produces a badly non-integral result.
+ * permit was matched to the wrong product. NOTE: this only catches sizes that
+ * divide UNCLEANLY — 396 BL divides exactly by both 180ml and 330ml, so it
+ * cannot tell those apart. That is why auto-allocation is limited to the
+ * single-active-product case and everything else goes to a human.
  */
 const CONVERSION_TOLERANCE_BOTTLES = 0.05;
 
@@ -180,6 +182,8 @@ Deno.serve(async (req) => {
         parser: parserVersion,
         needs_manual_entry: needsManualEntry,
         missing_fields: parsed?.missing_fields ?? ['all'],
+        parser_notes: parsed?.parser_notes ?? [],
+        extras: parsed?.extras ?? {},
         parsed,
         raw_text: text.slice(0, 20000), // audit + diffing corrections
       },
@@ -252,6 +256,7 @@ Deno.serve(async (req) => {
     movement_direction: direction,
     needs_manual_entry: needsManualEntry,
     missing_fields: parsed?.missing_fields ?? ['all'],
+    parser_notes: parsed?.parser_notes ?? [],
     auto_allocated: allocation !== null,
     active_product_count: products?.length ?? 0,
   });
