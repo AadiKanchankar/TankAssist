@@ -3,9 +3,10 @@
   "compilerOptions": {
     "strict": true
   },
-  // Supabase Edge Functions are Deno, not React Native: they use jsr:/npm:
-  // specifiers, .ts import extensions and the Deno global, none of which this
-  // config knows about. They are type-checked by the Deno runtime at deploy
-  // time and covered by parsers.test.ts.
-  "exclude": ["node_modules", "supabase/functions"]
+  // Excluded from the app's type-check because they aren't React Native code:
+  // - supabase/functions: Deno (jsr:/npm: specifiers, .ts imports, Deno global),
+  //   type-checked by the Deno runtime at deploy time.
+  // - *.test.ts: Node harnesses run with `npx tsx`, using node: imports and
+  //   explicit .ts extensions. They are never bundled into the app.
+  "exclude": ["node_modules", "supabase/functions", "**/*.test.ts"]
 }
