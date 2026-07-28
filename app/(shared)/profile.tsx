@@ -7,6 +7,7 @@ import Button from '../../components/Button';
 import BentoTile from '../../components/BentoTile';
 import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
+import FacilitiesScreen from '../(admin)/facilities';
 
 const TESTER_ROLES: { value: 'rep' | 'sales_manager' | 'management'; label: string }[] = [
   { value: 'rep', label: 'Rep' },
@@ -23,6 +24,7 @@ export default function ProfileScreen() {
   const [loadingManager, setLoadingManager] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [switching, setSwitching] = useState<string | null>(null);
+  const [showFacilities, setShowFacilities] = useState(false);
 
   useEffect(() => {
     if (profile?.role === 'rep' && profile.assigned_manager_id) {
@@ -144,6 +146,24 @@ export default function ProfileScreen() {
         )}
       </BentoTile>
 
+      {/* Management-only admin config */}
+      {profile.role === 'management' && (
+        <Pressable onPress={() => setShowFacilities(true)} accessibilityRole="button" accessibilityLabel="Excise facilities">
+          <BentoTile style={{ marginTop: Space.md }}>
+            <View style={styles.adminRow}>
+              <Ionicons name="business-outline" size={20} color={Colors.accent} />
+              <View style={{ flex: 1 }}>
+                <Text style={[Type.bodyMed, { color: Colors.text }]}>Excise facilities</Text>
+                <Text style={[Type.caption, { color: Colors.textMuted }]}>
+                  Your factory / warehouse licence numbers
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
+            </View>
+          </BentoTile>
+        </Pressable>
+      )}
+
       {profile.is_tester && (
         <BentoTile style={{ marginTop: Space.md }}>
           <View style={styles.testerHeader}>
@@ -185,6 +205,8 @@ export default function ProfileScreen() {
       </BentoTile>
 
       <Button title="Log out" onPress={handleLogout} variant="danger" loading={loggingOut} style={{ marginTop: Space.md }} />
+
+      <FacilitiesScreen visible={showFacilities} onClose={() => setShowFacilities(false)} />
     </ScrollView>
   );
 }
@@ -216,6 +238,7 @@ const styles = StyleSheet.create({
   fieldLabel: { ...Type.label, color: Colors.textMuted, marginBottom: 2 },
   divider: { height: 1, backgroundColor: Colors.border },
   appCard: { alignItems: 'center', marginTop: Space.md },
+  adminRow: { flexDirection: 'row', alignItems: 'center', gap: Space.md },
   // Testing tools
   testerHeader: { flexDirection: 'row', alignItems: 'center', gap: Space.xs },
   roleRow: {
