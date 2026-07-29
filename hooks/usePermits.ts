@@ -15,6 +15,13 @@ export const DIRECTION_LABEL: Record<MovementDirection, string> = {
   unclassified: 'Unclassified',
 };
 
+/** One row of the permit's quantity table. Allocation is driven by these. */
+export interface QuantityLine {
+  liquor_class: string | null;
+  quantity_value: number;
+  quantity_type: 'BL' | 'PL' | 'UNKNOWN';
+}
+
 export interface Permit {
   id: string;
   state: string;
@@ -26,6 +33,8 @@ export interface Permit {
   liquor_class: string | null;
   quantity_value: number;
   quantity_type: 'BL' | 'PL' | 'UNKNOWN';
+  /** Null on permits that predate multi-line parsing — use permitLines(). */
+  quantity_lines: QuantityLine[] | null;
   permit_date: string | null;
   permit_generated_at: string | null;
   valid_until: string | null;
@@ -47,12 +56,29 @@ export interface Allocation {
   id: string;
   permit_id: string;
   product_id: string;
+  /** Which quantity line this allocation belongs to. 0 for single-line permits. */
+  line_index: number;
   allocated_bl: number;
   computed_bottles: number | null;
   computed_cases: number | null;
   remainder_bottles: number | null;
   needs_review: boolean;
   conversion_formula_version: string;
+}
+
+/**
+ * The permit's quantity lines, mirroring approve_excise_permit's own fallback
+ * so the screen gates on exactly what the RPC will enforce: a permit stored
+ * before multi-line parsing is treated as one line built from the scalar
+ * columns. Keep this in step with the RPC.
+ */
+export function permitLines(permit: Permit): QuantityLine[] {
+  if (permit.quantity_lines?.length) return permit.quantity_lines;
+  return [{
+    liquor_class: permit.liquor_class,
+    quantity_value: Number(permit.quantity_value),
+    quantity_type: permit.quantity_type,
+  }];
 }
 
 async function fetchPermits(): Promise<Permit[]> {

@@ -122,3 +122,13 @@ Tappable summary segments (To Process / Dispatched / In Transit / Delivered / Ca
 ## Builds (EAS)
 
 Android APKs via EAS (`eas.json` `preview` → internal APK; `channel: preview`). `app.json` config plugins: `expo-camera`, `expo-location`, `expo-font`, `expo-secure-store`, `expo-sharing`, **`expo-speech-recognition`** (mic + speech usage strings; Android on-device service packages). **`expo-updates`** configured (`updates.url` + `runtimeVersion: appVersion`) for OTA after go-live. The same Google Maps key (Maps SDK Android + Places + Geocoding + Directions) is wired in `app.json` → `android.config.googleMaps.apiKey`. Native modules — `react-native-maps`, `expo-camera/location/secure-store/sharing`, **`expo-speech-recognition`**, **`expo-print`**, **`expo-updates`** — need a fresh EAS build; the voice + PDF + OTA work is batched into **one** build.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

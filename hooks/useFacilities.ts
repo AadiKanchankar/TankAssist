@@ -12,7 +12,15 @@ export interface Facility {
   facility_type: FacilityType;
   is_active: boolean;
   created_at: string;
+  /** Licence validity. An expired licence stays listed but is skipped when
+   *  auto-matching a permit's licence numbers to a facility. */
+  valid_from: string | null;
+  valid_until: string | null;
 }
+
+/** True once valid_until is in the past (date-only compare). */
+export const isLicenceExpired = (validUntil: string | null): boolean =>
+  !!validUntil && validUntil < new Date().toISOString().slice(0, 10);
 
 async function fetchFacilities(): Promise<Facility[]> {
   const { data } = await supabase

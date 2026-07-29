@@ -9,6 +9,13 @@
  * Calibrated against a real document (see parsers.test.ts fixture), not a spec.
  */
 
+/** One row of the permit's Liquor Details table. */
+export interface QuantityLine {
+  liquor_class: string | null;
+  quantity_value: number;
+  quantity_type: 'BL' | 'PL' | 'UNKNOWN';
+}
+
 export interface ParsedPermit {
   state: string;
   permit_number: string | null;
@@ -20,6 +27,12 @@ export interface ParsedPermit {
   quantity_value: number | null;
   /** Captured from the document itself — never assumed. */
   quantity_type: 'BL' | 'PL' | 'UNKNOWN';
+  /**
+   * Every row of the Liquor Details table. A single-row permit yields one line;
+   * the scalar quantity_value/quantity_type above remain the permit TOTAL for
+   * back-compat. Product allocation is driven by this array.
+   */
+  quantity_lines: QuantityLine[];
   permit_date: string | null;
   permit_generated_at: string | null;
   valid_until: string | null;
@@ -163,14 +176,31 @@ function parseHaryana(text: string): ParsedPermit {
   // Anything after the "Liquor Details" heading, so the preamble is out of scope.
   const detailsIdx = text.search(/Liquor\s*Details/i);
   const detailsSection = detailsIdx >= 0 ? text.slice(detailsIdx) : text;
-  const liquor_class = firstMatch(text, [
-    // class immediately followed by the quantity + unit — the actual table row
-    new RegExp(`\\b(${CLASSES})\\s+[\\d,]+(?:\\.\\d+)?\\s*(?:BL|PL)\\b`, 'i'),
-  ]) ??
-    firstMatch(detailsSection, [
-      new RegExp(`\\b(${CLASSES})\\b`, 'i'),
-      /(?:Class\s*of\s*Liquor|Liquor\s*(?:Class|Type))\s*[:\-]\s*([A-Za-z ]{3,40})/i,
-    ]);
+
+  // Every row of the Liquor Details table: "<CLASS> <qty> <BL|PL>". A one-row
+  // permit yields one line; the same scan handles a multi-row permit unchanged.
+  const quantity_lines: QuantityLine[] = [];
+  const rowRe = new RegExp(`\\b(${CLASSES})\\s+([\\d,]+(?:\\.\\d+)?)\\s*(BL|PL)\\b`, 'gi');
+  for (const m of detailsSection.matchAll(rowRe)) {
+    quantity_lines.push({
+      liquor_class: clean(m[1]),
+      quantity_value: Number(m[2].replace(/,/g, '')),
+      quantity_type: m[3].toUpperCase() as 'BL' | 'PL',
+    });
+  }
+
+  // The scalar class only means something when the permit has ONE row. With
+  // several rows no single class describes the permit, so it stays null rather
+  // than letting row 1 masquerade as the whole document — the lines carry it.
+  const liquor_class =
+    quantity_lines.length === 1
+      ? quantity_lines[0].liquor_class
+      : quantity_lines.length > 1
+      ? null
+      : firstMatch(detailsSection, [
+          new RegExp(`\\b(${CLASSES})\\b`, 'i'),
+          /(?:Class\s*of\s*Liquor|Liquor\s*(?:Class|Type))\s*[:\-]\s*([A-Za-z ]{3,40})/i,
+        ]);
 
   const valid_until = toIsoDate(
     firstMatch(text, [/valid\s*up\s*to\s*:?\s*([0-9]{1,2}[-/ ][A-Za-z0-9]{2,9}[-/ ][0-9]{4})/i]),
@@ -204,6 +234,14 @@ function parseHaryana(text: string): ParsedPermit {
     liquor_class,
     quantity_value,
     quantity_type,
+    // Fall back to a single synthetic line when the table couldn't be read but a
+    // total was — allocation still has exactly one line to attach to.
+    quantity_lines:
+      quantity_lines.length > 0
+        ? quantity_lines
+        : quantity_value != null
+        ? [{ liquor_class, quantity_value, quantity_type }]
+        : [],
     permit_date,
     permit_generated_at,
     valid_until,
@@ -240,7 +278,9 @@ export interface StateParser {
 
 export const PARSERS: StateParser[] = [
   {
-    version: 'haryana-l32@2',
+    // @3 adds per-row quantity_lines and stops reporting a scalar liquor_class
+    // for a multi-row permit. Bumped so already-stored @2 rows stay meaningful.
+    version: 'haryana-l32@3',
     detect: (t) =>
       /haryanatax\.gov\.in|FORM\s*L-32|govt\.?\s*of\s*haryana|government\s*of\s*haryana/i.test(t),
     parse: parseHaryana,

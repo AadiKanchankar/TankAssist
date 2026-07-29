@@ -22,6 +22,11 @@
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { extractText, getDocumentProxy } from 'npm:unpdf';
 import { selectParser, type ParsedPermit } from './parsers.ts';
+import {
+  classifyMovement,
+  type FacilityRow,
+  type MovementDirection,
+} from './classify.ts';
 
 const MAX_BYTES = 10 * 1024 * 1024; // 10 MB, mirrors the bucket cap
 const BUCKET = 'excise-permits';
@@ -128,36 +133,70 @@ Deno.serve(async (req) => {
   const needsManualEntry =
     !parsed || parsed.quantity_value === null || parsed.missing_fields.length > 0;
 
+  // ── Duplicate guard (the "held seat") ──────────────────────────────────
+  // Approved  -> final, it is already in the ledger.
+  // Pending   -> a shared queue item ANY management user can review, so we send
+  //              the uploader there instead of creating a second row.
+  // Never runs for an unreadable upload: every one of those carries the same
+  // 'UNREAD' placeholder and they are not duplicates of each other.
+  const pn = parsed?.permit_number ?? null;
+  if (pn && pn !== 'UNREAD') {
+    const { data: rows } = await supabase
+      .from('excise_permits')
+      .select('id, status, uploaded_by')
+      .eq('permit_number', pn)
+      .in('status', ['approved', 'pending_review']);
+
+    // Approved wins over pending — an approved copy is already in the ledger, so
+    // that is the more important thing to tell the uploader. Picked explicitly
+    // rather than leaning on 'approved' < 'pending_review' sorting alphabetically.
+    const existing =
+      rows?.find((r) => r.status === 'approved') ?? rows?.[0] ?? null;
+
+    if (existing) {
+      let uploaderName: string | null = null;
+      if (existing.status === 'pending_review') {
+        const { data: u } = await supabase
+          .from('users').select('name').eq('id', existing.uploaded_by).maybeSingle();
+        uploaderName = u?.name ?? null;
+      }
+      // The client uploaded before calling us. Bailing out here would strand that
+      // copy in the bucket with no permit row pointing at it, so drop it.
+      await supabase.storage.from(BUCKET).remove([storagePath]);
+      return json({
+        duplicate: existing.status === 'approved' ? 'approved' : 'pending',
+        existing_permit_id: existing.id,
+        permit_number: pn,
+        uploaded_by_name: uploaderName,
+      });
+    }
+  }
+
   // ── Classify (Gap 2). Empty registry -> everything is 'unclassified'. ───
+  // Rules (incl. expired-vs-external) live in classify.ts and are unit-tested.
   let facilityFromId: string | null = null;
   let facilityToId: string | null = null;
-  let direction:
-    | 'factory_to_warehouse'
-    | 'warehouse_to_l1'
-    | 'internal_transfer'
-    | 'unclassified' = 'unclassified';
+  let direction: MovementDirection = 'unclassified';
 
   const srcNo = parsed?.license_no_source ?? null;
   const dstNo = parsed?.license_no_dest ?? null;
   if (srcNo || dstNo) {
-    const { data: facs } = await supabase
+    // Deliberately fetches expired/inactive rows too — classifyMovement needs
+    // them to tell "not ours" apart from "ours but not currently valid".
+    const { data: allFacs } = await supabase
       .from('company_facilities')
-      .select('id, license_no, facility_type')
+      .select('id, license_no, facility_type, is_active, valid_from, valid_until')
       .in('license_no', [srcNo, dstNo].filter(Boolean) as string[]);
-    const from = facs?.find((f) => f.license_no === srcNo) ?? null;
-    const to = facs?.find((f) => f.license_no === dstNo) ?? null;
-    facilityFromId = from?.id ?? null;
-    facilityToId = to?.id ?? null;
 
-    // §3 precedence — most specific first. Anything not matched here stays
-    // 'unclassified' for a human to resolve; we never guess a direction.
-    if (from?.facility_type === 'factory' && to?.facility_type === 'warehouse') {
-      direction = 'factory_to_warehouse';
-    } else if (from && to) {
-      direction = 'internal_transfer'; // both ours, e.g. warehouse -> warehouse
-    } else if (from?.facility_type === 'warehouse' && !to && dstNo) {
-      direction = 'warehouse_to_l1'; // ours -> a party outside the registry
-    }
+    const c = classifyMovement(
+      srcNo,
+      dstNo,
+      (allFacs ?? []) as FacilityRow[],
+      new Date().toISOString().slice(0, 10),
+    );
+    facilityFromId = c.facilityFromId;
+    facilityToId = c.facilityToId;
+    direction = c.direction;
   }
 
   // ── Insert the permit (always pending_review) ──────────────────────────
@@ -173,6 +212,14 @@ Deno.serve(async (req) => {
       liquor_class: parsed?.liquor_class ?? null,
       quantity_value: parsed?.quantity_value ?? 0,
       quantity_type: parsed?.quantity_type ?? 'UNKNOWN',
+      // Every Liquor Details row. Allocation is driven by these, not the scalar.
+      quantity_lines: parsed?.quantity_lines?.length
+        ? parsed.quantity_lines
+        : [{
+            liquor_class: parsed?.liquor_class ?? null,
+            quantity_value: parsed?.quantity_value ?? 0,
+            quantity_type: parsed?.quantity_type ?? 'UNKNOWN',
+          }],
       permit_date: parsed?.permit_date ?? null,
       permit_generated_at: parsed?.permit_generated_at ?? null,
       valid_until: parsed?.valid_until ?? null,
@@ -208,7 +255,10 @@ Deno.serve(async (req) => {
     .select('id, unit_size, unit_of_measure, qty_per_carton')
     .eq('is_active', true);
 
-  if (products?.length === 1 && (parsed?.quantity_value ?? 0) > 0) {
+  // Only auto-allocate a SINGLE-line permit: a multi-line permit needs the
+  // reviewer to decide how each line maps to a product.
+  const singleLine = (parsed?.quantity_lines?.length ?? 0) <= 1;
+  if (singleLine && products?.length === 1 && (parsed?.quantity_value ?? 0) > 0) {
     const p = products[0];
     const uom = (p.unit_of_measure ?? '').toString().trim().toLowerCase();
     const litresPerUnit = LITRES_PER[uom];

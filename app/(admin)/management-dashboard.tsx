@@ -146,6 +146,96 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
           <Text style={styles.brandMark}>Tank No. 90</Text>
         </View>
 
+        {/* Inventory — FY movement + current warehouse balance */}
+        <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
+          <Text style={[Type.section, styles.sectionTitle]}>
+            Inventory · {inv?.fyLabel ?? ''}
+          </Text>
+          {!inv || inv.movementCount === 0 ? (
+            <BentoTile>
+              <Text style={[Type.body, { color: Colors.textMuted }]}>
+                No stock movements yet.
+              </Text>
+              <Text style={[Type.caption, { color: Colors.textMuted, marginTop: Space.xs }]}>
+                Figures here come from approved excise permits — approve one in Profile → Excise permits
+                and it lands in the ledger.
+              </Text>
+            </BentoTile>
+          ) : (
+            <>
+              <View style={styles.bentoRow}>
+                <BentoTile style={styles.flex}>
+                  <Text style={[Type.label, { color: Colors.textMuted }]}>Factory → warehouse</Text>
+                  <Text style={[Type.metric, tabularNums, { color: Colors.text, marginTop: 2 }]}>
+                    {inv.ytdFactoryToWarehouse.cases}
+                  </Text>
+                  <Text style={[Type.caption, { color: Colors.textMuted }]}>
+                    cases in{inv.ytdFactoryToWarehouse.bottles ? ` +${inv.ytdFactoryToWarehouse.bottles} btl` : ''}
+                  </Text>
+                </BentoTile>
+                <BentoTile style={styles.flex}>
+                  <Text style={[Type.label, { color: Colors.textMuted }]}>Warehouse → L1</Text>
+                  <Text style={[Type.metric, tabularNums, { color: Colors.text, marginTop: 2 }]}>
+                    {inv.ytdWarehouseToL1.cases}
+                  </Text>
+                  <Text style={[Type.caption, { color: Colors.textMuted }]}>
+                    cases out{inv.ytdWarehouseToL1.bottles ? ` +${inv.ytdWarehouseToL1.bottles} btl` : ''}
+                  </Text>
+                </BentoTile>
+              </View>
+
+              <BentoTile style={{ marginTop: Space.md }}>
+                <Text style={[Type.label, { color: Colors.textMuted }]}>Warehouse balance</Text>
+                <Text style={[Type.display, tabularNums, { color: Colors.text, marginTop: 2 }]}>
+                  {inv.totalBalance.cases}
+                </Text>
+                <Text style={[Type.caption, { color: Colors.textMuted }]}>
+                  cases on hand{inv.totalBalance.bottles ? ` + ${inv.totalBalance.bottles} bottles` : ''}
+                </Text>
+
+                {inv.byProduct.map((p, i) => {
+                  const open = openProduct === p.productId;
+                  return (
+                    <View key={p.productId} style={[styles.invRow, i > 0 && styles.attnDivider]}>
+                      <Pressable
+                        onPress={() => setOpenProduct(open ? null : p.productId)}
+                        style={styles.invRowHead}
+                        accessibilityRole="button"
+                        accessibilityLabel={`${p.productName}, ${fmtQty(p.qty)}`}
+                        accessibilityState={{ expanded: open }}
+                      >
+                        <Text style={[Type.body, { color: Colors.text, flex: 1 }]} numberOfLines={1}>
+                          {p.productName}
+                        </Text>
+                        <Text style={[Type.bodyMed, tabularNums, { color: Colors.text }]}>
+                          {fmtQty(p.qty)}
+                        </Text>
+                        <Ionicons
+                          name={open ? 'chevron-down' : 'chevron-forward'}
+                          size={14}
+                          color={Colors.textMuted}
+                        />
+                      </Pressable>
+                      {open
+                        ? p.byWarehouse.map((w) => (
+                            <View key={w.facilityId} style={styles.invWarehouse}>
+                              <Text style={[Type.caption, { color: Colors.textMuted, flex: 1 }]} numberOfLines={1}>
+                                {w.facilityName}
+                              </Text>
+                              <Text style={[Type.caption, tabularNums, { color: Colors.textSecondary }]}>
+                                {fmtQty(w.qty)}
+                              </Text>
+                            </View>
+                          ))
+                        : null}
+                    </View>
+                  );
+                })}
+              </BentoTile>
+            </>
+          )}
+        </MotiView>
+
         {/* Hero — cases this month (cream on dark for legibility; no lime here) */}
         <MotiView {...entrance(section++, reduce)}>
           <BentoTile variant="dark" style={{ marginTop: Space.md }}>
@@ -279,95 +369,6 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
           </BentoTile>
         </MotiView>
 
-        {/* Inventory — FY movement + current warehouse balance */}
-        <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
-          <Text style={[Type.section, styles.sectionTitle]}>
-            Inventory · {inv?.fyLabel ?? ''}
-          </Text>
-          {!inv || inv.movementCount === 0 ? (
-            <BentoTile>
-              <Text style={[Type.body, { color: Colors.textMuted }]}>
-                No stock movements yet.
-              </Text>
-              <Text style={[Type.caption, { color: Colors.textMuted, marginTop: Space.xs }]}>
-                Figures here come from approved excise permits — approve one in Profile → Excise permits
-                and it lands in the ledger.
-              </Text>
-            </BentoTile>
-          ) : (
-            <>
-              <View style={styles.bentoRow}>
-                <BentoTile style={styles.flex}>
-                  <Text style={[Type.label, { color: Colors.textMuted }]}>Factory → warehouse</Text>
-                  <Text style={[Type.metric, tabularNums, { color: Colors.text, marginTop: 2 }]}>
-                    {inv.ytdFactoryToWarehouse.cases}
-                  </Text>
-                  <Text style={[Type.caption, { color: Colors.textMuted }]}>
-                    cases in{inv.ytdFactoryToWarehouse.bottles ? ` +${inv.ytdFactoryToWarehouse.bottles} btl` : ''}
-                  </Text>
-                </BentoTile>
-                <BentoTile style={styles.flex}>
-                  <Text style={[Type.label, { color: Colors.textMuted }]}>Warehouse → L1</Text>
-                  <Text style={[Type.metric, tabularNums, { color: Colors.text, marginTop: 2 }]}>
-                    {inv.ytdWarehouseToL1.cases}
-                  </Text>
-                  <Text style={[Type.caption, { color: Colors.textMuted }]}>
-                    cases out{inv.ytdWarehouseToL1.bottles ? ` +${inv.ytdWarehouseToL1.bottles} btl` : ''}
-                  </Text>
-                </BentoTile>
-              </View>
-
-              <BentoTile style={{ marginTop: Space.md }}>
-                <Text style={[Type.label, { color: Colors.textMuted }]}>Warehouse balance</Text>
-                <Text style={[Type.display, tabularNums, { color: Colors.text, marginTop: 2 }]}>
-                  {inv.totalBalance.cases}
-                </Text>
-                <Text style={[Type.caption, { color: Colors.textMuted }]}>
-                  cases on hand{inv.totalBalance.bottles ? ` + ${inv.totalBalance.bottles} bottles` : ''}
-                </Text>
-
-                {inv.byProduct.map((p, i) => {
-                  const open = openProduct === p.productId;
-                  return (
-                    <View key={p.productId} style={[styles.invRow, i > 0 && styles.attnDivider]}>
-                      <Pressable
-                        onPress={() => setOpenProduct(open ? null : p.productId)}
-                        style={styles.invRowHead}
-                        accessibilityRole="button"
-                        accessibilityLabel={`${p.productName}, ${fmtQty(p.qty)}`}
-                        accessibilityState={{ expanded: open }}
-                      >
-                        <Text style={[Type.body, { color: Colors.text, flex: 1 }]} numberOfLines={1}>
-                          {p.productName}
-                        </Text>
-                        <Text style={[Type.bodyMed, tabularNums, { color: Colors.text }]}>
-                          {fmtQty(p.qty)}
-                        </Text>
-                        <Ionicons
-                          name={open ? 'chevron-down' : 'chevron-forward'}
-                          size={14}
-                          color={Colors.textMuted}
-                        />
-                      </Pressable>
-                      {open
-                        ? p.byWarehouse.map((w) => (
-                            <View key={w.facilityId} style={styles.invWarehouse}>
-                              <Text style={[Type.caption, { color: Colors.textMuted, flex: 1 }]} numberOfLines={1}>
-                                {w.facilityName}
-                              </Text>
-                              <Text style={[Type.caption, tabularNums, { color: Colors.textSecondary }]}>
-                                {fmtQty(w.qty)}
-                              </Text>
-                            </View>
-                          ))
-                        : null}
-                    </View>
-                  );
-                })}
-              </BentoTile>
-            </>
-          )}
-        </MotiView>
 
         {/* Stores needing attention */}
         <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
@@ -391,14 +392,19 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
                 </View>
                 {attention.slice(0, 3).map((s, i) => (
                   <View key={s.id} style={[styles.attnRow, i > 0 && styles.attnDivider]}>
-                    <Text style={[Type.bodyMed, { color: Colors.text, flex: 1 }]} numberOfLines={1}>
+                    <Text style={styles.attnName} numberOfLines={2}>
                       {s.name}
                     </Text>
-                    <View style={styles.tagRow}>
+                    {/* Pills get their own column. They are Views, not bordered
+                        Text: a <Text> with border + vertical padding overflows
+                        its line box in RN and collided with the row divider. */}
+                    <View style={styles.tagCol}>
                       {s.reasons.map((r) => (
-                        <Text key={r} style={styles.tag}>
-                          {r}
-                        </Text>
+                        <View key={r} style={styles.tagPill}>
+                          <Text style={styles.tagPillText} numberOfLines={1}>
+                            {r}
+                          </Text>
+                        </View>
                       ))}
                     </View>
                   </View>
@@ -474,18 +480,33 @@ const styles = StyleSheet.create({
   invRowHead: { flexDirection: 'row', alignItems: 'center', gap: Space.sm, minHeight: Layout.tap },
   invWarehouse: { flexDirection: 'row', alignItems: 'center', gap: Space.sm, paddingLeft: Space.md, paddingVertical: 2 },
   attnHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  attnRow: { flexDirection: 'row', alignItems: 'center', gap: Space.sm, paddingVertical: Space.sm },
+  // Row is tall enough for a two-line pill stack, so a pill can never bleed
+  // into the divider of the row below it.
+  attnRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Space.md,
+    paddingVertical: Space.md,
+    minHeight: 56,
+  },
   attnDivider: { borderTopWidth: 1, borderTopColor: Colors.border },
-  tagRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Space.xs, justifyContent: 'flex-end' },
-  tag: {
-    ...Type.caption,
-    fontWeight: '700',
-    color: Colors.warning,
+  attnName: { ...Type.bodyMed, color: Colors.text, flex: 1 },
+  tagCol: {
+    flexShrink: 0,
+    maxWidth: '52%',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Space.xs,
+    justifyContent: 'flex-end',
+  },
+  tagPill: {
     borderWidth: 1,
     borderColor: Colors.warning,
+    backgroundColor: Colors.bgWarning,
     borderRadius: Radius.sm,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
+    paddingHorizontal: Space.sm,
+    paddingVertical: 3,
   },
+  tagPillText: { ...Type.caption, fontWeight: '700', color: Colors.warning },
   topRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: Space.sm },
 });

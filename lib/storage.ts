@@ -3,6 +3,10 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { decode } from 'base64-arraybuffer';
 
 const BUCKET = 'visit-photos';
+/** Locked bucket for original excise-permit documents (PDF/JPEG/PNG only). */
+export const PERMITS_BUCKET = 'excise-permits';
+/** The only file types that may ever be stored or parsed for a permit. */
+export const PERMIT_MIME_TYPES = ['application/pdf', 'image/jpeg', 'image/png'] as const;
 
 /** Local date as YYYY-MM-DD (used as a storage path segment). */
 function todayStr(): string {
@@ -106,20 +110,44 @@ export async function uploadProductImage(uri: string): Promise<string> {
 }
 
 /**
- * Gets a signed URL for a private photo.
+ * Signs a path and reports WHY it failed, so a caller can tell a genuinely
+ * missing object apart from a transient/network failure.
+ */
+export async function signedUrlResult(
+  filePath: string,
+  expiresInSeconds: number = 3600,
+  bucket: string = BUCKET
+): Promise<{ url: string | null; notFound: boolean; message: string | null }> {
+  const { data, error } = await supabase.storage
+    .from(bucket)
+    .createSignedUrl(filePath, expiresInSeconds);
+
+  if (error || !data) {
+    const message = error?.message ?? 'unknown error';
+    return {
+      url: null,
+      notFound: /not\s*found|does not exist|no such|404/i.test(message),
+      message,
+    };
+  }
+  return { url: data.signedUrl, notFound: false, message: null };
+}
+
+/**
+ * Gets a signed URL for a private file.
  * Default expiry is 1 hour (in-app display). The CSV export passes a
  * 90-day expiry explicitly — see lib/reportExport.ts.
+ *
+ * `bucket` defaults to visit-photos; excise permits live in their own locked
+ * bucket and MUST pass PERMITS_BUCKET (signing a permit path against
+ * visit-photos always fails, which is what broke "View original document").
  */
 export async function getSignedUrl(
   filePath: string,
-  expiresInSeconds: number = 3600
+  expiresInSeconds: number = 3600,
+  bucket: string = BUCKET
 ): Promise<string | null> {
-  const { data, error } = await supabase.storage
-    .from(BUCKET)
-    .createSignedUrl(filePath, expiresInSeconds);
-
-  if (error || !data) return null;
-  return data.signedUrl;
+  return (await signedUrlResult(filePath, expiresInSeconds, bucket)).url;
 }
 
 /**

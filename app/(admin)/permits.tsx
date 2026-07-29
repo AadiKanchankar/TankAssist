@@ -26,7 +26,7 @@ import EmptyState from '../../components/EmptyState';
 import ErrorState from '../../components/ErrorState';
 import { ListSkeleton } from '../../components/skeleton/ListSkeleton';
 import { supabase } from '../../lib/supabase';
-import { getSignedUrl } from '../../lib/storage';
+import { signedUrlResult, PERMITS_BUCKET, PERMIT_MIME_TYPES } from '../../lib/storage';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
 import { useFacilities } from '../../hooks/useFacilities';
 import { useProducts } from '../../hooks/useProducts';
@@ -39,6 +39,7 @@ import {
   DIRECTION_LABEL,
   MovementDirection,
   Permit,
+  permitLines,
 } from '../../hooks/usePermits';
 
 const BUCKET = 'excise-permits';
@@ -79,9 +80,24 @@ export default function PermitsScreen({ visible, onClose }: { visible: boolean; 
       return;
     }
 
+    // Allowlist, layer 1 of 3. Some Android pickers ignore the type filter and
+    // let the user choose "all files", so the choice is re-checked here. The
+    // authoritative checks are the Edge Function's magic-byte sniff and the
+    // bucket's allowed_mime_types — neither of which trusts this.
+    const ext = (file.name?.split('.').pop() || '').toLowerCase();
+    const mime = (file.mimeType || '').toLowerCase();
+    const extOk = ['pdf', 'png', 'jpg', 'jpeg'].includes(ext);
+    const mimeOk = !mime || (PERMIT_MIME_TYPES as readonly string[]).includes(mime);
+    if (!extOk || !mimeOk) {
+      Alert.alert(
+        'Unsupported file',
+        'Permits must be a PDF, PNG or JPG. Pick one of those and try again.',
+      );
+      return;
+    }
+
     setUploading(true);
     try {
-      const ext = (file.name?.split('.').pop() || 'pdf').toLowerCase();
       const path = `permits/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
       const base64 = await FileSystem.readAsStringAsync(file.uri, { encoding: FileSystem.EncodingType.Base64 });
       const { error: upErr } = await supabase.storage
@@ -96,6 +112,28 @@ export default function PermitsScreen({ visible, onClose }: { visible: boolean; 
       if (fnErr) throw fnErr;
 
       await refetch();
+
+      // Duplicate permit number — no second row was created (the "held seat"):
+      // an approved one is final, a pending one is a shared queue item anyone
+      // can review, so we route to the existing record instead.
+      if (result?.duplicate) {
+        const pn = result.permit_number ?? 'this permit';
+        if (result.duplicate === 'approved') {
+          Alert.alert('Already in the ledger', `Permit ${pn} is already in the ledger.`);
+        } else {
+          Alert.alert(
+            'Already uploaded',
+            `Permit ${pn} was uploaded by ${result.uploaded_by_name ?? 'another user'} and is awaiting review — you can review and approve it.`,
+            [
+              { text: 'Not now', style: 'cancel' },
+              { text: 'Review it', onPress: () => setOpenId(result.existing_permit_id) },
+            ],
+          );
+        }
+        setUploading(false);
+        return;
+      }
+
       const notes: string[] = result?.parser_notes ?? [];
       Alert.alert(
         'Permit uploaded',
@@ -181,7 +219,14 @@ function PermitRow({ permit, onOpen }: { permit: Permit; onOpen: () => void }) {
           </View>
         </View>
         <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 4 }]} numberOfLines={1}>
-          {permit.state} · {permit.liquor_class ?? 'Class unknown'} ·{' '}
+          {/* A multi-line permit has no single class — say so rather than
+              reporting it as unknown, which reads like a parse failure. */}
+          {permit.state} ·{' '}
+          {permit.liquor_class ??
+            ((permit.quantity_lines?.length ?? 0) > 1
+              ? `${permit.quantity_lines!.length} classes`
+              : 'Class unknown')}{' '}
+          ·{' '}
           <Text style={tabularNums}>
             {permit.quantity_value} {permit.quantity_type}
           </Text>
@@ -219,6 +264,9 @@ function ReviewModal({
   const allocations = data?.allocations ?? [];
   const activeProducts = (products ?? []).filter((p) => p.is_active);
   const editable = permit?.status === 'pending_review';
+  // One entry per row of the permit's quantity table; single-row permits give
+  // exactly one, so the multi-line UI below collapses back to today's layout.
+  const lines = permit ? permitLines(permit) : [];
 
   const refreshAll = async () => {
     await refetch();
@@ -235,24 +283,50 @@ function ReviewModal({
     await refreshAll();
   };
 
+  // Permits live in their own locked bucket — signing against the default
+  // visit-photos bucket is what made this fail for every permit. A missing
+  // object is reported differently from a transient failure.
   const openOriginal = async () => {
     if (!permit) return;
-    const url = await getSignedUrl(permit.original_file_path, 300);
-    if (url) Linking.openURL(url);
-    else Alert.alert('Unavailable', 'Couldn’t open the original file.');
+    const { url, notFound, message } = await signedUrlResult(
+      permit.original_file_path,
+      300,
+      PERMITS_BUCKET,
+    );
+    if (url) {
+      Linking.openURL(url).catch(() =>
+        Alert.alert('Can’t open it here', 'No app on this device can open that file.'),
+      );
+    } else if (notFound) {
+      Alert.alert(
+        'File not found',
+        'The original document is no longer in storage. The extracted details below are still on record.',
+      );
+    } else {
+      Alert.alert('Couldn’t open the file', message || 'Check your connection and try again.');
+    }
   };
 
-  const addAllocation = async (productId: string) => {
+  /**
+   * Allocate the rest of ONE quantity line to a product. Each line is balanced
+   * independently — that is what approve_excise_permit checks — so the BL taken
+   * here is capped by that line, never by the permit total.
+   */
+  const addAllocation = async (productId: string, lineIndex: number) => {
     if (!permit) return;
     const product = activeProducts.find((p) => p.id === productId);
-    if (!product) return;
-    const already = allocations.reduce((s, a) => s + Number(a.allocated_bl), 0);
-    const remaining = Math.max(0, Number(permit.quantity_value) - already);
-    const c = computeAllocation(remaining, permit.quantity_type, product);
+    const line = lines[lineIndex];
+    if (!product || !line) return;
+    const already = allocations
+      .filter((a) => a.line_index === lineIndex)
+      .reduce((s, a) => s + Number(a.allocated_bl), 0);
+    const remaining = Math.max(0, Number(line.quantity_value) - already);
+    const c = computeAllocation(remaining, line.quantity_type, product);
     setBusy(true);
     const { error } = await supabase.from('permit_product_allocations').insert({
       permit_id: permit.id,
       product_id: productId,
+      line_index: lineIndex,
       allocated_bl: remaining,
       computed_bottles: c.computed_bottles,
       computed_cases: c.computed_cases,
@@ -314,11 +388,25 @@ function ReviewModal({
     onClose();
   };
 
-  const allocSum = allocations.reduce((s, a) => s + Number(a.allocated_bl), 0);
-  const sumOk = permit ? Math.abs(allocSum - Number(permit.quantity_value)) <= 0.01 : false;
+  // Per-line balance, mirroring approve_excise_permit. A single-line permit is
+  // just the n=1 case, so there is one code path rather than two.
+  const lineState = lines.map((line, i) => {
+    const rows = allocations.filter((a) => a.line_index === i);
+    const sum = rows.reduce((s, a) => s + Number(a.allocated_bl), 0);
+    return {
+      line,
+      index: i,
+      rows,
+      sum,
+      remaining: Number(line.quantity_value) - sum,
+      ok: Math.abs(sum - Number(line.quantity_value)) <= 0.01,
+    };
+  });
+
+  const allLinesOk = lineState.every((l) => l.ok);
   const flagged = allocations.some((a) => a.needs_review || a.computed_cases === null);
   const canApprove =
-    editable && permit?.movement_direction !== 'unclassified' && allocations.length > 0 && sumOk && !flagged;
+    editable && permit?.movement_direction !== 'unclassified' && allocations.length > 0 && allLinesOk && !flagged;
 
   const notes: string[] = permit?.extracted_json?.parser_notes ?? [];
   const missing: string[] = permit?.extracted_json?.missing_fields ?? [];
@@ -419,43 +507,66 @@ function ReviewModal({
               />
             </BentoTile>
 
-            {/* Product allocations */}
+            {/* Product allocations — one balanced group per quantity line */}
             <BentoTile>
               <Text style={styles.cardLabel}>Product allocation</Text>
-              <Text style={[Type.caption, { color: sumOk ? Colors.success : Colors.warning, marginBottom: Space.sm }]}>
-                Allocated {allocSum} of {permit.quantity_value} {permit.quantity_type}
-                {sumOk ? '' : ' — must match the permit total'}
-              </Text>
-
-              {allocations.map((a) => {
-                const product = (products ?? []).find((p) => p.id === a.product_id);
-                return (
-                  <AllocationRow
-                    key={a.id}
-                    name={product?.name ?? 'Unknown product'}
-                    alloc={a}
-                    editable={!!editable}
-                    busy={busy}
-                    onRemove={() => removeAllocation(a.id)}
-                    onSetCases={(c, r) => setAllocationCases(a.id, c, r)}
-                  />
-                );
-              })}
-
-              {editable ? (
-                <>
-                  <Text style={[styles.cardLabel, { marginTop: Space.md }]}>Add product</Text>
-                  <View style={styles.chipWrap}>
-                    {activeProducts
-                      .filter((p) => !allocations.some((a) => a.product_id === p.id))
-                      .map((p) => (
-                        <Pressable key={p.id} disabled={busy} onPress={() => addAllocation(p.id)} style={styles.chip}>
-                          <Text style={styles.chipText}>{p.name}</Text>
-                        </Pressable>
-                      ))}
-                  </View>
-                </>
+              {lineState.length > 1 ? (
+                <Text style={[Type.caption, { color: Colors.textMuted, marginBottom: Space.sm }]}>
+                  This permit has {lineState.length} quantity lines. Each one is allocated separately.
+                </Text>
               ) : null}
+
+              {lineState.map((ls) => (
+                <View key={ls.index} style={ls.index > 0 ? styles.lineGroup : undefined}>
+                  {lineState.length > 1 ? (
+                    <Text style={styles.lineHeading}>
+                      {ls.line.liquor_class ?? `Line ${ls.index + 1}`}
+                    </Text>
+                  ) : null}
+
+                  <Text style={[Type.caption, { color: ls.ok ? Colors.success : Colors.warning, marginBottom: Space.sm }]}>
+                    Allocated {ls.sum} of {ls.line.quantity_value} {ls.line.quantity_type}
+                    {ls.ok ? '' : ` — ${ls.remaining > 0 ? `${ls.remaining} left to allocate` : `over by ${-ls.remaining}`}`}
+                  </Text>
+
+                  {ls.rows.map((a) => {
+                    const product = (products ?? []).find((p) => p.id === a.product_id);
+                    return (
+                      <AllocationRow
+                        key={a.id}
+                        name={product?.name ?? 'Unknown product'}
+                        alloc={a}
+                        editable={!!editable}
+                        busy={busy}
+                        onRemove={() => removeAllocation(a.id)}
+                        onSetCases={(c, r) => setAllocationCases(a.id, c, r)}
+                      />
+                    );
+                  })}
+
+                  {/* Nothing left on this line -> no picker, so a product can't be
+                      added at 0 BL and silently flunk the case-count check. */}
+                  {editable && ls.remaining > 0.01 ? (
+                    <>
+                      <Text style={[styles.cardLabel, { marginTop: Space.md }]}>Add product</Text>
+                      <View style={styles.chipWrap}>
+                        {activeProducts
+                          .filter((p) => !ls.rows.some((a) => a.product_id === p.id))
+                          .map((p) => (
+                            <Pressable
+                              key={p.id}
+                              disabled={busy}
+                              onPress={() => addAllocation(p.id, ls.index)}
+                              style={styles.chip}
+                            >
+                              <Text style={styles.chipText}>{p.name}</Text>
+                            </Pressable>
+                          ))}
+                      </View>
+                    </>
+                  ) : null}
+                </View>
+              ))}
             </BentoTile>
 
             {permit.notes ? (
@@ -489,8 +600,15 @@ function ReviewModal({
                         ? 'Set the movement direction to approve.'
                         : allocations.length === 0
                         ? 'Add at least one product allocation to approve.'
-                        : !sumOk
-                        ? 'Allocations must add up to the permit quantity to approve.'
+                        : !allLinesOk
+                        ? lineState.length > 1
+                          ? `Every quantity line must be fully allocated — ${lineState
+                              .filter((l) => !l.ok)
+                              .map((l) => l.line.liquor_class ?? `line ${l.index + 1}`)
+                              .join(', ')} still ${
+                              lineState.filter((l) => !l.ok).length > 1 ? 'don’t' : 'doesn’t'
+                            } add up.`
+                          : 'Allocations must add up to the permit quantity to approve.'
                         : 'Resolve the flagged allocation(s) to approve.'}
                     </Text>
                   ) : null}
@@ -619,6 +737,9 @@ const styles = StyleSheet.create({
   warnCard: { borderColor: Colors.warning },
   kv: { flexDirection: 'row', alignItems: 'flex-start', gap: Space.sm, paddingVertical: 3 },
   chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: Space.sm },
+  // Separates one quantity line's allocations from the next.
+  lineGroup: { marginTop: Space.lg, borderTopWidth: 1, borderTopColor: Colors.border, paddingTop: Space.md },
+  lineHeading: { ...Type.bodyMed, color: Colors.text, marginBottom: Space.xs },
   chip: {
     borderWidth: 1.5,
     borderColor: Colors.border,

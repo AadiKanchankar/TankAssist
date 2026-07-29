@@ -19,9 +19,10 @@ import BentoTile from '../../components/BentoTile';
 import EmptyState from '../../components/EmptyState';
 import ErrorState from '../../components/ErrorState';
 import { ListSkeleton } from '../../components/skeleton/ListSkeleton';
+import StatePicker from '../../components/StatePicker';
 import { supabase } from '../../lib/supabase';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
-import { useFacilities, Facility, FacilityType } from '../../hooks/useFacilities';
+import { useFacilities, isLicenceExpired, Facility, FacilityType } from '../../hooks/useFacilities';
 
 const FACILITY_TYPES: { value: FacilityType; label: string }[] = [
   { value: 'factory', label: 'Factory' },
@@ -35,6 +36,8 @@ interface FormState {
   state: string;
   facilityType: FacilityType;
   isActive: boolean;
+  validFrom: string;
+  validUntil: string;
 }
 
 const emptyForm = (): FormState => ({
@@ -44,7 +47,11 @@ const emptyForm = (): FormState => ({
   state: '',
   facilityType: 'warehouse',
   isActive: true,
+  validFrom: '',
+  validUntil: '',
 });
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
  * Facilities admin (management-only). This registry is what makes excise-permit
@@ -97,6 +104,8 @@ export default function FacilitiesScreen({
       state: f.state,
       facilityType: f.facility_type,
       isActive: f.is_active,
+      validFrom: f.valid_from || '',
+      validUntil: f.valid_until || '',
     });
     setErrors({});
     setShowForm(true);
@@ -107,6 +116,12 @@ export default function FacilitiesScreen({
     if (!form.name.trim()) e.name = 'Name is required.';
     if (!form.licenseNo.trim()) e.licenseNo = 'Licence number is required — this is what permits are matched on.';
     if (!form.state.trim()) e.state = 'State is required.';
+    if (form.validFrom.trim() && !ISO_DATE.test(form.validFrom.trim())) e.validFrom = 'Use YYYY-MM-DD.';
+    if (form.validUntil.trim() && !ISO_DATE.test(form.validUntil.trim())) e.validUntil = 'Use YYYY-MM-DD.';
+    if (!e.validFrom && !e.validUntil && form.validFrom.trim() && form.validUntil.trim()
+        && form.validUntil.trim() < form.validFrom.trim()) {
+      e.validUntil = 'Must be on or after the valid-from date.';
+    }
     setErrors(e);
     if (Object.keys(e).length) return;
 
@@ -119,6 +134,8 @@ export default function FacilitiesScreen({
         state: form.state.trim(),
         facility_type: form.facilityType,
         is_active: form.isActive,
+        valid_from: form.validFrom.trim() || null,
+        valid_until: form.validUntil.trim() || null,
       };
       if (editing) {
         const { error } = await supabase.from('company_facilities').update(payload).eq('id', editing.id);
@@ -187,7 +204,16 @@ export default function FacilitiesScreen({
                         {item.license_no}
                         {item.license_type ? ` · ${item.license_type}` : ''} · {item.state}
                       </Text>
-                      {!item.is_active ? <Text style={styles.inactiveTag}>Inactive</Text> : null}
+                      <View style={styles.badgeRow}>
+                        {!item.is_active ? <Text style={styles.inactiveTag}>Inactive</Text> : null}
+                        {isLicenceExpired(item.valid_until) ? (
+                          <View style={styles.expiredPill}>
+                            <Text style={styles.expiredPillText}>
+                              Expired {item.valid_until}
+                            </Text>
+                          </View>
+                        ) : null}
+                      </View>
                     </View>
                     <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
                   </View>
@@ -250,13 +276,36 @@ export default function FacilitiesScreen({
               </Field>
 
               <Field label="State" error={errors.state}>
-                <TextInput
-                  style={[styles.input, errors.state && styles.inputError]}
+                <StatePicker
                   value={form.state}
-                  onChangeText={(t) => { set({ state: t }); if (errors.state) setErrors((x) => ({ ...x, state: '' })); }}
-                  placeholder="e.g. Haryana"
-                  placeholderTextColor={Colors.textMuted}
+                  error={!!errors.state}
+                  onChange={(s) => { set({ state: s }); if (errors.state) setErrors((x) => ({ ...x, state: '' })); }}
                 />
+              </Field>
+
+              <Field label="Licence valid from (optional)" error={errors.validFrom}>
+                <TextInput
+                  style={[styles.input, errors.validFrom && styles.inputError]}
+                  value={form.validFrom}
+                  onChangeText={(t) => { set({ validFrom: t }); if (errors.validFrom) setErrors((x) => ({ ...x, validFrom: '' })); }}
+                  placeholder="YYYY-MM-DD"
+                  placeholderTextColor={Colors.textMuted}
+                  autoCapitalize="none"
+                />
+              </Field>
+
+              <Field label="Licence valid until (optional)" error={errors.validUntil}>
+                <TextInput
+                  style={[styles.input, errors.validUntil && styles.inputError]}
+                  value={form.validUntil}
+                  onChangeText={(t) => { set({ validUntil: t }); if (errors.validUntil) setErrors((x) => ({ ...x, validUntil: '' })); }}
+                  placeholder="YYYY-MM-DD"
+                  placeholderTextColor={Colors.textMuted}
+                  autoCapitalize="none"
+                />
+                <Text style={styles.hint}>
+                  An expired licence stays listed but is skipped when matching permits automatically.
+                </Text>
               </Field>
 
               <Field label="Facility type">
@@ -329,7 +378,17 @@ const styles = StyleSheet.create({
   rowWrap: { marginBottom: Space.md },
   row: { flexDirection: 'row', alignItems: 'center', gap: Space.md },
   inactive: { opacity: 0.6 },
-  inactiveTag: { ...Type.caption, fontWeight: '700', color: Colors.textMuted, marginTop: 2 },
+  inactiveTag: { ...Type.caption, fontWeight: '700', color: Colors.textMuted },
+  badgeRow: { flexDirection: 'row', alignItems: 'center', gap: Space.sm, marginTop: Space.xs, flexWrap: 'wrap' },
+  expiredPill: {
+    borderWidth: 1,
+    borderColor: Colors.alert,
+    backgroundColor: Colors.bgAlert,
+    borderRadius: Radius.sm,
+    paddingHorizontal: Space.sm,
+    paddingVertical: 3,
+  },
+  expiredPillText: { ...Type.caption, fontWeight: '700', color: Colors.alert },
   formContent: { padding: Layout.screenPad, paddingBottom: Space.xxl },
   field: { marginTop: Space.lg },
   fieldLabel: { ...Type.label, color: Colors.textMuted, marginBottom: Space.sm },

@@ -56,7 +56,7 @@ assert.equal(toIsoTimestamp('24/06/2026 12:10:00 AM'), '2026-06-24T00:10:00Z', '
 // ── parser selection ──────────────────────────────────────────────────────
 const parser = selectParser(FIXTURE);
 assert.ok(parser, 'Haryana parser must be selected');
-assert.equal(parser!.version, 'haryana-l32@2');
+assert.equal(parser!.version, 'haryana-l32@3');
 assert.equal(selectParser('a receipt from some other state'), null, 'unknown text -> no parser');
 
 // ── the real document ─────────────────────────────────────────────────────
@@ -86,6 +86,32 @@ assert.deepEqual(
   [],
   'every other required field parsed cleanly',
 );
+
+// ── quantity lines: the real permit is single-row ──────────────────────────
+assert.equal(p.quantity_lines.length, 1, 'real L-32 sample has exactly one Liquor Details row');
+assert.deepEqual(p.quantity_lines[0], {
+  liquor_class: 'WINE',
+  quantity_value: 396,
+  quantity_type: 'BL',
+});
+// the scalar total still matches the single line
+assert.equal(p.quantity_value, p.quantity_lines[0].quantity_value);
+
+// ── multi-row: same scan, no format change needed ──────────────────────────
+// Synthetic ONLY — no real multi-row permit has been seen yet, so this proves
+// the parser handles extra table rows, not that a real document looks like this.
+{
+  const multi = FIXTURE.replace(
+    'WINE 396 BL',
+    'WINE 396 BL\nBEER 200 BL\nIMFL 50.5 PL',
+  );
+  const mp = selectParser(multi)!.parse(multi);
+  assert.equal(mp.quantity_lines.length, 3, 'three table rows -> three lines');
+  assert.deepEqual(mp.quantity_lines.map((l) => l.liquor_class), ['WINE', 'BEER', 'IMFL']);
+  assert.deepEqual(mp.quantity_lines.map((l) => l.quantity_value), [396, 200, 50.5]);
+  assert.deepEqual(mp.quantity_lines.map((l) => l.quantity_type), ['BL', 'BL', 'PL']);
+  assert.equal(mp.liquor_class, null, 'multi-row: no single scalar class — row 1 must not stand in for the permit');
+}
 
 // ── bottle math on the real numbers (mirrors index.ts) ─────────────────────
 // 396 BL / 0.18 L per 180ml bottle = 2200 bottles -> 91 cases + 16 remainder
