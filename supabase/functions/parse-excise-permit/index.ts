@@ -160,9 +160,13 @@ Deno.serve(async (req) => {
           .from('users').select('name').eq('id', existing.uploaded_by).maybeSingle();
         uploaderName = u?.name ?? null;
       }
-      // The client uploaded before calling us. Bailing out here would strand that
-      // copy in the bucket with no permit row pointing at it, so drop it.
-      await supabase.storage.from(BUCKET).remove([storagePath]);
+      // The client uploaded before calling us, so this duplicate leaves a file in
+      // the bucket with no permit row pointing at it. We deliberately LEAVE it.
+      // Permit originals are audit evidence: the bucket has no DELETE policy by
+      // design, and granting one so the app could tidy up a few stray bytes would
+      // put a delete path on the evidence store to buy almost nothing. A human can
+      // still clear orphans from the dashboard under service-role if it ever
+      // matters. See HANDOFF.md "Known defects" for the full reasoning.
       return json({
         duplicate: existing.status === 'approved' ? 'approved' : 'pending',
         existing_permit_id: existing.id,
@@ -257,6 +261,12 @@ Deno.serve(async (req) => {
 
   // Only auto-allocate a SINGLE-line permit: a multi-line permit needs the
   // reviewer to decide how each line maps to a product.
+  //
+  // NOTE: this branch is currently DORMANT BY DESIGN — the catalog has >1 active
+  // product, so `products.length === 1` is false and every permit goes to manual
+  // allocation. That is correct, not broken: once several SKUs exist, a BL total
+  // could genuinely map to more than one of them and only a human can say which.
+  // Do not "fix" it by spreading a total across products. See HANDOFF.md.
   const singleLine = (parsed?.quantity_lines?.length ?? 0) <= 1;
   if (singleLine && products?.length === 1 && (parsed?.quantity_value ?? 0) > 0) {
     const p = products[0];
