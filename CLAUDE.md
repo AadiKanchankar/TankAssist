@@ -21,6 +21,8 @@ Native-module changes (`react-native-maps`, `expo-camera`, `expo-location`, `exp
 
 `rep`, `sales_manager`, `management`. `state_head` was deleted. The role `CHECK` and every RLS policy/function use only these three. Manager-level policies use `get_my_role() = ANY (ARRAY['sales_manager','management'])`; catalog/user writes are `management`-only.
 
+**⚠️ Tester role-switch (temporary — must be removed before production).** `users.is_tester boolean not null default false` + `public.switch_tester_role(new_role text)` (SECURITY DEFINER, `search_path=''`). The RPC is **self-only** (`auth.uid()`), requires `is_tester AND is_active`, validates against the same three roles, and **never touches `is_active`** — it only rewrites the caller's own `role`. There is **no 4th role**; a switched tester is indistinguishable from a real user of that role and gets **full, unrestricted** rights (that is the point — no read-only test mode). Whitelisting is data, not code: flip `is_tester` on a row. Currently two ids (see HANDOFF for the ids and the removal SQL). UI: a role switcher in `app/(shared)/profile.tsx` (lands on the new role's dashboard) plus a persistent `components/TesterBadge.tsx`. This is a standing self-elevation path to `management` — **HANDOFF carries the drop migration; run it before go-live.**
+
 **Soft-ban:** `users.is_active boolean not null default true`. `get_my_role()` returns `role` only when `is_active` — otherwise **NULL**, so every role-keyed policy fails automatically for a deactivated user, and self-scoped write policies additionally require `get_my_role() IS NOT NULL`. A self-read policy survives so the app can show "Your account has been deactivated" and sign out. With the anon-key-only architecture, deactivation takes effect at the target's next token refresh / app-foreground (bounded by the access-token TTL) — not instant. `App.tsx` surfaces it via a `deactivated` flag (distinct from `kickedOut`).
 
 ## Authentication & account creation
@@ -41,21 +43,29 @@ Root calls `useAuthStore().initialize()` and renders one of three trees reactive
 
 Stacks: **Team** (`RepsList` → `RepDetail`, member detail hosts Assign-Stores/Report for reps + management-only Deactivate/Reactivate). **Stores** (`StoresList` → `StoreDetail` → `StoreForm`, plus `OrderDetail` so the recent-orders list links in). **Orders** (`OrdersList` → `OrderDetail`). `StoreVisit` is pushed from the rep Dashboard and Stores stacks. `OrderDetail` and `StoreDetail` live in `app/(shared)/` and derive actions from role.
 
+**Excise screens are management-only** and reached from the management surface, not their own tabs: `app/(admin)/permits.tsx` (upload + review queue) and `app/(admin)/facilities.tsx` (factory/warehouse registry).
+
 App.tsx also owns: the `AppState` token-refresh pause/resume + proactive `refreshSession()` on foreground, the "logged in on another device" alert (`kickedOut`), and the "account deactivated" alert (`deactivated`).
 
 ## State Management
 
-Single Zustand store (`store/useAuthStore.ts`): `session`, `user`, `profile` (role is the three-role union + `is_active`), `loading`, `initialized`, `kickedOut`, `deactivated`. Everything else is local `useState` per screen; screens fetch from Supabase on mount and on focus (`useFocusEffect`). No global data cache.
+Single Zustand store (`store/useAuthStore.ts`): `session`, `user`, `profile` (role is the three-role union + `is_active` + `is_tester`), `loading`, `initialized`, `kickedOut`, `deactivated`.
+
+Server state is **`@tanstack/react-query`** (`lib/queryClient.ts`), added in the UI redesign — the "no global data cache" era is over. The house pattern is `refetchOnMount: false` **+** an explicit `useFocusEffect(refetch)`, so a screen doesn't refetch on every remount but does refresh when the user actually returns to it. Per-domain hooks live in `hooks/` (`useOrders`, `useStores`, `useProducts`, `useTeam`, `usePermits`, `useFacilities`, `useCasesTrend`, `useInventoryAnalytics`, the three dashboards). Local `useState` still owns per-screen form/UI state.
 
 ## Supabase Usage
 
-Client initialized once in `lib/supabase.ts` (hardcoded URL + anon key). Session persisted **encrypted** via the chunked `expo-secure-store` adapter (`lib/secureStorage.ts`; Android Keystore / iOS Keychain; one-time lazy migration from old AsyncStorage). A second **`enrollClient`** (no persistence, no listener) exists solely for management OTP enrollment. All DB access is direct PostgREST through RLS. The private `visit-photos` bucket holds selfies, store/stock/delivered photos; signed URLs via `lib/storage.ts` (`getSignedUrl`/`getSignedUrls`, default 1 h; the CSV export uses 90 days).
+Client initialized once in `lib/supabase.ts` (hardcoded URL + anon key). Session persisted **encrypted** via the chunked `expo-secure-store` adapter (`lib/secureStorage.ts`; Android Keystore / iOS Keychain; one-time lazy migration from old AsyncStorage). A second **`enrollClient`** (no persistence, no listener) exists solely for management OTP enrollment. All DB access is direct PostgREST through RLS, plus **one Edge Function** (`parse-excise-permit`) and **one Realtime subscription** (`location_requests`).
+
+**Two private buckets.** `visit-photos` holds selfies and store/stock/delivered photos (policies are bucket-scoped to any authenticated user, no role gate); **`excise-permits`** holds permit documents (management-only, mime + 10 MB capped). `lib/storage.ts` exposes `getSignedUrl`/`getSignedUrls` (default 1 h; CSV export uses 90 days) and **`signedUrlResult(path, seconds, bucket)`**, which separates "the object is gone" from a transient failure — `getSignedUrl` defaults to `visit-photos`, so **any permit path must pass `PERMITS_BUCKET` explicitly**.
 
 ## Database (live)
 
 `supabase-schema.sql` is **regenerated from the live DB via MCP** (Phase 11) and is a trustworthy reference — **do not hand-edit**; make changes as migrations then regenerate.
 
-Tables: `users` (+`assigned_manager_id`, `is_active`), `stores` (+`license_number`, `created_by_user_id`, `state`, `owner_name`; `contact_person` shown as "Store Manager Name"), `store_assignments`, `attendance` (+`address`), `store_visits` (+`latitude`/`longitude`/`address`/`distance_from_store_meters`; `cases_sold` is now **legacy** — see report semantics), `daily_reports`, `store_visit_photos`, **`products`**, **`orders`**, **`order_items`**, **`order_status_history`**, **`store_stock_snapshots`**. View: `monthly_ta_summary` (`security_invoker=on`).
+Tables: `users` (+`assigned_manager_id`, `is_active`, `is_tester`), `stores` (+`license_number`, `created_by_user_id`, `state`, `owner_name`; `contact_person` shown as "Store Manager Name"), `store_assignments`, `attendance` (+`address`), `store_visits` (+`latitude`/`longitude`/`address`/`distance_from_store_meters`; `cases_sold` is now **legacy** — see report semantics), `daily_reports`, `store_visit_photos`, **`products`**, **`orders`**, **`order_items`**, **`order_status_history`**, **`store_stock_snapshots`**, **`location_requests`**, **`company_facilities`**, **`excise_permits`**, **`permit_product_allocations`**, **`inventory_movements`**. View: `monthly_ta_summary` (`security_invoker=on`).
+
+SECURITY DEFINER functions (all `search_path=''`): `get_my_role`, `get_sales_managers`, `phone_registered`, `update_order_status`, `switch_tester_role`, `approve_excise_permit`, `reject_excise_permit`, plus two trigger functions — `reject_out_of_stock_order_item` (BEFORE INSERT on `order_items`) and `guard_facility_license_change` (BEFORE UPDATE on `company_facilities`).
 
 ### Orders & the status machine
 5 stages + cancelled: `placed → in_process → dispatched → in_transit → delivered`, plus `cancelled` (terminal, from any non-terminal state). **Strictly sequential; no skipping, no reversing.** Ownership: rep sets `placed` (at order creation) and `delivered` (verified at store); sales_manager & management set `in_process`/`dispatched`/`in_transit`. Cancel: rep (own orders only) + SM/management, reason mandatory.
@@ -64,11 +74,47 @@ Tables: `users` (+`assigned_manager_id`, `is_active`), `stores` (+`license_numbe
 - **Delivered-override (approved Option B):** SM/management may mark `delivered` **only from `in_transit`, with a mandatory reason** (recorded in history). Reps mark `delivered` from **any** non-terminal state but require an **open (not checked-out) `store_visit` by that rep at the order's store** (whoever is physically checked in verifies delivery — not necessarily the placer).
 - **History/audit:** order creation is represented by the order row itself (`placed_by`, `created_at`) — **no** creation history row; the RPC logs every transition after. Order detail renders "Placed by … " as the first timeline entry, then history rows.
 
-### Products (catalog)
-`products` — `name`, `unit` (free text), `qty_per_carton (>0)`, `product_code`, optional `price_per_case`/`price_per_bottle numeric`, `is_active`, `created_by`. **Archive-only:** no DELETE policy and no DELETE grant anywhere (discontinue via `is_active=false` so historical orders keep referencing it). All authenticated read; **management-only** insert/update. Pricing is optional; when present it is **snapshotted onto `order_items.price_per_case/price_per_bottle` at placement**. Products tab is management-only.
+### Products (catalog / product master)
+`products` — `name`, `unit` (free text, legacy display), `qty_per_carton (>0)`, `product_code`, optional `price_per_case`/`price_per_bottle numeric`, `is_active`, `created_by`. **Archive-only:** no DELETE policy and no DELETE grant anywhere (discontinue via `is_active=false` so historical orders keep referencing it). All authenticated read; **management-only** insert/update. Pricing is optional; when present it is **snapshotted onto `order_items.price_per_case/price_per_bottle` at placement**. Products tab is management-only.
+
+**Product-master expansion** added: `brand`, `category`, `unit_type`, **`unit_size numeric`** + **`unit_of_measure text`** (the pair the excise BL→bottles math needs — `unit` alone is free text and unusable), `gst_percent`, `shelf_life_months`, `sku`, `barcode`, `hsn_code`, `image_path`, and **`is_out_of_stock boolean not null default false`**. All are nullable/defaulted, so existing rows stayed valid. Editing uses a **3-step wizard** in `app/(admin)/products.tsx` (1 Basic info · 2 Packaging · 3 Commercial & availability); validation errors jump to the step holding the first error.
+
+**Out-of-stock is enforced in the database, not just the UI.** The `trg_reject_oos_order_item` BEFORE INSERT trigger on `order_items` raises `'Product is out of stock'` if the referenced product has `is_out_of_stock = true`. The rep order picker also hides/blocks OOS products, but the trigger is the actual guarantee — a stale client cannot place an OOS line.
 
 ### Stock snapshots
 `store_stock_snapshots` — append-only (no update/delete). **Current stock = latest snapshot per (store, product).** Written during the check-in stepper for the products the rep actually touched. `>= 0` checks on cases/bottles. All authenticated read; insert with `recorded_by = auth.uid()`.
+
+### Live location (on-demand, request/response over Realtime)
+`location_requests` — `rep_id`, `requested_by`, `requested_at`, `lat`/`lng`, `responded_at`, `status ('pending'|'completed'|'expired')`. **This is the only table in the `supabase_realtime` publication.** There is no background/continuous tracking: a manager asks, and a **checked-in** rep's app answers once.
+
+- **Ask** (`components/GetLocationButton.tsx`, manager side): INSERT a `pending` row, then subscribe to `postgres_changes` UPDATE filtered to that row id. `TIMEOUT_MS = 18000` — on timeout it falls back to the rep's last known position rather than hanging.
+- **Answer** (`hooks/useLocationResponder.ts` + `components/LocationResponder.tsx`, rep side): subscribes to `postgres_changes` INSERT filtered on `rep_id=eq.<self>` **only while checked in**, takes one GPS reading, UPDATEs the row to `completed`. The channel is torn down on check-out.
+- **RLS:** insert requires `requested_by = auth.uid()`, `status='pending'`, and that the target is an **active rep** the requester actually owns — management anyone, sales_manager only their own `assigned_manager_id` reports. Reads are split: `rep_id = auth.uid()` (the rep being asked) or `requested_by = auth.uid()` (the asker). Update is rep-only on their own row.
+
+### Excise permits → inventory ledger (management-only)
+Pipeline: **upload a permit PDF → parse server-side → human review/allocate → approve → append to an inventory ledger.** Every table below is **management-only** at the RLS layer (not extended to `sales_manager`).
+
+- **`company_facilities`** — our own factories/warehouses. `name`, `license_no` (**UNIQUE**), `license_type`, `state`, `facility_type ('factory'|'warehouse')`, `is_active`, `valid_from`/`valid_until`. Anything **not** in this registry is treated as an external party (distributor / L1). Admin screen `app/(admin)/facilities.tsx`; `constants/indiaStates.ts` + `components/StatePicker.tsx` back the state field. **Licence-lock trigger** (`guard_facility_license_change`): `license_no` is editable while nothing references the facility, then **locked** once any permit or movement points at it — retire via `is_active=false` and add a new row, because the number is historical evidence.
+- **`excise_permits`** — parsed permit header + `original_file_path`, `extracted_json` (raw text, parser notes, missing fields — the audit trail), `parser_version`, `status ('pending_review'|'approved'|'rejected')`, `movement_direction ('factory_to_warehouse'|'warehouse_to_l1'|'internal_transfer'|'unclassified')`, `facility_from_id`/`facility_to_id`, and **`quantity_lines jsonb`** (one entry per row of the permit's quantity table; null on rows predating multi-line parsing). Partial unique index **`excise_permits_one_approved_per_number`** on `permit_number WHERE status='approved'` — the same permit can never enter the ledger twice, enforced by the DB, not by a check-then-insert race.
+- **`permit_product_allocations`** — maps permit quantity to catalog products: `line_index` (which quantity line, default `0`), `allocated_bl`, `computed_bottles`/`computed_cases`/`remainder_bottles` (**nullable — null means "couldn't compute", never a guess**), `needs_review`, `conversion_formula_version`. Writable only while the parent permit is `pending_review`.
+- **`inventory_movements`** — the append-only ledger. **SELECT policy only: no INSERT/UPDATE/DELETE policy for anyone**, exactly like `orders`. The sole writer is `approve_excise_permit`.
+
+**`approve_excise_permit(p_permit_id)`** is the only path into the ledger. It locks the permit `FOR UPDATE` and refuses unless: caller is management · status is `pending_review` · direction is not `unclassified` · `permit_number` is neither empty nor the `'UNREAD'` placeholder · at least one allocation · none flagged `needs_review` · none missing computed case counts · every allocation's `line_index` is in range · **and each quantity line's allocations sum to that line's own quantity** (±0.01). It falls back to the scalar columns for permits stored before `quantity_lines`, so old rows behave as before. **`reject_excise_permit(p_permit_id, p_reason)`** requires a reason.
+
+**Storage:** private **`excise-permits`** bucket, `file_size_limit` 10 MB, `allowed_mime_types` `application/pdf`/`image/jpeg`/`image/png`. Policies are **management-gated SELECT + INSERT only — no UPDATE and no DELETE, deliberately.** A permit original is audit evidence, so nothing in the app can alter or remove one; this matches the immutability the rest of the design relies on (`inventory_movements` has no write policy, `order_status_history` is read-only, products are archive-only, the licence-lock trigger refuses to rewrite a referenced licence number). The consequence is that a turned-away duplicate upload leaves an orphan file, and that is **accepted rather than fixed** — see HANDOFF "Known defects". Don't add a DELETE policy to tidy it up. This bucket is *not* `visit-photos`; signing a permit path against the default bucket is a bug that has already happened once — pass `PERMITS_BUCKET` from `lib/storage.ts`.
+
+### `parse-excise-permit` Edge Function (Deno, deployed v4)
+Runs **entirely on the caller's JWT — no service-role key anywhere**, so RLS still applies to everything it does. File type is verified by **magic bytes**, not filename/extension. PDF text is extracted with `unpdf` and `isEvalSupported: false` (embedded PDF JavaScript is never executed).
+
+**Text-layer only — there is no OCR.** Edge limits (256 MB / short CPU budget / bundle size, no multithreaded native libs) rule it out, so an image or a scanned PDF lands as `permit_number='UNREAD'` for manual entry rather than a guess. Files:
+- `parsers.ts` — one parser per state, selected by `detect()`. Currently **`haryana-l32@3`** (FORM L-32). Emits one `quantity_lines` entry per Liquor Details row; reports a scalar `liquor_class` **only** for a single-row permit (with several rows it is null — row 1 must not stand in for the whole permit). Calibrated against a real L-32, not a spec. Known structural gap: **L-32 never prints the supplier's licence number**, so `license_no_source` is always null there and is explained in `parser_notes`.
+- `classify.ts` — movement-direction rules. Critically distinguishes *"this licence isn't ours"* from *"this licence is ours but isn't currently valid"*: an expired/inactive facility of ours must **not** be read as an external L1, which would book an internal transfer as an outbound sale. Only a currently-valid licence auto-matches; anything else stays `unclassified` for a human.
+- `index.ts` — duplicate guard (skipped for the `UNREAD` placeholder, since those all share it and aren't duplicates of each other), permit insert, and auto-allocation **only when the permit is single-line and exactly one active product exists** — the count is evaluated live, so this self-disables as the catalog grows.
+
+Node-runnable tests sit beside the sources (`parsers.test.ts`, `classify.test.ts`, `npx tsx …`). **`supabase/functions` and `**/*.test.ts` are excluded in `tsconfig.json`** — they are Deno/Node code and would otherwise break the `tsc` gate.
+
+### Inventory analytics
+`lib/financialYear.ts` holds `FINANCIAL_YEAR_START_MONTH = 4` (Indian FY, 1 Apr – 31 Mar) as the single source of truth — same discipline as `ORDERS_CUTOVER_DATE`, never hardcoded into a query. `lib/inventoryMath.ts` is pure (`computeAnalytics`, `fmtQty`) and does its arithmetic **in whole bottles** before converting back to cases + remainder, so cases never drift; balance = sum over the whole `inventory_movements` history. `hooks/useInventoryAnalytics.ts` wraps it; unit-tested in `useInventoryAnalytics.test.ts`.
 
 ### RLS Policies
 Keyed off `public.get_my_role()` (STABLE SECURITY DEFINER, `search_path=''`, EXECUTE granted to `authenticated`/`service_role`, revoked from anon/public). Manager reads use `get_my_role() = ANY (ARRAY['sales_manager','management'])`. `users` INSERT/UPDATE are management-only (plus `Users: self update (role locked)` pinning `role = get_my_role()`). Orders/history: all-authenticated read, orders insert-own, **no direct order mutation**; order_items insert only into your own order; snapshots insert-own; products management-write. **⚠️ Grants gotcha:** MCP-created tables/views get **zero** API-role grants — after any `CREATE TABLE/VIEW`, explicitly `GRANT` to `authenticated` and verify by role impersonation (`set_config('request.jwt.claims', …)`), expecting rows or a clean RLS denial (42501), never a bare permission error.
@@ -101,7 +147,11 @@ Reached via Team → member → **Report** section (`rep-report-detail.tsx`, Dai
 
 ## Management dashboard (app/(admin)/management-dashboard.tsx)
 
-KPI view for management (sales managers keep the legacy dashboard). **Order pipeline strip** (live counts per bucket; tap → Orders tab pre-filtered via a `filter` route param), **Cases ordered** this vs last month + a per-day **trend** (basic RN `<View>` bars — no charting library / SVG; none is installed), **Today's field activity** (reps checked in / visits), **Stores needing attention** (no visit in `STALE_VISIT_DAYS = 7`, and/or latest stock all-zero), **Top stores this month** by cases. All cases figures come from `casesSold` (no second hybrid). No new schema.
+KPI view for management (sales managers keep the legacy dashboard). Order, top to bottom: greeting + **today's date**, **Inventory** (FY-to-date movement + current warehouse balance, labelled with `financialYearLabel()`), **Cases ordered** hero + **trend**, **order pipeline strip** (tap → Orders tab pre-filtered via a `filter` route param), **Today's field activity** (reps checked in / visits), **Stores needing attention** (no visit in `STALE_VISIT_DAYS = 7`, and/or latest stock all-zero), **Top stores this month** by cases. All cases figures come from `casesSold` (no second hybrid).
+
+**Cases trend range selector** (`hooks/useCasesTrend.ts`): 7 ranges — `1W · 1M · 3M · 6M · 1Y · 3Y · 5Y` — with **tiered granularity** (daily → weekly → monthly buckets) so a 5-year range doesn't render 1,800 bars. Each range makes **one** `casesSold` call for the whole window and buckets client-side, so the cutover hybrid is still applied exactly once. Tapping a bar reads out its full date/range.
+
+Charting: `react-native-svg` + `react-native-gifted-charts` are now installed (the earlier "no charting library" note is obsolete); simple bars still use plain RN `<View>` via `components/TrendBars.tsx`.
 
 ## Store screens (list · detail · form)
 
@@ -121,11 +171,26 @@ Tappable summary segments (To Process / Dispatched / In Transit / Delivered / Ca
 
 ## Builds (EAS)
 
-Android APKs via EAS (`eas.json` `preview` → internal APK; `channel: preview`). `app.json` config plugins: `expo-camera`, `expo-location`, `expo-font`, `expo-secure-store`, `expo-sharing`, **`expo-speech-recognition`** (mic + speech usage strings; Android on-device service packages). **`expo-updates`** configured (`updates.url` + `runtimeVersion: appVersion`) for OTA after go-live. The same Google Maps key (Maps SDK Android + Places + Geocoding + Directions) is wired in `app.json` → `android.config.googleMaps.apiKey`. Native modules — `react-native-maps`, `expo-camera/location/secure-store/sharing`, **`expo-speech-recognition`**, **`expo-print`**, **`expo-updates`** — need a fresh EAS build; the voice + PDF + OTA work is batched into **one** build.
+Android APKs via EAS (`eas.json` `preview` → internal APK; `channel: preview`). `app.json` config plugins: `expo-camera`, `expo-location`, `expo-font`, `expo-secure-store`, `expo-sharing`, **`expo-document-picker`** (permit upload), **`expo-speech-recognition`** (mic + speech usage strings; Android on-device service packages). **`expo-updates`** configured (`updates.url` + `runtimeVersion: { policy: 'appVersion' }`, currently **1.0.0**). The same Google Maps key (Maps SDK Android + Places + Geocoding + Directions) is wired in `app.json` → `android.config.googleMaps.apiKey`.
+
+**OTA vs build:** JS-only changes ship with `eas update --branch preview --environment preview` and land on any installed build whose `runtimeVersion` matches (`1.0.0`). A **new EAS build is required** only when a native module is added/changed — currently `react-native-maps`, `react-native-svg`, `react-native-reanimated` (+ `react-native-worklets`), `expo-camera/location/secure-store/sharing/document-picker/print/updates/blur/haptics/linear-gradient/file-system`, `expo-speech-recognition`.
+
+Build gotchas already hit, worth not re-learning: `babel-preset-expo` must be an **explicit** dependency (transitive isn't enough); `newArchEnabled` is **not** valid in the SDK 56 `app.json` schema; duplicate `react` versions (moti pulled its own) need an `overrides` entry + `npm dedupe`; the worklets babel plugin must be **last**.
+
+## Standing hooks & session conventions
+
+This repo runs agent hooks from `.claude/` (**gitignored** — they hold machine-specific absolute paths like `C:/Python313/...`, so they do not travel with a clone and must be re-created per machine):
+
+- **`PreToolUse` on `Bash|Grep` and `Read|Glob` → `graphify hook-guard`.** Fires a reminder to orient with `graphify query "<question>"` before grepping or reading source. Treat it as the intended default: query the graph first, then read specific files to edit or debug them.
+- **`PostToolUse` on `Edit|Write|MultiEdit` → Impeccable** (`~/.claude/skills/impeccable/scripts/hook.mjs`), immediate-tier design checks on UI files. It **self-suppresses after ~6 edits to the same file** in a session and says so — that is throttling, not a clean bill of health; `/impeccable audit` re-runs the full pass.
+- **`Stop` → Impeccable deep pass**, the full rule set at end of turn.
+- **`SessionStart` → ponytail**, which in this setup resolves to **`ponytail:ponytail` at level `full`**: prefer reuse over new code, stdlib/native over dependencies, shortest working diff — but never at the cost of understanding the problem or of validation, error handling, security, or accessibility. Deliberate shortcuts get a `ponytail:` comment naming the ceiling and the upgrade path; non-trivial logic leaves one runnable check behind (which is why `parsers.test.ts` / `classify.test.ts` / `useInventoryAnalytics.test.ts` exist as plain `assert` scripts rather than a test framework).
+
+`npx tsc --noEmit` remains the only CI-style gate; there is no lint and no test runner. The `*.test.ts` files are run manually with `npx tsx <file>`.
 
 ## graphify
 
-This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships. **`graphify-out/` is gitignored** — regenerate locally with `graphify update .`.
 
 Rules:
 - For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
