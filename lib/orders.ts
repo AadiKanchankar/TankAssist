@@ -40,7 +40,7 @@ export interface OrderItemQty {
   price_per_bottle: number | null;
 }
 
-/** Priced value of an order (freebies are never valued). 0 if nothing priced. */
+/** Priced value of an order (scheme qty is never valued). 0 if nothing priced. */
 export function orderValue(items: OrderItemQty[]): number {
   let total = 0;
   for (const it of items) {

@@ -2,10 +2,11 @@
 
 Session-state snapshot for the next Claude Code session. **Temporal** — records what is live, pending, and out of scope as of the date below. Durable architecture facts live in `CLAUDE.md`; plain-language status for the user is `PROJECT_STATUS.md`.
 
-- **Snapshot date:** 2026-07-29 (reconciled against the live DB via MCP, EAS, and git — not against the previous copy of this file)
+- **Snapshot date:** 2026-08-04 (reconciled against the live DB via MCP, EAS, and git — not against the previous copy of this file)
 - **Supabase project:** `ldgunrxceogfrohjrlxz` (live MCP access; verify before assuming)
-- **Repo:** `master`, pushed to `github.com/AadiKanchankar/TankAssist`. HEAD = **`e8264e6`** "Excise fix batch". Working tree clean.
-- **Type state:** `npx tsc --noEmit` clean.
+- **Repo:** `master`, pushed to `github.com/AadiKanchankar/TankAssist`. HEAD = the PJP + stock-category batch below.
+- **Type state:** `npx tsc --noEmit` clean. All 5 `*.test.ts` files pass (`npx tsx <file>`).
+- **`supabase-schema.sql` is CURRENT** — regenerated from live 2026-08-04 after this batch, and `graphify update .` re-run, so the graph resolves `public.journey_plans`, `public.journey_plan_stores` and `public.manages_rep()`. Verified against live: 4/4 + 3/3 policies, 6/6 bucket columns, 2/2 realtime tables.
 
 ---
 
@@ -27,9 +28,15 @@ Newest first — all JS-only:
 `parse-excise-permit` is deployed at **version 4**, `verify_jwt: true`, files `index.ts` + `parsers.ts` + `classify.ts`. It runs on the caller's JWT — **no service-role key exists anywhere in this project.**
 
 ### Migrations applied (live, in order)
-`…phase1_roles_softban_lockdown` · `phase3_products` · `phase4_orders_stock` · **`add_users_is_tester`** · **`create_switch_tester_role`** · **`products_ops_columns_and_oos`** · **`create_location_requests`** · **`excise_company_facilities`** · **`excise_permits_table`** · **`excise_allocations_and_ledger`** · **`excise_approve_reject_rpcs`** · **`excise_permits_storage_bucket`** · **`guard_facility_license_change`** · **`excise_dup_guard_validity_multiline`** · **`approve_excise_permit_multiline_guards`**.
+`…phase1_roles_softban_lockdown` · `phase3_products` · `phase4_orders_stock` · `add_users_is_tester` · `create_switch_tester_role` · `products_ops_columns_and_oos` · `create_location_requests` · `excise_company_facilities` · `excise_permits_table` · `excise_allocations_and_ledger` · `excise_approve_reject_rpcs` · `excise_permits_storage_bucket` · `guard_facility_license_change` · `excise_dup_guard_validity_multiline` · `approve_excise_permit_multiline_guards` · **`stock_snapshot_categories`** · **`journey_plans_and_mock_location_flag`** · **`journey_plans_realtime`**.
 
-⚠️ **`supabase-schema.sql` is now stale** — it was regenerated at Phase 11 and predates every migration from `add_users_is_tester` onward. Regenerate it from live via MCP before trusting it, or read the live DB directly.
+### 2026-08-04 batch — PJP, stock categories, terminology, warehouse balance
+1. **Warehouse balance read 0 with 50 cases in — fixed.** Confirmed live: the single ledger row has **both facility ids null** (approved before `company_facilities` had rows) and the facility registry is still empty, so the old balance test scored it zero twice over. `computeAnalytics` now treats **direction as the source of truth**; unattributed rows bucket under `UNATTRIBUTED_FACILITY`. No UI change needed — the dashboard already renders `facilityName`.
+2. **Stock categories** — `store_stock_snapshots` gained `floor_*`/`display_*`/`godown_*`. `cases`/`bottles` stay the authoritative TOTAL, so every existing reader was untouched. Legacy rows keep a total with null buckets and render "Breakdown not recorded" — **the old value was NOT mapped to `display`**, because we don't know the split and guessing into an append-only table is worse than admitting ignorance.
+3. **"Free" → "scheme"** — UI-only, 3 strings. Columns deliberately unrenamed (see CLAUDE.md).
+4. **PJP + anti-cheat** — `journey_plans`, `journey_plan_stores`, `manages_rep()`, `store_visits.is_mock_location`, `app/(rep)/journey-plan.tsx`, `app/(admin)/exceptions.tsx`, `hooks/useJourneyPlans.ts`, `lib/journeyPlan.ts`.
+
+**Impersonation matrix run 2026-08-04, 17/17 as expected.** The two that matter: a rep updating their own plan to `status='approved'` → **DENIED 42501**, and a rep writing the manager-review fields → **DENIED 42501**. Both are hard `WITH CHECK` raises, not silent no-ops. Approved plans are frozen (0 rows) for reps *and* managers; `delete` on `journey_plans` fails at the grant layer. Test data cleaned up and the temporarily-elevated tester role restored to `rep` — verified.
 
 ---
 
@@ -96,6 +103,14 @@ Consequence: an allocation against **Tank 90 z** comes back with `computed_* = n
 - **Multi-row permits are unverified against a real document.** The parser emits N lines and the approve RPC + UI balance each line, but the only real sample (`PN263160173328`) is single-row; multi-row is covered by a synthetic fixture only. Check the first real multi-row permit carefully.
 - **Item 6 (OCR) was explicitly not built.** Image/scanned permits land as `permit_number='UNREAD'` for manual entry. Edge runtime can't host OCR; any future attempt means an external service = **new-secret STOP POINT**.
 - **`ORDERS_CUTOVER_DATE`** (`lib/reportSemantics.ts`) — still the open go-live decision below.
+- **Mock-location flag is ANDROID ONLY.** `expo-location` fills `mocked` from `Location.isFromMockProvider()` in its native Android module; iOS has no equivalent, so every iOS visit records `is_mock_location = false` and a spoofed iOS device would not be flagged. Fine today (the fleet is Android APKs), but if iOS ever ships, the exception queue silently under-reports. Verified OTA-safe for the current fleet: `expo-location` is `~56.0.22` in **both** the installed `ef195f8` build and the working tree, and that version's native code populates the field — the flag genuinely fires without a rebuild.
+- **Unattributed ledger row needs a backfill once facilities exist.** The balance now reads a correct 50 cases labelled "Unattributed (no facility on permit)". After the real warehouse row is added to `company_facilities`, attribute it — **not run, deliberate**:
+  ```sql
+  update public.inventory_movements
+     set facility_to_id = '<warehouse-uuid>'
+   where direction = 'factory_to_warehouse' and facility_to_id is null;
+  ```
+- **PJP plan-date resolution is local-date, not a shift window.** A visit logged after local midnight resolves to the neighbouring day's plan and can read as off-plan. Handled by wording (the flag is `soft` and says "may belong to the neighbouring day's plan… Worth confirming") rather than silently mis-accusing an honest rep. Upgrade path if reps genuinely work past midnight: explicit `shift_start`/`shift_end` on `journey_plans`.
 
 ---
 
@@ -112,6 +127,10 @@ Everything below is installed and OTA-current on the `ef195f8` build; none of it
 8. **Live location** — manager asks → checked-in rep answers; 18 s timeout falls back to last known; a checked-out rep never responds; a sales_manager cannot request a rep who isn't theirs.
 9. **Excise** — upload PDF → parse → review → allocate → approve → ledger row; duplicate upload routes to the existing permit; "View original document" opens (this was the `lib/storage.ts` bucket bug).
 10. **Tester switch** — flip rep/sales_manager/management, land on the right dashboard, badge persists, full write rights in each role.
+11. **Stock buckets** — floor/display/godown captured; a blank godown stays blank on the next visit's prefill (must NOT come back as 0); total rolls loose bottles into cases; StoreDetail shows chips, and the 6 legacy rows show "Breakdown not recorded".
+12. **PJP** — rep submits a plan → manager sees it live (Realtime, no pull) → approve / send-back-with-reason → rep edits and resubmits; an approved plan is locked in the rep UI.
+13. **Anti-cheat queue** — check in >300 m from a store, then off-plan, and confirm both appear in Team → Review queue with readable reasons. **Mock location needs a real mock-location app on an Android device to exercise** — it is the one flag that cannot be verified from the simulator or by inspection.
+14. **Store de-dup** — try to add a store ~30 m from an existing one, and separately with a transposed name ("Sruaj" vs "Suraj"); confirm both offer the existing store and that "No — this is a new store" still creates one.
 
 ---
 
@@ -140,4 +159,6 @@ Everything below is installed and OTA-current on the `ef195f8` build; none of it
 5. STOP and report after each numbered phase; do not self-continue.
 
 ## Next actionable step
-Fill the two data blockers (facility rows; `unit_of_measure` on *Tank 90 z*), then walk the excise happy path on device — that is the only part of the pipeline never exercised end-to-end with real data.
+Fill the two data blockers (facility rows; `unit_of_measure` on *Tank 90 z*), then walk the excise happy path on device — that is the only part of the pipeline never exercised end-to-end with real data. Adding the facility rows also unblocks the inventory-movement backfill noted above.
+
+Then walk PJP end-to-end on hardware (items 11–14). Only the mock-location flag strictly needs a second device with a mock-location app; everything else is exercisable on one phone plus a manager login.

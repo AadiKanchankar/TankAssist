@@ -41,6 +41,8 @@ import StoreDetailScreen from './app/(shared)/store-detail';
 import OrderDetailScreen from './app/(shared)/order-detail';
 import TesterBadge from './components/TesterBadge';
 import LocationResponder from './components/LocationResponder';
+import JourneyPlanScreen from './app/(rep)/journey-plan';
+import ExceptionsScreen from './app/(admin)/exceptions';
 
 const Stack = createNativeStackNavigator();
 const RepTab = createBottomTabNavigator();
@@ -54,6 +56,7 @@ function RepDashboardStack() {
       <RepDashStack.Screen name="DashboardHome" component={RepDashboard} />
       <RepDashStack.Screen name="Attendance" component={AttendanceScreen} />
       <RepDashStack.Screen name="StoreVisit" component={StoreVisitScreen} />
+      <RepDashStack.Screen name="JourneyPlan" component={JourneyPlanScreen} />
     </RepDashStack.Navigator>
   );
 }
@@ -99,6 +102,8 @@ function AdminRepsStack() {
     <RepsStack.Navigator screenOptions={{ headerShown: false }}>
       <RepsStack.Screen name="RepsList" component={AdminRepsScreen} />
       <RepsStack.Screen name="RepDetail" component={RepDetailScreen} />
+      {/* Reached from Team, not its own tab — same posture as the excise screens. */}
+      <RepsStack.Screen name="Exceptions" component={ExceptionsScreen} />
     </RepsStack.Navigator>
   );
 }

@@ -41,7 +41,7 @@ Root calls `useAuthStore().initialize()` and renders one of three trees reactive
   - **Management:** Dashboard · **Team** · Stores · **Products** · **Orders** · Profile.
   - `Products` is management-only; `Orders` shows for both; the **Dashboard** tab renders `DashboardRouter` → the **management KPI dashboard** for management, the legacy attendance/coverage dashboard for sales managers.
 
-Stacks: **Team** (`RepsList` → `RepDetail`, member detail hosts Assign-Stores/Report for reps + management-only Deactivate/Reactivate). **Stores** (`StoresList` → `StoreDetail` → `StoreForm`, plus `OrderDetail` so the recent-orders list links in). **Orders** (`OrdersList` → `OrderDetail`). `StoreVisit` is pushed from the rep Dashboard and Stores stacks. `OrderDetail` and `StoreDetail` live in `app/(shared)/` and derive actions from role.
+Stacks: **Team** (`RepsList` → `RepDetail`, member detail hosts Assign-Stores/Report for reps + management-only Deactivate/Reactivate; also hosts **`Exceptions`**, the review queue). **Stores** (`StoresList` → `StoreDetail` → `StoreForm`, plus `OrderDetail` so the recent-orders list links in). **Orders** (`OrdersList` → `OrderDetail`). `StoreVisit` and **`JourneyPlan`** are pushed from the rep Dashboard stack. `OrderDetail` and `StoreDetail` live in `app/(shared)/` and derive actions from role.
 
 **Excise screens are management-only** and reached from the management surface, not their own tabs: `app/(admin)/permits.tsx` (upload + review queue) and `app/(admin)/facilities.tsx` (factory/warehouse registry).
 
@@ -51,7 +51,7 @@ App.tsx also owns: the `AppState` token-refresh pause/resume + proactive `refres
 
 Single Zustand store (`store/useAuthStore.ts`): `session`, `user`, `profile` (role is the three-role union + `is_active` + `is_tester`), `loading`, `initialized`, `kickedOut`, `deactivated`.
 
-Server state is **`@tanstack/react-query`** (`lib/queryClient.ts`), added in the UI redesign — the "no global data cache" era is over. The house pattern is `refetchOnMount: false` **+** an explicit `useFocusEffect(refetch)`, so a screen doesn't refetch on every remount but does refresh when the user actually returns to it. Per-domain hooks live in `hooks/` (`useOrders`, `useStores`, `useProducts`, `useTeam`, `usePermits`, `useFacilities`, `useCasesTrend`, `useInventoryAnalytics`, the three dashboards). Local `useState` still owns per-screen form/UI state.
+Server state is **`@tanstack/react-query`** (`lib/queryClient.ts`), added in the UI redesign — the "no global data cache" era is over. The house pattern is `refetchOnMount: false` **+** an explicit `useFocusEffect(refetch)`, so a screen doesn't refetch on every remount but does refresh when the user actually returns to it. Per-domain hooks live in `hooks/` (`useOrders`, `useStores`, `useProducts`, `useTeam`, `usePermits`, `useFacilities`, `useCasesTrend`, `useInventoryAnalytics`, **`useJourneyPlans`**, the three dashboards). Local `useState` still owns per-screen form/UI state.
 
 ## Supabase Usage
 
@@ -63,9 +63,11 @@ Client initialized once in `lib/supabase.ts` (hardcoded URL + anon key). Session
 
 `supabase-schema.sql` is **regenerated from the live DB via MCP** (Phase 11) and is a trustworthy reference — **do not hand-edit**; make changes as migrations then regenerate.
 
-Tables: `users` (+`assigned_manager_id`, `is_active`, `is_tester`), `stores` (+`license_number`, `created_by_user_id`, `state`, `owner_name`; `contact_person` shown as "Store Manager Name"), `store_assignments`, `attendance` (+`address`), `store_visits` (+`latitude`/`longitude`/`address`/`distance_from_store_meters`; `cases_sold` is now **legacy** — see report semantics), `daily_reports`, `store_visit_photos`, **`products`**, **`orders`**, **`order_items`**, **`order_status_history`**, **`store_stock_snapshots`**, **`location_requests`**, **`company_facilities`**, **`excise_permits`**, **`permit_product_allocations`**, **`inventory_movements`**. View: `monthly_ta_summary` (`security_invoker=on`).
+Tables: `users` (+`assigned_manager_id`, `is_active`, `is_tester`), `stores` (+`license_number`, `created_by_user_id`, `state`, `owner_name`; `contact_person` shown as "Store Manager Name"), `store_assignments`, `attendance` (+`address`), `store_visits` (+`latitude`/`longitude`/`address`/`distance_from_store_meters`/**`is_mock_location`**; `cases_sold` is now **legacy** — see report semantics), `daily_reports`, `store_visit_photos`, **`products`**, **`orders`**, **`order_items`**, **`order_status_history`**, **`store_stock_snapshots`**, **`location_requests`**, **`company_facilities`**, **`excise_permits`**, **`permit_product_allocations`**, **`inventory_movements`**, **`journey_plans`**, **`journey_plan_stores`**. View: `monthly_ta_summary` (`security_invoker=on`).
 
-SECURITY DEFINER functions (all `search_path=''`): `get_my_role`, `get_sales_managers`, `phone_registered`, `update_order_status`, `switch_tester_role`, `approve_excise_permit`, `reject_excise_permit`, plus two trigger functions — `reject_out_of_stock_order_item` (BEFORE INSERT on `order_items`) and `guard_facility_license_change` (BEFORE UPDATE on `company_facilities`).
+SECURITY DEFINER functions (all `search_path=''`): `get_my_role`, `get_sales_managers`, `phone_registered`, `update_order_status`, `switch_tester_role`, `approve_excise_permit`, `reject_excise_permit`, **`manages_rep`**, plus two trigger functions — `reject_out_of_stock_order_item` (BEFORE INSERT on `order_items`) and `guard_facility_license_change` (BEFORE UPDATE on `company_facilities`).
+
+**`manages_rep(p_rep uuid)`** is the manager→rep ownership test — the same relationship `location_requests` enforces inline — factored out so the six PJP policies don't paste it. EXECUTE is granted to **`authenticated` only**: there is no service-role key in this project, so granting one would contradict the anon-key-only invariant. Prefer it over re-writing the `EXISTS (… assigned_manager_id …)` sub-select in any new policy.
 
 ### Orders & the status machine
 5 stages + cancelled: `placed → in_process → dispatched → in_transit → delivered`, plus `cancelled` (terminal, from any non-terminal state). **Strictly sequential; no skipping, no reversing.** Ownership: rep sets `placed` (at order creation) and `delivered` (verified at store); sales_manager & management set `in_process`/`dispatched`/`in_transit`. Cancel: rep (own orders only) + SM/management, reason mandatory.
@@ -81,8 +83,14 @@ SECURITY DEFINER functions (all `search_path=''`): `get_my_role`, `get_sales_man
 
 **Out-of-stock is enforced in the database, not just the UI.** The `trg_reject_oos_order_item` BEFORE INSERT trigger on `order_items` raises `'Product is out of stock'` if the referenced product has `is_out_of_stock = true`. The rep order picker also hides/blocks OOS products, but the trigger is the actual guarantee — a stale client cannot place an OOS line.
 
-### Stock snapshots
-`store_stock_snapshots` — append-only (no update/delete). **Current stock = latest snapshot per (store, product).** Written during the check-in stepper for the products the rep actually touched. `>= 0` checks on cases/bottles. All authenticated read; insert with `recorded_by = auth.uid()`.
+### Stock snapshots — three buckets
+`store_stock_snapshots` — append-only (no update/delete). **Current stock = latest snapshot per (store, product).** Written during the check-in stepper for the products the rep actually touched. All authenticated read; insert with `recorded_by = auth.uid()`.
+
+Stock is split into **three buckets per product**: `floor_*` (in the store, off the shelves), `display_*` (on the shelves), `godown_*` (the store's own godown), each as a `_cases`/`_bottles` pair. **`cases`/`bottles` remain the authoritative TOTAL** and are what every pre-existing reader uses (`useStores`, `useManagementDashboard`) — the buckets are the breakdown, so nothing downstream had to change.
+
+**ABSENT IS NOT ZERO.** A bucket left blank is `null` ("no godown / not counted"); an explicit `0` means "counted and empty". Many stores have no godown, and a forced 0 would later read as real data. A bare `check (col >= 0)` admits NULL, which is how the `>= 0` discipline coexists with this. Prefill deliberately leaves never-recorded buckets blank so "no godown" doesn't drift into "godown is empty". The 6 pre-split rows carry a total with all buckets null and render **"Breakdown not recorded"** — never a guessed split.
+
+Math lives in **`lib/stockBuckets.ts`** (pure, `lib/stockBuckets.test.ts`): totals are computed **in whole bottles then converted**, same discipline as `inventoryMath`, so floor 2cs+20btl + display 1cs+10btl is 4cs+6btl, not a drifted 3cs+30btl.
 
 ### Live location (on-demand, request/response over Realtime)
 `location_requests` — `rep_id`, `requested_by`, `requested_at`, `lat`/`lng`, `responded_at`, `status ('pending'|'completed'|'expired')`. **This is the only table in the `supabase_realtime` publication.** There is no background/continuous tracking: a manager asks, and a **checked-in** rep's app answers once.
@@ -113,8 +121,27 @@ Runs **entirely on the caller's JWT — no service-role key anywhere**, so RLS s
 
 Node-runnable tests sit beside the sources (`parsers.test.ts`, `classify.test.ts`, `npx tsx …`). **`supabase/functions` and `**/*.test.ts` are excluded in `tsconfig.json`** — they are Deno/Node code and would otherwise break the `tsc` gate.
 
+### PJP (journey plans) + anti-cheat
+A rep submits a planned route; their sales manager approves or sends it back. `journey_plans` (`rep_id`, `plan_date`, `status ('submitted'|'approved'|'rejected')`, `submitted_at`, `reviewed_by`, `reviewed_at`, `reject_reason`, **`unique (rep_id, plan_date)`**) + `journey_plan_stores` (`plan_id`, `store_id`, `position`).
+
+**Approval is optimistic-with-flagging, NOT blocking** (owner decision). A rep may work against a still-`submitted` plan — the app never freezes them waiting on a manager who may be asleep at 8am. Such visits are **flagged for review**; an `approved` plan clears the flag.
+
+**No RPC — RLS enforces the whole state machine.** Unlike `update_order_status` (5 sequential stages × role matrix), this is one transition, so policies cover it: a rep can only ever land the row back in `submitted` (self-approval is structurally impossible), a manager acts only on a `submitted` plan (an approved plan can't be reversed), and a rejection without a reason is refused by the DB. Verified by impersonation 2026-08-04 — rep self-approve and rep-takes-manager-path both raise **42501**. `journey_plans` has **no DELETE grant**: a submitted plan is evidence.
+
+**Flags: exactly ONE is stored, the rest are derived** (`lib/journeyPlan.ts`, `lib/journeyPlan.test.ts`):
+- **stored** — `store_visits.is_mock_location`, a device fact at capture time that can't be reconstructed later. **⚠️ Android only** (`expo-location` fills `mocked` from `Location.isFromMockProvider()`); on iOS it always records `false`, so a spoofed iOS device would not be flagged.
+- **derived** — far-from-store (reuses `distance_from_store_meters`), impossible-movement (coords+timestamps already present), off-plan, plan-not-approved, and duplicate-store. Deriving is deliberate: an approved plan retroactively clears its visits, and **a client that skips a check is still caught** because the signal comes from the data, not from whether a dialog was shown.
+
+**`planDateFor()`** resolves a visit to its plan by (rep, **local** calendar date) — the unique constraint makes that a natural key, so `store_visits` needs no FK. *Known ceiling:* a post-midnight visit resolves to the neighbouring day's plan. That honest-rep false positive is why the off-plan reason near midnight is worded as a question ("…may belong to the neighbouring day's plan. Worth confirming…") and marked `soft`, sorting below real flags. Upgrade path: explicit `shift_start`/`shift_end` on the plan.
+
+**Store de-duplication** (`findDuplicateCandidates`) runs **client-side** — `pg_trgm` is not installed, and the rep's store list is already loaded. Name matching uses **Damerau/OSA `editDistance`, not plain Levenshtein**: an adjacent transposition ("Sruaj" for "Suraj") is one typo, and plain Levenshtein scores it 2, letting the duplicate through. Reuses `lib/haversine.ts` for proximity.
+
+**Manager exception queue** — `app/(admin)/exceptions.tsx`, reached from **Team**, not its own tab (same posture as the excise screens). Floats flagged visits + plans awaiting approval: "review these 3", never "audit all 300". Manager notification reuses the **live-location Realtime pattern** (`journey_plans` is the second table in `supabase_realtime`) rather than push notifications — no new native module, so PJP stays OTA-shippable.
+
 ### Inventory analytics
 `lib/financialYear.ts` holds `FINANCIAL_YEAR_START_MONTH = 4` (Indian FY, 1 Apr – 31 Mar) as the single source of truth — same discipline as `ORDERS_CUTOVER_DATE`, never hardcoded into a query. `lib/inventoryMath.ts` is pure (`computeAnalytics`, `fmtQty`) and does its arithmetic **in whole bottles** before converting back to cases + remainder, so cases never drift; balance = sum over the whole `inventory_movements` history. `hooks/useInventoryAnalytics.ts` wraps it; unit-tested in `useInventoryAnalytics.test.ts`.
+
+**Direction is the source of truth for balance.** `factory_to_warehouse` credits and `warehouse_to_l1` debits **regardless of facility attribution**; rows with a null facility land in an `UNATTRIBUTED_FACILITY` bucket labelled "Unattributed (no facility on permit)". This fixed a live bug where the dashboard read *Factory → warehouse 50 cases in* but *Warehouse balance 0*: the one approved permit was approved before `company_facilities` had any rows, so its ledger row carries null facility ids and the old `facility_to_id && isWarehouse.has(...)` test scored it zero. Unattributed **outbound** counts too — ignoring it would overstate stock on hand, the more dangerous error. `internal_transfer` is the exception and still requires a known warehouse, because its direction says nothing about which end is one. A backfill to attribute that row is **pending real facility rows** — see HANDOFF.
 
 ### RLS Policies
 Keyed off `public.get_my_role()` (STABLE SECURITY DEFINER, `search_path=''`, EXECUTE granted to `authenticated`/`service_role`, revoked from anon/public). Manager reads use `get_my_role() = ANY (ARRAY['sales_manager','management'])`. `users` INSERT/UPDATE are management-only (plus `Users: self update (role locked)` pinning `role = get_my_role()`). Orders/history: all-authenticated read, orders insert-own, **no direct order mutation**; order_items insert only into your own order; snapshots insert-own; products management-write. **⚠️ Grants gotcha:** MCP-created tables/views get **zero** API-role grants — after any `CREATE TABLE/VIEW`, explicitly `GRANT` to `authenticated` and verify by role impersonation (`set_config('request.jwt.claims', …)`), expecting rows or a clean RLS denial (42501), never a bare permission error.
@@ -123,7 +150,7 @@ Keyed off `public.get_my_role()` (STABLE SECURITY DEFINER, `search_path=''`, EXE
 
 Rebuilt as a **sequential stepper** (the mount-time `store_visits` insert / check-in lock is unchanged). Steps, with the ones that auto-skip noted:
 1. **Previous order** — most recent non-terminal order at the store (skipped silently if none). **Mark Delivered** (optional delivered photos → RPC), **Cancel** (structured reason picklist + free text → RPC; button shown **only to the order's placer** — others see "Store wants to cancel? Contact your manager."), or **Skip**.
-2. **Update stock** — per active product, cases + bottles, prefilled from the latest snapshot; **only products the rep edits ("touched") are recorded** at checkout, so the step is fully skippable.
+2. **Update stock** — per active product, **three labelled buckets** (floor / display / godown), each cases + bottles, prefilled from the latest snapshot; **only products the rep edits ("touched") are recorded** at checkout, so the step is fully skippable. Godown's hint reads "Leave blank if this store has no godown" — blank stays `null`, so absent never becomes a fake 0, and no per-product toggle is needed for what is really a store-level fact. A touched product left entirely blank writes nothing.
 3. **Shop photos** — multi-photo (back camera).
 4. **Stock photo** — shown/required only when an entered stock reading is > 0 (path `stock-photos/…`).
 5. **Place order** (optional) — active-product picker with cases/bottles/free-cases/free-bottles + notes + value; confirm → **immediate** INSERT `status='placed'` + items (price snapshots), linked to `visit_id`.
@@ -158,6 +185,8 @@ Charting: `react-native-svg` + `react-native-gifted-charts` are now installed (t
 Both store lists are state-grouped `SectionList`s with search + a collapsible accordion (`Typography.accordionHeader`; the rep list keeps its Assigned/All toggle + status dots). **`StoreDetail`** (shared) shows **Current Stock** (latest snapshot per product; "never recorded" when none — read-only for both roles), a secondary **Total Cases Ordered** stat, the non-null info block, managers-only **Recent Orders** (→ OrderDetail), embedded **Visits & Notes** (per-visit cases shown only when > 0, labelled legacy), and role actions (manager Edit/Delete; rep Check-In/Navigate). **`StoreForm`** (management) uses the `StoreLocationPicker`; `state` auto-derived.
 
 ## Orders tab (app/(admin)/orders.tsx · app/(shared)/order-detail.tsx)
+
+**Terminology: the UI says "scheme", the columns stay `free_*`.** Trade usage is "Buy 20 Get 1 Free" = a scheme, so every user-visible string reads *Scheme cases* / *Scheme btl* / *"+N cs / N btl scheme"*. The columns `order_items.free_cases`/`free_bottles` were **deliberately not renamed** — they are never user-visible, and renaming would touch 5 files, a live migration, and the PostgREST `select()` strings for zero user gain. ⚠️ Never grep-replace `free` here: `cancelFreeText` (the cancel-reason free-text field) matches and is unrelated.
 
 Tappable summary segments (To Process / Dispatched / In Transit / Delivered / Cancelled-secondary) filter the list. Order detail shows items+freebies+value, store, placed-by (call icon), the status-history timeline, and delivered photos (signed URLs); manager actions run through `update_order_status` (forward step with confirm; cancel + delivered-override via a reason modal). Shared status metadata + value in `lib/orders.ts`.
 

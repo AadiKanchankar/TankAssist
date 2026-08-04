@@ -44,6 +44,14 @@ import type { StoreLocationValue } from '../../components/StoreLocationPicker';
 import * as Location from 'expo-location';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
 import { useRepDashboard } from '../../hooks/useRepDashboard';
+import { useMyPlan } from '../../hooks/useJourneyPlans';
+import {
+  planDateFor,
+  PLAN_STATUS_LABEL,
+  findDuplicateCandidates,
+  DuplicateMatch,
+} from '../../lib/journeyPlan';
+import { haversineKm as distanceKm } from '../../lib/haversine';
 
 interface StoreSearchResult {
   id: string;
@@ -60,6 +68,9 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
   const insets = useSafeAreaInsets();
   const { profile } = useAuthStore();
   const { data, refetch, isPending, isError } = useRepDashboard(profile?.id);
+  const { data: plan, refetch: refetchPlan } = useMyPlan(profile?.id, planDateFor());
+  // Duplicate candidates surfaced when the rep tries to add a store.
+  const [dupes, setDupes] = useState<DuplicateMatch[]>([]);
   const attendance = data?.attendance ?? null;
   const assignments = data?.assignments ?? [];
   const visits = data?.visits ?? [];
@@ -97,10 +108,15 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
   useFocusEffect(
     useCallback(() => {
       refetch();
-    }, [refetch])
+      refetchPlan();
+    }, [refetch, refetchPlan])
   );
 
-  const { refreshing, onRefresh } = usePullToRefresh(refetch);
+  const { refreshing, onRefresh } = usePullToRefresh(
+    useCallback(async () => {
+      await Promise.all([refetch(), refetchPlan()]);
+    }, [refetch, refetchPlan])
+  );
 
   const isCheckedIn = !!attendance?.check_in_time;
   const isPunchedOut = !!attendance?.check_out_time;
@@ -238,10 +254,41 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
     setShowStoreModal(true);
   };
 
-  const handleCreateStore = async () => {
+  /**
+   * Steer the rep to an existing store before creating a near-duplicate.
+   * Kills both the many-stores-in-one-spot spam and the typo duplicate
+   * ("Sruaj" for "Suraj") in one move.
+   *
+   * This does NOT block creation — a genuinely new store stays possible, it
+   * just becomes the deliberate choice rather than the silent default. A
+   * client that skips this check is still caught by the manager-visible flag,
+   * which is derived from the store coordinates rather than from whether this
+   * dialog was shown.
+   */
+  const checkForDuplicates = async (): Promise<DuplicateMatch[]> => {
+    const { data: existing } = await supabase
+      .from('stores')
+      .select('id, name, latitude, longitude');
+    return findDuplicateCandidates(
+      newStoreName.trim(),
+      storeLocation.latitude,
+      storeLocation.longitude,
+      (existing as any[]) ?? [],
+      distanceKm,
+    );
+  };
+
+  const handleCreateStore = async (skipDuplicateCheck = false) => {
     if (!newStoreName.trim()) {
       Alert.alert('Name required', 'Enter a store name to continue.');
       return;
+    }
+    if (!skipDuplicateCheck) {
+      const matches = await checkForDuplicates();
+      if (matches.length) {
+        setDupes(matches);
+        return;
+      }
     }
     setCreatingStore(true);
     try {
@@ -262,6 +309,7 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
       if (error) throw error;
 
       setShowStoreModal(false);
+      setDupes([]);
       resetStoreModal();
       navigation.navigate('StoreVisit', {
         store: {
@@ -456,6 +504,108 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
           </MotiView>
         )}
 
+        {/* Today's plan — leads the day. Approval is optimistic: the rep is
+            never frozen waiting on a manager, but pre-approval visits are
+            flagged for review. */}
+        <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
+          <View style={styles.sectionHeader}>
+            <Text style={[Type.section, { color: Colors.text }]}>Today’s plan</Text>
+            <Pressable
+              onPress={() => navigation.navigate('JourneyPlan')}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel={plan ? 'Open your journey plan' : 'Plan your day'}
+              style={styles.seeAll}
+            >
+              <Text style={[Type.label, { color: Colors.accent }]}>{plan ? 'View' : 'Plan my day'}</Text>
+              <Ionicons name="chevron-forward" size={14} color={Colors.accent} />
+            </Pressable>
+          </View>
+
+          {!plan ? (
+            <BentoTile>
+              <EmptyState
+                icon="map-outline"
+                title="No plan sent yet"
+                message="Pick the stores you’ll visit today and send it to your manager."
+              />
+              <Button
+                title="Plan my day"
+                onPress={() => navigation.navigate('JourneyPlan')}
+                style={{ marginTop: Space.sm }}
+              />
+            </BentoTile>
+          ) : (
+            <BentoTile
+              style={[
+                plan.status === 'approved' && styles.planOk,
+                plan.status === 'rejected' && styles.planBad,
+              ]}
+            >
+              <View style={styles.planHead}>
+                <Ionicons
+                  name={
+                    plan.status === 'approved'
+                      ? 'checkmark-circle'
+                      : plan.status === 'rejected'
+                      ? 'alert-circle'
+                      : 'time-outline'
+                  }
+                  size={18}
+                  color={
+                    plan.status === 'approved'
+                      ? Colors.success
+                      : plan.status === 'rejected'
+                      ? Colors.alert
+                      : Colors.textMuted
+                  }
+                />
+                <Text style={[Type.bodyMed, { color: Colors.text, flex: 1 }]}>
+                  {PLAN_STATUS_LABEL[plan.status]}
+                </Text>
+                <Text style={[Type.caption, { color: Colors.textMuted }]}>
+                  {plan.store_ids.length} store{plan.store_ids.length === 1 ? '' : 's'}
+                </Text>
+              </View>
+
+              {plan.status === 'submitted' ? (
+                <Text style={styles.planHint}>
+                  Start visiting now — you don’t have to wait. Your manager will see these visits
+                  marked for review until the plan is approved.
+                </Text>
+              ) : null}
+              {plan.status === 'rejected' ? (
+                <Text style={styles.planHint}>
+                  {plan.reject_reason
+                    ? `Your manager wrote: “${plan.reject_reason}”`
+                    : 'Your manager asked for changes.'}{' '}
+                  Tap View to edit and resend.
+                </Text>
+              ) : null}
+
+              {plan.store_ids.slice(0, 4).map((id, i) => {
+                const a = assignments.find((x: any) => x.store_id === id) as any;
+                const name = a?.stores?.name ?? storeResults.find((s) => s.id === id)?.name ?? 'Store';
+                const status = getStoreStatus(id);
+                return (
+                  <View key={id} style={[styles.storeRow, i > 0 && styles.storeRowDivider]}>
+                    <Text style={styles.planSeq}>{i + 1}</Text>
+                    <Text style={[Type.bodyMed, { color: Colors.text, flex: 1 }]} numberOfLines={1}>
+                      {name}
+                    </Text>
+                    <Text style={[Type.caption, { color: Colors.textMuted }]}>
+                      {status === 'visited' ? 'Visited' : status === 'in-progress' ? 'In progress' : 'Pending'}
+                    </Text>
+                  </View>
+                );
+              })}
+              {plan.store_ids.length > 4 ? (
+                <Text style={styles.planHint}>+{plan.store_ids.length - 4} more</Text>
+              ) : null}
+            </BentoTile>
+          )}
+        </MotiView>
+
         {/* Your stores preview */}
         <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
           <View style={styles.sectionHeader}>
@@ -578,12 +728,71 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
 
             <Button
               title="Add & check in"
-              onPress={handleCreateStore}
+              onPress={() => handleCreateStore()}
               loading={creatingStore}
               disabled={!newStoreName.trim()}
               style={{ marginTop: Space.xl, marginBottom: 48 }}
             />
           </ScrollView>
+        </View>
+      </Modal>
+
+      {/* "Did you mean this nearby store?" — steer, don't block. */}
+      <Modal visible={dupes.length > 0} transparent animationType="fade" onRequestClose={() => setDupes([])}>
+        <View style={styles.dupWrap}>
+          <View style={styles.dupCard}>
+            <Text style={[Type.bodyMed, { color: Colors.text }]}>Is it one of these?</Text>
+            <Text style={styles.dupHint}>
+              These stores are already on the system nearby or under a similar name. Picking the
+              existing one keeps its history and stock together.
+            </Text>
+            <ScrollView style={{ maxHeight: 260 }}>
+              {dupes.map((d) => (
+                <Pressable
+                  key={d.store.id}
+                  style={styles.dupRow}
+                  onPress={() => {
+                    setDupes([]);
+                    setShowStoreModal(false);
+                    resetStoreModal();
+                    navigation.navigate('StoreVisit', {
+                      store: {
+                        id: d.store.id,
+                        name: d.store.name,
+                        address: null,
+                        latitude: d.store.latitude,
+                        longitude: d.store.longitude,
+                      },
+                    });
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Use existing store ${d.store.name}`}
+                >
+                  <Ionicons name="storefront-outline" size={18} color={Colors.accent} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={[Type.bodyMed, { color: Colors.text }]} numberOfLines={1}>
+                      {d.store.name}
+                    </Text>
+                    <Text style={[Type.caption, { color: Colors.textMuted }]}>
+                      {d.meters !== null ? `${Math.round(d.meters)} m away` : 'Similar name'}
+                      {d.why === 'both' ? ' · similar name' : ''}
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
+                </Pressable>
+              ))}
+            </ScrollView>
+            <Button
+              title="No — this is a new store"
+              variant="secondary"
+              onPress={() => {
+                setDupes([]);
+                handleCreateStore(true);
+              }}
+              style={{ marginTop: Space.md }}
+            />
+            <Button title="Go back and edit" variant="secondary" onPress={() => setDupes([])} style={{ marginTop: Space.sm }} />
+          </View>
         </View>
       </Modal>
     </View>
@@ -593,6 +802,22 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: Colors.background },
   content: { padding: Layout.screenPad },
+  planOk: { borderColor: Colors.success },
+  planBad: { borderColor: Colors.alert },
+  planHead: { flexDirection: 'row', alignItems: 'center', gap: Space.sm },
+  planHint: { ...Type.caption, color: Colors.textMuted, marginTop: Space.xs, lineHeight: 18 },
+  planSeq: { ...Type.caption, color: Colors.accent, minWidth: 16, textAlign: 'center' },
+  dupWrap: { flex: 1, backgroundColor: '#0006', justifyContent: 'center', padding: Space.lg },
+  dupCard: { backgroundColor: Colors.surface, borderRadius: Radius.card, padding: Space.lg },
+  dupHint: { ...Type.caption, color: Colors.textMuted, marginTop: Space.xs, lineHeight: 18 },
+  dupRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Space.md,
+    paddingVertical: Space.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: Colors.border,
+  },
   greetRow: { flexDirection: 'row', alignItems: 'flex-start' },
   brandMark: { ...Type.label, color: Colors.accent },
   // Hero (dark surface)

@@ -101,16 +101,58 @@ assert.equal(financialYearLabel(new Date(2026, 5, 1)), 'FY 2026–27');
   assert.equal(a.totalBalance.cases, 15, 'balance carries stock forward across FYs');
 }
 
-// ── movements to/from a non-warehouse are ignored for balance ──────────────
+// ── an internal transfer touching a non-warehouse does not move balance ────
+// direction says nothing about which end is a warehouse, so an unknown
+// facility on an internal transfer is genuinely unattributable.
 {
   const a = computeAnalytics(
-    [mv({ direction: 'warehouse_to_l1', facility_from_id: 'unknown-l1', cases: 9 })],
+    [
+      mv({ facility_to_id: 'wh1', cases: 40 }),
+      mv({ direction: 'internal_transfer', facility_from_id: 'wh1', facility_to_id: 'unknown', cases: 9 }),
+    ],
     PROD,
     FAC,
     FY,
   );
-  assert.equal(a.totalBalance.cases, 0, 'an external party holds no warehouse balance');
-  assert.equal(a.ytdWarehouseToL1.cases, 9, 'but it still counts as dispatched YTD');
+  assert.equal(a.totalBalance.cases, 31, 'debited from wh1; the unknown end credits nothing');
+}
+
+// ── null-facility ledger rows still count (the live 2026-08 bug) ───────────
+// Permits approved before company_facilities had any rows wrote movements with
+// null facility ids. Direction is the source of truth: those 50 cases entered a
+// warehouse and must appear in the balance, not vanish.
+{
+  const a = computeAnalytics([mv({ cases: 50 })], PROD, [], FY);
+  assert.equal(a.ytdFactoryToWarehouse.cases, 50, 'inbound YTD unchanged');
+  assert.equal(a.totalBalance.cases, 50, 'null-facility inbound counts toward balance');
+  const w = a.byProduct[0].byWarehouse[0];
+  assert.equal(w.facilityId, '__unattributed__');
+  assert.match(w.facilityName, /Unattributed/, 'labelled so a manager knows it needs attributing');
+}
+
+// ── an unattributed OUTBOUND is debited too (never overstate stock) ────────
+{
+  const a = computeAnalytics(
+    [mv({ cases: 50 }), mv({ direction: 'warehouse_to_l1', cases: 9 })],
+    PROD,
+    [],
+    FY,
+  );
+  assert.equal(a.totalBalance.cases, 41, 'unattributed dispatch reduces stock on hand');
+  assert.equal(a.ytdWarehouseToL1.cases, 9);
+}
+
+// ── once facilities exist, attributed rows bucket by facility as before ────
+{
+  const a = computeAnalytics(
+    [mv({ facility_to_id: 'wh1', cases: 30 }), mv({ cases: 20 })],
+    PROD,
+    FAC,
+    FY,
+  );
+  assert.equal(a.totalBalance.cases, 50, 'attributed + unattributed sum to the company total');
+  const names = a.byProduct[0].byWarehouse.map((w) => w.facilityId).sort();
+  assert.deepEqual(names, ['__unattributed__', 'wh1'], 'kept in separate buckets, not merged');
 }
 
 // ── empty ledger ──────────────────────────────────────────────────────────

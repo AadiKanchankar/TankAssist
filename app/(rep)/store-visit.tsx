@@ -40,6 +40,18 @@ import {
 } from '../../lib/storage';
 import { reverseGeocode } from '../../lib/geocoding';
 import { haversineKm } from '../../lib/haversine';
+import {
+  STOCK_BUCKETS,
+  BUCKET_LABEL,
+  BUCKET_HINT,
+  emptyBuckets,
+  bucketTotals,
+  snapshotPayload,
+  bucketBreakdown,
+  type StockBucket,
+  type BucketEntries,
+  type SnapshotRow,
+} from '../../lib/stockBuckets';
 
 interface StoreParam {
   id: string;
@@ -74,9 +86,7 @@ interface PrevOrder {
   items: PrevOrderItem[];
 }
 
-interface StockLatest {
-  cases: number;
-  bottles: number;
+interface StockLatest extends SnapshotRow {
   recorded_at: string;
   recorded_by: string;
 }
@@ -139,7 +149,7 @@ export default function StoreVisitScreen({
   const [prevOrder, setPrevOrder] = useState<PrevOrder | null>(null);
 
   // Step state
-  const [stock, setStock] = useState<Record<string, { cases: string; bottles: string }>>({});
+  const [stock, setStock] = useState<Record<string, BucketEntries>>({});
   // Products the rep actually engaged with this visit — only these get a
   // snapshot at checkout. Prefill is a convenience; leaving a product untouched
   // means "not verified", keeping the whole step skippable.
@@ -215,6 +225,18 @@ export default function StoreVisitScreen({
               latitude: lat,
               longitude: lng,
               distance_from_store_meters: distanceMeters,
+              // The only STORED anti-cheat flag: a device fact at capture time
+              // that cannot be reconstructed later. Flag-only — check-in is
+              // never blocked.
+              //
+              // ⚠️ ANDROID ONLY. expo-location fills `mocked` from
+              // Location.isFromMockProvider() in its native Android module; on
+              // iOS the key is absent, so every iOS visit records false and a
+              // spoofed iOS device would NOT be flagged. Acceptable today
+              // because the fleet is Android APKs (eas.json `preview`). If iOS
+              // ever ships, this flag needs an iOS-side equivalent or the
+              // exception queue will quietly under-report.
+              is_mock_location: loc.mocked ?? false,
             })
             .select()
             .single();
@@ -248,30 +270,32 @@ export default function StoreVisitScreen({
     // Latest stock snapshot per product for this store
     const { data: snaps } = await supabase
       .from('store_stock_snapshots')
-      .select('product_id, cases, bottles, recorded_at, recorded_by')
+      .select(
+        'product_id, cases, bottles, floor_cases, floor_bottles, display_cases, display_bottles, godown_cases, godown_bottles, recorded_at, recorded_by'
+      )
       .eq('store_id', store.id)
       .order('recorded_at', { ascending: false });
     const latest: Record<string, StockLatest> = {};
-    for (const s of snaps || []) {
-      if (!latest[s.product_id]) {
-        latest[s.product_id] = {
-          cases: s.cases,
-          bottles: s.bottles,
-          recorded_at: s.recorded_at,
-          recorded_by: s.recorded_by,
-        };
-      }
+    for (const s of (snaps as any[]) || []) {
+      if (!latest[s.product_id]) latest[s.product_id] = s as StockLatest;
     }
     setStockLatest(latest);
 
-    // Prefill stock inputs from the latest snapshot
-    const prefill: Record<string, { cases: string; bottles: string }> = {};
+    // Prefill each bucket from the latest snapshot. A bucket that was never
+    // recorded stays blank rather than prefilling 0 — otherwise "this store has
+    // no godown" would silently become "the godown is empty" on the next visit.
+    const prefill: Record<string, BucketEntries> = {};
     for (const p of (prods as ProductRow[]) || []) {
       const l = latest[p.id];
-      prefill[p.id] = {
-        cases: l ? String(l.cases) : '',
-        bottles: l ? String(l.bottles) : '',
-      };
+      const b = emptyBuckets();
+      if (l) {
+        for (const k of STOCK_BUCKETS) {
+          const c = l[`${k}_cases` as keyof SnapshotRow] as number | null;
+          const bt = l[`${k}_bottles` as keyof SnapshotRow] as number | null;
+          if (c !== null || bt !== null) b[k] = { cases: String(c ?? 0), bottles: String(bt ?? 0) };
+        }
+      }
+      prefill[p.id] = b;
     }
     setStock(prefill);
 
@@ -306,23 +330,26 @@ export default function StoreVisitScreen({
     }
   };
 
-  const setStockField = (pid: string, field: 'cases' | 'bottles', v: string) => {
+  const setStockField = (pid: string, bucket: StockBucket, field: 'cases' | 'bottles', v: string) => {
     const clean = v.replace(/[^0-9]/g, '');
-    setStock((prev) => ({
-      ...prev,
-      [pid]: { ...(prev[pid] || { cases: '', bottles: '' }), [field]: clean },
-    }));
+    setStock((prev) => {
+      const cur = prev[pid] ?? emptyBuckets();
+      return {
+        ...prev,
+        [pid]: { ...cur, [bucket]: { ...cur[bucket], [field]: clean } },
+      };
+    });
     setStockTouched((prev) => (prev.has(pid) ? prev : new Set(prev).add(pid)));
   };
 
-  // Any TOUCHED product with a positive reading — drives the stock-photo
-  // requirement and the shop→stockphoto routing.
+  // Any TOUCHED product with a positive TOTAL across its buckets — drives the
+  // stock-photo requirement and the shop→stockphoto routing.
   const stockEnteredPositive = () =>
-    products.some(
-      (p) =>
-        stockTouched.has(p.id) &&
-        (toInt(stock[p.id]?.cases) > 0 || toInt(stock[p.id]?.bottles) > 0)
-    );
+    products.some((p) => {
+      if (!stockTouched.has(p.id)) return false;
+      const t = bucketTotals(stock[p.id] ?? emptyBuckets(), p.qty_per_carton);
+      return t.cases > 0 || t.bottles > 0;
+    });
 
   const goNext = () => {
     // Leaving the prior-order step resolves it — replace the stack so Back
@@ -514,9 +541,10 @@ export default function StoreVisitScreen({
     // Only products the rep engaged with get a snapshot (0 is a valid "sold out"
     // reading; untouched products are simply not re-recorded this visit).
     const touchedProducts = products.filter((p) => stockTouched.has(p.id));
-    const anyPositive = touchedProducts.some(
-      (p) => toInt(stock[p.id]?.cases) > 0 || toInt(stock[p.id]?.bottles) > 0
-    );
+    const anyPositive = touchedProducts.some((p) => {
+      const t = bucketTotals(stock[p.id] ?? emptyBuckets(), p.qty_per_carton);
+      return t.cases > 0 || t.bottles > 0;
+    });
     if (anyPositive && !stockPhotoUri) {
       Alert.alert('Stock photo needed', 'You entered stock levels — add a stock photo before finishing.');
       setStepStack((s) => [...s, 'stockphoto']);
@@ -551,14 +579,16 @@ export default function StoreVisitScreen({
       }
 
       for (const p of touchedProducts) {
-        const e = stock[p.id] || { cases: '', bottles: '' };
+        const b = stock[p.id] ?? emptyBuckets();
+        // A product marked touched but left entirely blank across all three
+        // buckets records nothing — the rep opened it and moved on.
+        if (!bucketTotals(b, p.qty_per_carton).anyRecorded) continue;
         const { error } = await supabase.from('store_stock_snapshots').insert({
           store_id: store.id,
           product_id: p.id,
           visit_id: visitId,
-          cases: toInt(e.cases),
-          bottles: toInt(e.bottles),
           recorded_by: profile!.id,
+          ...snapshotPayload(b, p.qty_per_carton),
         });
         if (error) throw error;
       }
@@ -789,7 +819,7 @@ function PrevOrderStep({
           <Text key={i} style={[Type.body, { color: Colors.text, marginTop: 2 }]}>
             • {it.product_name}: {it.cases} cs / {it.bottles} btl
             {it.free_cases || it.free_bottles
-              ? `  (+${it.free_cases} cs / ${it.free_bottles} btl free)`
+              ? `  (+${it.free_cases} cs / ${it.free_bottles} btl scheme)`
               : ''}
           </Text>
         ))}
@@ -865,23 +895,50 @@ function StockStep({ products, stock, setField, latest, touched, selfId }: any) 
     <View style={{ gap: Space.md }}>
       {products.map((p: ProductRow) => {
         const l = latest[p.id] as StockLatest | undefined;
-        const e = stock[p.id] || { cases: '', bottles: '' };
+        const e: BucketEntries = stock[p.id] ?? emptyBuckets();
         const isTouched = touched.has(p.id);
+        const total = bucketTotals(e, p.qty_per_carton);
+        const prior = l ? bucketBreakdown(l) : [];
         return (
           <BentoTile key={p.id} style={isTouched ? styles.touchedCard : undefined}>
             <Text style={[Type.bodyMed, { color: Colors.text }]}>{p.name}</Text>
             {l ? (
               <Text style={styles.subHint}>
-                Last recorded {l.cases} cs / {l.bottles} btl · {fmtDate(l.recorded_at)}
+                Last recorded{' '}
+                {prior.length
+                  ? prior.map((b) => `${b.label.replace(' stock', '')} ${b.cases} cs`).join(' · ')
+                  : `${l.cases} cs / ${l.bottles} btl (total only)`}{' '}
+                · {fmtDate(l.recorded_at)}
                 {l.recorded_by === selfId ? ' · by you' : ''}
               </Text>
             ) : (
               <Text style={styles.subHint}>Never recorded</Text>
             )}
-            <View style={styles.qtyRow}>
-              <QtyField label="Cases" value={e.cases} onChange={(v) => setField(p.id, 'cases', v)} />
-              <QtyField label="Bottles" value={e.bottles} onChange={(v) => setField(p.id, 'bottles', v)} />
-            </View>
+
+            {STOCK_BUCKETS.map((k: StockBucket) => (
+              <View key={k} style={styles.bucketGroup}>
+                <Text style={styles.bucketLabel}>{BUCKET_LABEL[k]}</Text>
+                <Text style={styles.bucketHint}>{BUCKET_HINT[k]}</Text>
+                <View style={styles.qtyRow}>
+                  <QtyField
+                    label="Cases"
+                    value={e[k].cases}
+                    onChange={(v: string) => setField(p.id, k, 'cases', v)}
+                  />
+                  <QtyField
+                    label="Bottles"
+                    value={e[k].bottles}
+                    onChange={(v: string) => setField(p.id, k, 'bottles', v)}
+                  />
+                </View>
+              </View>
+            ))}
+
+            {total.anyRecorded ? (
+              <Text style={styles.bucketTotal}>
+                Total {total.cases} cs{total.bottles ? ` + ${total.bottles} btl` : ''}
+              </Text>
+            ) : null}
           </BentoTile>
         );
       })}
@@ -1031,8 +1088,10 @@ function OrderStep({
               <QtyField label="Bottles" value={l.bottles || ''} onChange={(v) => setField(p.id, 'bottles', v)} />
             </View>
             <View style={styles.qtyRow}>
-              <QtyField label="Free cases" value={l.free_cases || ''} onChange={(v) => setField(p.id, 'free_cases', v)} />
-              <QtyField label="Free btl" value={l.free_bottles || ''} onChange={(v) => setField(p.id, 'free_bottles', v)} />
+              {/* Labelled "scheme" (trade usage: "Buy 20 Get 1 Free" IS a scheme).
+                  The columns stay free_cases/free_bottles — see CLAUDE.md. */}
+              <QtyField label="Scheme cases" value={l.free_cases || ''} onChange={(v) => setField(p.id, 'free_cases', v)} />
+              <QtyField label="Scheme btl" value={l.free_bottles || ''} onChange={(v) => setField(p.id, 'free_bottles', v)} />
             </View>
           </BentoTile>
         );
@@ -1160,6 +1219,10 @@ const styles = StyleSheet.create({
   oosHeadRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   oosTag: { ...Type.caption, fontWeight: '700', color: Colors.warning, borderWidth: 1, borderColor: Colors.warning, borderRadius: Radius.sm, paddingHorizontal: 6, paddingVertical: 1 },
   qtyRow: { flexDirection: 'row', gap: Space.md, marginTop: Space.xs },
+  bucketGroup: { marginTop: Space.sm },
+  bucketLabel: { ...Type.label, color: Colors.text },
+  bucketHint: { ...Type.caption, color: Colors.textMuted, marginTop: 1 },
+  bucketTotal: { ...Type.caption, color: Colors.textSecondary, marginTop: Space.sm },
   qtyField: { flex: 1 },
   qtyLabel: { ...Type.caption, color: Colors.textMuted, marginBottom: Space.xs },
   stepper: {

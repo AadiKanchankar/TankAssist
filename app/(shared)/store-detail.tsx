@@ -117,23 +117,41 @@ export default function StoreDetailScreen({ route, navigation }: { route: any; n
                 <Text style={styles.mutedNote}>No products in the catalog.</Text>
               ) : (
                 stock.map((row: StockRow, i: number) => (
-                  <View key={row.product_id} style={[styles.stockRow, i > 0 && styles.divider]}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={[Type.bodyMed, { color: Colors.text }]}>{row.product_name}</Text>
-                      {row.cases < 0 ? (
-                        <Text style={styles.stockNever}>Never recorded</Text>
-                      ) : (
-                        <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]}>
-                          {fmtDate(row.recorded_at)}
-                          {row.recorder_name ? ` · ${row.recorder_name}` : ''}
+                  <View key={row.product_id} style={[styles.stockRowWrap, i > 0 && styles.divider]}>
+                    <View style={styles.stockRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[Type.bodyMed, { color: Colors.text }]}>{row.product_name}</Text>
+                        {row.cases < 0 ? (
+                          <Text style={styles.stockNever}>Never recorded</Text>
+                        ) : (
+                          <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]}>
+                            {fmtDate(row.recorded_at)}
+                            {row.recorder_name ? ` · ${row.recorder_name}` : ''}
+                          </Text>
+                        )}
+                      </View>
+                      {row.cases >= 0 && (
+                        <Text style={[Type.bodyMed, tabularNums, { color: Colors.text }]}>
+                          {row.cases} cs / {row.bottles} btl
                         </Text>
                       )}
                     </View>
-                    {row.cases >= 0 && (
-                      <Text style={[Type.bodyMed, tabularNums, { color: Colors.text }]}>
-                        {row.cases} cs / {row.bottles} btl
-                      </Text>
-                    )}
+                    {/* Total is the sum of the recorded buckets. A snapshot taken
+                        before the split carries no breakdown — say so rather
+                        than implying it was all on display. */}
+                    {row.cases >= 0 &&
+                      (row.breakdown.length > 0 ? (
+                        <View style={styles.breakdownRow}>
+                          {row.breakdown.map((b) => (
+                            <Text key={b.label} style={styles.breakdownChip}>
+                              {b.label.replace(' stock', '')} {b.cases} cs
+                              {b.bottles ? ` / ${b.bottles} btl` : ''}
+                            </Text>
+                          ))}
+                        </View>
+                      ) : (
+                        <Text style={styles.stockNever}>Breakdown not recorded</Text>
+                      ))}
                   </View>
                 ))
               )}
@@ -313,7 +331,17 @@ const styles = StyleSheet.create({
   sectionLabel: { ...Type.label, color: Colors.textMuted, marginBottom: Space.sm },
   sectionTitle: { ...Type.section, color: Colors.text, marginBottom: Space.sm },
   mutedNote: { ...Type.body, color: Colors.textMuted },
-  stockRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: Space.sm, gap: Space.md },
+  stockRowWrap: { paddingVertical: Space.sm },
+  stockRow: { flexDirection: 'row', alignItems: 'center', gap: Space.md },
+  breakdownRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Space.xs, marginTop: Space.xs },
+  breakdownChip: {
+    ...Type.caption,
+    color: Colors.textSecondary,
+    backgroundColor: Colors.surfaceAlt,
+    borderRadius: Radius.sm,
+    paddingHorizontal: Space.sm,
+    paddingVertical: 2,
+  },
   divider: { borderTopWidth: 1, borderTopColor: Colors.border },
   stockNever: { ...Type.caption, color: Colors.textMuted, fontStyle: 'italic', marginTop: 2 },
   row: { flexDirection: 'row', gap: Layout.gridGap },

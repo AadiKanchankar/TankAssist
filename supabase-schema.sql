@@ -21,13 +21,17 @@
 --  • Policies written without an explicit `to` clause apply `to public`;
 --    that is how they exist live and is reproduced faithfully below.
 --
--- Regenerated after 12 migrations that postdate the previous (2026-07-18)
--- snapshot: add_users_is_tester, create_switch_tester_role,
+-- Regenerated after 12 migrations that postdate the 2026-07-18 snapshot:
+-- add_users_is_tester, create_switch_tester_role,
 -- products_ops_columns_and_oos, create_location_requests,
 -- excise_company_facilities, excise_permits_table,
 -- excise_allocations_and_ledger, excise_approve_reject_rpcs,
 -- excise_permits_storage_bucket, guard_facility_license_change,
 -- excise_dup_guard_validity_multiline, approve_excise_permit_multiline_guards.
+--
+-- Re-regenerated 2026-08-04 (PJP + stock-category batch) after 3 further
+-- migrations: stock_snapshot_categories, journey_plans_and_mock_location_flag,
+-- journey_plans_realtime.
 -- ============================================================
 
 
@@ -97,7 +101,13 @@ create table public.store_visits (
   latitude double precision,
   longitude double precision,
   address text,
-  distance_from_store_meters double precision
+  distance_from_store_meters double precision,
+  -- Anti-cheat: the ONLY stored flag. NULL = not reported by the client
+  -- (pre-flag build); false = checked, clean; true = OS reported a mock
+  -- location provider. ANDROID ONLY (expo-location fills it from
+  -- Location.isFromMockProvider); iOS always records false.
+  -- Flag-only — a mocked location never blocks check-in.
+  is_mock_location boolean
 );
 
 create table public.daily_reports (
@@ -190,10 +200,50 @@ create table public.store_stock_snapshots (
   store_id uuid not null references public.stores(id),
   product_id uuid not null references public.products(id),
   visit_id uuid references public.store_visits(id),
+  -- TOTAL across all buckets — authoritative, and what every reader uses.
+  -- Rows written before the floor/display/godown split carry a total with all
+  -- three buckets NULL (the split is unknown and is never guessed).
   cases integer not null check (cases >= 0),
   bottles integer not null check (bottles >= 0),
+  -- Three stock buckets. NULL = not recorded / not applicable (many stores
+  -- have no godown), 0 = counted and empty. A bare `check (col >= 0)` admits
+  -- NULL, which is how the >= 0 discipline coexists with absent != zero.
+  floor_cases integer check (floor_cases >= 0),
+  floor_bottles integer check (floor_bottles >= 0),
+  display_cases integer check (display_cases >= 0),
+  display_bottles integer check (display_bottles >= 0),
+  godown_cases integer check (godown_cases >= 0),
+  godown_bottles integer check (godown_bottles >= 0),
   recorded_by uuid not null references public.users(id),
   recorded_at timestamptz not null default now()
+);
+
+-- ── PJP (Permanent Journey Plan) ────────────────────────────────────────
+-- A rep submits a planned route; their sales manager approves or sends it
+-- back. Approval is OPTIMISTIC-WITH-FLAGGING, not blocking: the rep may work
+-- against a still-`submitted` plan, and such visits are flagged for review
+-- rather than prevented. An `approved` plan clears the flag.
+create table public.journey_plans (
+  id uuid primary key default gen_random_uuid(),
+  rep_id uuid not null references public.users(id),
+  -- LOCAL calendar date. With the unique below this is the natural key that
+  -- ties a visit to its plan, so store_visits needs no FK.
+  plan_date date not null,
+  status text not null default 'submitted'
+    check (status = any (array['submitted'::text, 'approved'::text, 'rejected'::text])),
+  submitted_at timestamptz not null default now(),
+  reviewed_by uuid references public.users(id),
+  reviewed_at timestamptz,
+  reject_reason text,
+  unique (rep_id, plan_date)
+);
+
+create table public.journey_plan_stores (
+  id uuid primary key default gen_random_uuid(),
+  plan_id uuid not null references public.journey_plans(id) on delete cascade,
+  store_id uuid not null references public.stores(id),
+  position integer not null default 0,
+  unique (plan_id, store_id)
 );
 
 -- On-demand live location. The ONLY table in the Realtime publication.
@@ -323,6 +373,8 @@ create index inventory_movements_movement_date_idx
 create index inventory_movements_product_id_direction_idx
   on public.inventory_movements using btree (product_id, direction);
 
+create index journey_plan_stores_plan_idx on public.journey_plan_stores using btree (plan_id);
+
 
 -- ============================================================
 -- 3. FUNCTIONS / RPCs
@@ -334,6 +386,20 @@ create or replace function public.get_my_role()
  returns text language sql stable security definer set search_path to ''
 as $function$
   select role from public.users where id = auth.uid() and is_active;
+$function$;
+
+-- The manager→rep ownership test, factored out of the six PJP policies that
+-- need it. Same relationship location_requests enforces inline; hardened like
+-- get_my_role (STABLE, SECURITY DEFINER, search_path='').
+create or replace function public.manages_rep(p_rep uuid)
+  returns boolean language sql stable security definer set search_path to ''
+as $function$
+  select exists (
+    select 1 from public.users u
+     where u.id = p_rep and u.role = 'rep'
+       and (public.get_my_role() = 'management'
+         or (public.get_my_role() = 'sales_manager' and u.assigned_manager_id = auth.uid()))
+  );
 $function$;
 
 create or replace function public.get_sales_managers()
@@ -664,6 +730,8 @@ alter table public.company_facilities         enable row level security;
 alter table public.excise_permits             enable row level security;
 alter table public.permit_product_allocations enable row level security;
 alter table public.inventory_movements        enable row level security;
+alter table public.journey_plans              enable row level security;
+alter table public.journey_plan_stores        enable row level security;
 
 -- ── users ──────────────────────────────────────────────────────────────
 -- Self-read survives deactivation so the app can show "account deactivated".
@@ -827,6 +895,47 @@ create policy "Allocations: management delete" on public.permit_product_allocati
 create policy "Movements: management read" on public.inventory_movements for select to authenticated
   using (get_my_role() = 'management'::text);
 
+-- ── journey_plans ── the PJP state machine, enforced by RLS alone ──────
+-- No RPC, unlike update_order_status: the transition is only
+-- submitted -> approved|rejected, and the policies below cover it fully.
+-- Verified by impersonation (2026-08-04): a rep updating their own plan to
+-- status='approved', or writing reviewed_by themselves, raises 42501.
+create policy "Plans: read own or managed" on public.journey_plans for select
+  using ((rep_id = auth.uid()) or manages_rep(rep_id));
+create policy "Plans: rep insert own" on public.journey_plans for insert
+  with check ((rep_id = auth.uid()) and (get_my_role() = 'rep'::text)
+              and (status = 'submitted'::text) and (reviewed_by is null)
+              and (reviewed_at is null) and (reject_reason is null));
+-- A rep may edit+resubmit while submitted/rejected but can ONLY ever land the
+-- row back in 'submitted' — self-approval is structurally impossible.
+create policy "Plans: rep resubmit own" on public.journey_plans for update
+  using ((rep_id = auth.uid()) and (get_my_role() = 'rep'::text)
+         and (status = any (array['submitted'::text, 'rejected'::text])))
+  with check ((rep_id = auth.uid()) and (status = 'submitted'::text)
+              and (reviewed_by is null) and (reviewed_at is null) and (reject_reason is null));
+-- Manager acts only on a submitted plan: an approved plan cannot be reversed,
+-- and a rejection without a reason is refused by the database.
+create policy "Plans: manager review" on public.journey_plans for update
+  using ((status = 'submitted'::text) and manages_rep(rep_id))
+  with check (manages_rep(rep_id)
+              and (status = any (array['approved'::text, 'rejected'::text]))
+              and (reviewed_by = auth.uid()) and (reviewed_at is not null)
+              and ((status <> 'rejected'::text) or (coalesce(btrim(reject_reason), ''::text) <> ''::text)));
+
+-- ── journey_plan_stores ── route rows; editable only pre-approval ──────
+create policy "PlanStores: read via plan" on public.journey_plan_stores for select
+  using (exists (select 1 from public.journey_plans p
+                  where (p.id = journey_plan_stores.plan_id)
+                    and ((p.rep_id = auth.uid()) or manages_rep(p.rep_id))));
+create policy "PlanStores: rep write via plan" on public.journey_plan_stores for insert
+  with check (exists (select 1 from public.journey_plans p
+                       where (p.id = journey_plan_stores.plan_id) and (p.rep_id = auth.uid())
+                         and (p.status = any (array['submitted'::text, 'rejected'::text]))));
+create policy "PlanStores: rep delete via plan" on public.journey_plan_stores for delete
+  using (exists (select 1 from public.journey_plans p
+                  where (p.id = journey_plan_stores.plan_id) and (p.rep_id = auth.uid())
+                    and (p.status = any (array['submitted'::text, 'rejected'::text]))));
+
 
 -- ============================================================
 -- 7. GRANTS (API roles)
@@ -855,6 +964,9 @@ grant select, insert, update         on public.excise_permits             to aut
 grant select, insert, update, delete on public.permit_product_allocations to authenticated;
 grant select                         on public.inventory_movements        to authenticated;
 grant select                         on public.monthly_ta_summary         to authenticated;
+-- No DELETE on journey_plans: a submitted plan is evidence.
+grant select, insert, update         on public.journey_plans              to authenticated;
+grant select, insert, delete         on public.journey_plan_stores        to authenticated;
 
 -- Function EXECUTE (live state). anon holds EXECUTE only on phone_registered,
 -- the pre-OTP login gate, which returns a boolean and nothing else.
@@ -864,6 +976,7 @@ revoke execute on function public.update_order_status(uuid, text, text, text[]) 
 revoke execute on function public.switch_tester_role(text)          from anon, public;
 revoke execute on function public.approve_excise_permit(uuid)       from anon, public;
 revoke execute on function public.reject_excise_permit(uuid, text)  from anon, public;
+revoke execute on function public.manages_rep(uuid)                 from anon, public;
 
 grant execute on function public.get_my_role()                      to authenticated, service_role;
 grant execute on function public.get_sales_managers()               to authenticated;
@@ -872,6 +985,9 @@ grant execute on function public.update_order_status(uuid, text, text, text[]) t
 grant execute on function public.switch_tester_role(text)           to authenticated;
 grant execute on function public.approve_excise_permit(uuid)        to authenticated;
 grant execute on function public.reject_excise_permit(uuid, text)   to authenticated;
+-- authenticated ONLY, deliberately: no service_role key exists in this
+-- project and granting one here would contradict the anon-key-only design.
+grant execute on function public.manages_rep(uuid)                  to authenticated;
 
 
 -- ============================================================
@@ -902,9 +1018,16 @@ grant execute on function public.reject_excise_permit(uuid, text)   to authentic
 -- ============================================================
 -- 9. REALTIME
 -- ============================================================
--- Exactly one table is published. There is no background location tracking:
--- a manager INSERTs a pending request, the checked-in rep's app answers once.
+-- Two tables are published.
+--
+-- location_requests — there is no background location tracking: a manager
+-- INSERTs a pending request, the checked-in rep's app answers once.
 --   alter publication supabase_realtime add table public.location_requests;
+--
+-- journey_plans — notifies a manager when a rep submits a plan, reusing the
+-- same postgres_changes pattern instead of adding push notifications. No new
+-- native module, so the PJP feature stays OTA-shippable.
+--   alter publication supabase_realtime add table public.journey_plans;
 
 
 -- ============================================================

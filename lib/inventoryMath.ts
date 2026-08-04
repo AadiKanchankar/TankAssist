@@ -59,6 +59,20 @@ const toQty = (bottles: number, perCase: number): Qty => {
 
 const addQty = (a: Qty, b: Qty): Qty => ({ cases: a.cases + b.cases, bottles: a.bottles + b.bottles });
 
+/**
+ * Bucket for movements that carry no facility id. Permits approved before
+ * `company_facilities` had any rows produced ledger rows with null
+ * facility_from_id/facility_to_id — real stock that must still be counted.
+ * DIRECTION IS THE SOURCE OF TRUTH for balance: `factory_to_warehouse` put
+ * stock into a warehouse and `warehouse_to_l1` took stock out of one, whether
+ * or not the row names which. Ignoring an unattributed OUTBOUND would overstate
+ * stock on hand, which is the more dangerous error, so both sides count.
+ * `internal_transfer` is the exception — its direction says nothing about which
+ * end is a warehouse, so it still requires a known warehouse facility.
+ */
+export const UNATTRIBUTED_FACILITY = '__unattributed__';
+const UNATTRIBUTED_NAME = 'Unattributed (no facility on permit)';
+
 export function computeAnalytics(
   rows: MovementRow[],
   products: { id: string; name: string; qty_per_carton: number }[],
@@ -102,21 +116,23 @@ export function computeAnalytics(
         ytdW2L1ByProduct.set(r.product_id, (ytdW2L1ByProduct.get(r.product_id) ?? 0) + bottles);
     }
 
-    // Into a warehouse
-    if (
-      r.facility_to_id &&
-      isWarehouse.has(r.facility_to_id) &&
-      (r.direction === 'factory_to_warehouse' || r.direction === 'internal_transfer')
-    ) {
-      bump(r.product_id, r.facility_to_id, bottles);
+    // Into a warehouse. The direction alone establishes that stock arrived;
+    // the facility id only decides WHICH bucket it lands in.
+    if (r.direction === 'factory_to_warehouse') {
+      bump(r.product_id, r.facility_to_id ?? UNATTRIBUTED_FACILITY, bottles);
     }
-    // Out of a warehouse
-    if (
-      r.facility_from_id &&
-      isWarehouse.has(r.facility_from_id) &&
-      (r.direction === 'warehouse_to_l1' || r.direction === 'internal_transfer')
-    ) {
-      bump(r.product_id, r.facility_from_id, -bottles);
+    // Out of a warehouse.
+    if (r.direction === 'warehouse_to_l1') {
+      bump(r.product_id, r.facility_from_id ?? UNATTRIBUTED_FACILITY, -bottles);
+    }
+    // An internal transfer can run warehouse→factory just as easily as
+    // warehouse→warehouse, so here the facility really must be a known
+    // warehouse before it moves the balance.
+    if (r.direction === 'internal_transfer') {
+      if (r.facility_to_id && isWarehouse.has(r.facility_to_id))
+        bump(r.product_id, r.facility_to_id, bottles);
+      if (r.facility_from_id && isWarehouse.has(r.facility_from_id))
+        bump(r.product_id, r.facility_from_id, -bottles);
     }
   }
 
@@ -136,7 +152,10 @@ export function computeAnalytics(
       productBottles += bottles;
       byWarehouse.push({
         facilityId,
-        facilityName: facilityName.get(facilityId) ?? 'Unknown facility',
+        facilityName:
+          facilityId === UNATTRIBUTED_FACILITY
+            ? UNATTRIBUTED_NAME
+            : facilityName.get(facilityId) ?? 'Unknown facility',
         qty: toQty(bottles, perCase),
       });
     }

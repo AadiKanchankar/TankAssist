@@ -27,6 +27,7 @@ import { supabase, enrollClient } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
 import { useTeam, Member, Role } from '../../hooks/useTeam';
+import { usePendingPlans, useFlaggedVisits, usePlanSubmissions } from '../../hooks/useJourneyPlans';
 
 type EnrollStep = 'form' | 'otp' | 'done';
 
@@ -81,6 +82,13 @@ export default function AdminTeamScreen({ navigation }: { navigation: any }) {
   const insets = useSafeAreaInsets();
   const isManagement = profile?.role === 'management';
   const { data, refetch, isPending, isError } = useTeam(profile?.role);
+  const { data: plansData, refetch: refetchPlans } = usePendingPlans();
+  const { data: flaggedData, refetch: refetchFlagged } = useFlaggedVisits();
+  const pendingPlans = plansData ?? [];
+  const flaggedVisits = flaggedData ?? [];
+  const reviewCount = pendingPlans.length + flaggedVisits.length;
+  // Realtime: a rep submitting a plan updates the badge without a pull.
+  usePlanSubmissions(true);
   const members = data ?? [];
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -103,12 +111,16 @@ export default function AdminTeamScreen({ navigation }: { navigation: any }) {
   const [saving, setSaving] = useState(false);
   const [enrollError, setEnrollError] = useState('');
 
+  const refreshAll = useCallback(async () => {
+    await Promise.all([refetch(), refetchPlans(), refetchFlagged()]);
+  }, [refetch, refetchPlans, refetchFlagged]);
+
   useFocusEffect(
     useCallback(() => {
-      refetch();
-    }, [refetch])
+      refreshAll();
+    }, [refreshAll])
   );
-  const { refreshing, onRefresh } = usePullToRefresh(refetch);
+  const { refreshing, onRefresh } = usePullToRefresh(refreshAll);
 
   const toggleSection = (title: string) =>
     setExpanded((prev) => {
@@ -273,6 +285,36 @@ export default function AdminTeamScreen({ navigation }: { navigation: any }) {
     <View style={styles.container}>
       <View style={[styles.headerPad, { paddingTop: insets.top + Space.md }]}>
         <Text style={[Type.title, { color: Colors.text, marginBottom: Space.md }]}>Team</Text>
+
+        {/* Exception queue: surfaces only what needs a decision. The count is
+            the hook — "review these 3", never "audit all 300". */}
+        <Pressable
+          onPress={() => navigation.navigate('Exceptions')}
+          style={[styles.reviewBanner, reviewCount > 0 && styles.reviewBannerActive]}
+          accessibilityRole="button"
+          accessibilityLabel={
+            reviewCount > 0 ? `Review queue, ${reviewCount} items need review` : 'Review queue, nothing waiting'
+          }
+        >
+          <Ionicons
+            name={reviewCount > 0 ? 'alert-circle' : 'shield-checkmark-outline'}
+            size={18}
+            color={reviewCount > 0 ? Colors.alert : Colors.textMuted}
+          />
+          <View style={{ flex: 1 }}>
+            <Text style={[Type.bodyMed, { color: Colors.text }]}>Review queue</Text>
+            <Text style={[Type.caption, { color: Colors.textMuted }]}>
+              {pendingPlans.length > 0
+                ? `${pendingPlans.length} plan${pendingPlans.length === 1 ? '' : 's'} awaiting approval`
+                : 'No plans awaiting approval'}
+              {flaggedVisits.length > 0
+                ? ` · ${flaggedVisits.length} flagged visit${flaggedVisits.length === 1 ? '' : 's'}`
+                : ''}
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
+        </Pressable>
+
         {isManagement && (
           <Button title="Add user" spotlight onPress={openAddModal} style={{ marginBottom: Space.md }} />
         )}
@@ -510,6 +552,18 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
   headerPad: { paddingHorizontal: Layout.screenPad, paddingBottom: Space.sm },
   list: { paddingHorizontal: Layout.screenPad, paddingTop: Space.sm },
+  reviewBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Space.md,
+    padding: Space.md,
+    marginBottom: Space.md,
+    borderRadius: Radius.card,
+    backgroundColor: Colors.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: Colors.border,
+  },
+  reviewBannerActive: { borderColor: Colors.alert },
   sectionHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',

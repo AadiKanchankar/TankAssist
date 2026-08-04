@@ -175,7 +175,7 @@ export default function OrderDetailScreen({ route, navigation }: { route: any; n
               <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 1 }]}>
                 {it.cases} cs / {it.bottles} btl
                 {it.free_cases || it.free_bottles
-                  ? `  (+${it.free_cases} cs / ${it.free_bottles} btl free)`
+                  ? `  (+${it.free_cases} cs / ${it.free_bottles} btl scheme)`
                   : ''}
               </Text>
             </View>
