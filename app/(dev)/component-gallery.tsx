@@ -44,7 +44,9 @@ export default function ComponentGallery() {
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
-      <ScrollView contentContainerStyle={styles.content}>
+      {/* Same reason as the rep dashboard: without this the keyboard-dismiss
+          gesture eats the first tap on an Autocomplete result. */}
+      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         <Text style={[Type.title, { color: Colors.text }]}>Component gallery</Text>
 
         <Section title="Metrics + bento tiles">

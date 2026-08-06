@@ -131,7 +131,7 @@ export default function StoreDetailScreen({ route, navigation }: { route: any; n
                         )}
                       </View>
                       {row.cases >= 0 && (
-                        <Text style={[Type.bodyMed, tabularNums, { color: Colors.text }]}>
+                        <Text style={[Type.bodyMed, tabularNums, styles.stockTotal]}>
                           {row.cases} cs / {row.bottles} btl
                         </Text>
                       )}
@@ -143,14 +143,16 @@ export default function StoreDetailScreen({ route, navigation }: { route: any; n
                       (row.breakdown.length > 0 ? (
                         <View style={styles.breakdownRow}>
                           {row.breakdown.map((b) => (
-                            <Text key={b.label} style={styles.breakdownChip}>
-                              {b.label.replace(' stock', '')} {b.cases} cs
-                              {b.bottles ? ` / ${b.bottles} btl` : ''}
-                            </Text>
+                            <View key={b.label} style={styles.breakdownChip}>
+                              <Text style={styles.breakdownChipText}>
+                                {b.label.replace(' stock', '')} {b.cases} cs
+                                {b.bottles ? ` / ${b.bottles} btl` : ''}
+                              </Text>
+                            </View>
                           ))}
                         </View>
                       ) : (
-                        <Text style={styles.stockNever}>Breakdown not recorded</Text>
+                        <Text style={styles.breakdownNone}>Breakdown not recorded</Text>
                       ))}
                   </View>
                 ))
@@ -331,17 +333,33 @@ const styles = StyleSheet.create({
   sectionLabel: { ...Type.label, color: Colors.textMuted, marginBottom: Space.sm },
   sectionTitle: { ...Type.section, color: Colors.text, marginBottom: Space.sm },
   mutedNote: { ...Type.body, color: Colors.textMuted },
-  stockRowWrap: { paddingVertical: Space.sm },
-  stockRow: { flexDirection: 'row', alignItems: 'center', gap: Space.md },
-  breakdownRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Space.xs, marginTop: Space.xs },
+  stockRowWrap: { paddingVertical: Space.md },
+  // flex-start, not center: a two-line name block would otherwise pull the
+  // total down to its vertical midpoint and sit it against the chips below.
+  stockRow: { flexDirection: 'row', alignItems: 'flex-start', gap: Space.md },
+  // flexShrink 0 keeps "12 cs / 3 btl" on one line however long the name is.
+  stockTotal: { color: Colors.text, flexShrink: 0 },
+  breakdownRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    columnGap: Space.xs,
+    rowGap: Space.xs, // explicit: wrapped chip lines need their own gap
+    marginTop: Space.sm,
+  },
+  // A View wrapper, NOT a styled Text. A Text with background + padding draws
+  // its box from the line box, so Type.caption's lineHeight overflowed the
+  // padding and wrapped chips overlapped each other and the next product row.
   breakdownChip: {
-    ...Type.caption,
-    color: Colors.textSecondary,
     backgroundColor: Colors.surfaceAlt,
     borderRadius: Radius.sm,
     paddingHorizontal: Space.sm,
-    paddingVertical: 2,
+    paddingVertical: 3,
   },
+  breakdownChipText: { ...Type.caption, color: Colors.textSecondary },
+  breakdownNone: { ...Type.caption, color: Colors.textMuted, fontStyle: 'italic', marginTop: Space.sm },
+  // No padding here: it is merged after stockRowWrap and would override its
+  // paddingVertical top, pulling content back up against the rule. The
+  // Space.md padding on stockRowWrap is what keeps the rule clear of chips.
   divider: { borderTopWidth: 1, borderTopColor: Colors.border },
   stockNever: { ...Type.caption, color: Colors.textMuted, fontStyle: 'italic', marginTop: 2 },
   row: { flexDirection: 'row', gap: Layout.gridGap },

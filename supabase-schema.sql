@@ -32,6 +32,9 @@
 -- Re-regenerated 2026-08-04 (PJP + stock-category batch) after 3 further
 -- migrations: stock_snapshot_categories, journey_plans_and_mock_location_flag,
 -- journey_plans_realtime.
+--
+-- Re-regenerated 2026-08-06 (rep-bug + odometer batch) after 2 further
+-- migrations: attendance_odometer_readings, odometer_photos_bucket.
 -- ============================================================
 
 
@@ -83,7 +86,26 @@ create table public.attendance (
   selfie_url text,
   total_distance_km double precision,
   total_market_time_minutes integer,
-  address text
+  address text,
+  -- Two odometer readings per working day, for Travel Allowance.
+  -- Nullable throughout: a rep may skip a reading or be on an older build,
+  -- and that must never block attendance, the system of record for pay.
+  -- Daily TA distance = odo_end - odo_start; cross-checked against
+  -- total_distance_km (the GPS route) by lib/odometer.ts.
+  odo_start numeric check (odo_start >= 0),
+  odo_start_photo_path text,                   -- object in the odometer-photos bucket
+  odo_start_at timestamptz,
+  odo_start_lat double precision,              -- own position per reading:
+  odo_start_lng double precision,              -- attendance.latitude is punch-in only
+  odo_end numeric check (odo_end >= 0),
+  odo_end_photo_path text,
+  odo_end_at timestamptz,
+  odo_end_lat double precision,
+  odo_end_lng double precision,
+  -- Odometers do not run backwards. In the DB, not just the UI, so a stale or
+  -- tampered client cannot land an impossible pair.
+  constraint attendance_odo_not_decreasing
+    check (odo_end is null or odo_start is null or odo_end >= odo_start)
 );
 
 create table public.store_visits (
@@ -1013,6 +1035,23 @@ grant execute on function public.manages_rep(uuid)                  to authentic
 --   leaves an orphan file; that is ACCEPTED, not a bug to fix by granting
 --   DELETE. See HANDOFF.md "Known defects". Orphans are clearable by a human
 --   under service-role, out of band.
+--
+-- odometer-photos  private, file_size_limit 5242880 (5 MB),
+--   allowed_mime_types = {image/jpeg, image/png}
+--   Paths: odometer/{repId}/{YYYY-MM-DD}/{start|end}-{ts}.jpg
+--   Policies, SELECT + INSERT ONLY (same evidence posture as excise-permits):
+--     "Odometer bucket: rep upload"
+--       with check ((bucket_id = 'odometer-photos') and (get_my_role() is not null))
+--     "Odometer bucket: manager read"
+--       using ((bucket_id = 'odometer-photos')
+--              and (get_my_role() = any (array['sales_manager','management'])))
+--
+--   ⚠️ NOT visit-photos, deliberately. visit-photos is readable by ANY
+--   authenticated user; an anti-cheat photo that every rep can read defeats
+--   its own purpose. The rep uploads, only managers read — a rep confirms the
+--   number on screen before saving and never needs the stored object back.
+--   Signing an odometer path MUST pass ODOMETER_BUCKET explicitly (lib/storage.ts),
+--   the same lesson as PERMITS_BUCKET.
 
 
 -- ============================================================

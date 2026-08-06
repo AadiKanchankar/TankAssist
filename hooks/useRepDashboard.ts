@@ -21,6 +21,10 @@ export interface AttendanceRow {
   longitude: number | null;
   total_distance_km: number | null;
   total_market_time_minutes: number | null;
+  /** Morning odometer, when captured. Drives the punch-out reading's
+   *  "must not be below the start" check. Null = not captured today. */
+  odo_start: number | null;
+  odo_end: number | null;
 }
 export interface RepDashboardData {
   attendance: AttendanceRow | null;

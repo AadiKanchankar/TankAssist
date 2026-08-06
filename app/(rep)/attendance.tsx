@@ -11,7 +11,8 @@ import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
 import * as Location from 'expo-location';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { uploadSelfie } from '../../lib/storage';
+import { uploadSelfie, uploadOdometerPhoto } from '../../lib/storage';
+import OdometerCapture, { OdometerResult } from '../../components/OdometerCapture';
 import { reverseGeocode } from '../../lib/geocoding';
 
 export default function AttendanceScreen({ navigation }: { navigation: any }) {
@@ -46,6 +47,10 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
     })();
   }, []);
 
+  // Odometer at punch-in. Optional by design — see handleSubmit.
+  const [odo, setOdo] = useState<OdometerResult | null>(null);
+  const [showOdo, setShowOdo] = useState(false);
+
   const takeSelfie = async () => {
     if (!cameraRef.current) return;
     const photo = await cameraRef.current.takePictureAsync({ quality: 0.7 });
@@ -64,6 +69,18 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
     setSubmitting(true);
     try {
       const selfieUrl = await uploadSelfie(photoUri, profile!.id);
+      // Odometer is optional at punch-in: a rep without their bike, or one on
+      // a build that predates the feature, must never be blocked from starting
+      // the day. Attendance is the record of record for pay.
+      let odoPath: string | null = null;
+      if (odo) {
+        try {
+          odoPath = await uploadOdometerPhoto(odo.photoUri, profile!.id, 'start');
+        } catch {
+          // Evidence upload failed — keep the rep-attested number, which is
+          // still better than losing both, and let them re-shoot later.
+        }
+      }
       const { error } = await supabase.from('attendance').insert({
         user_id: profile!.id,
         check_in_time: new Date().toISOString(),
@@ -71,6 +88,11 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
         longitude: location.coords.longitude,
         address: address,
         selfie_url: selfieUrl,
+        odo_start: odo?.value ?? null,
+        odo_start_photo_path: odoPath,
+        odo_start_at: odo ? new Date().toISOString() : null,
+        odo_start_lat: odo ? location.coords.latitude : null,
+        odo_start_lng: odo ? location.coords.longitude : null,
       });
       if (error) throw error;
       // Peak-end: success overlay + haptic, then return.
@@ -155,6 +177,37 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
           )}
         </BentoTile>
 
+        {/* Odometer — optional. Never gates check-in: a rep on foot today, or
+            on a build without the camera module, still has to be able to
+            start their day. */}
+        <BentoTile style={{ marginTop: Space.md }}>
+          <Text style={styles.label}>Odometer (for travel allowance)</Text>
+          {odo ? (
+            <>
+              <Text style={styles.odoValue}>{odo.value}</Text>
+              <Button
+                title="Retake reading"
+                variant="secondary"
+                onPress={() => setShowOdo(true)}
+                style={{ marginTop: Space.sm }}
+              />
+            </>
+          ) : (
+            <>
+              <Text style={styles.odoHint}>
+                Photograph your odometer so your travel allowance is calculated from the real
+                distance. You can skip it and check in without one.
+              </Text>
+              <Button
+                title="Capture odometer"
+                variant="secondary"
+                onPress={() => setShowOdo(true)}
+                style={{ marginTop: Space.sm }}
+              />
+            </>
+          )}
+        </BentoTile>
+
         <Button
           title="Confirm check-in"
           spotlight
@@ -164,6 +217,16 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
           style={styles.submitBtn}
         />
       </View>
+
+      <OdometerCapture
+        visible={showOdo}
+        which="start"
+        onCancel={() => setShowOdo(false)}
+        onConfirm={(r) => {
+          setOdo(r);
+          setShowOdo(false);
+        }}
+      />
 
       {showSuccess && <SuccessOverlay label="Checked in" />}
     </View>
@@ -179,4 +242,6 @@ const styles = StyleSheet.create({
   camera: { width: '100%', height: 300 },
   captured: { alignItems: 'center', gap: Space.sm },
   submitBtn: { marginTop: 'auto' },
+  odoValue: { ...Type.display, color: Colors.text, letterSpacing: 2 },
+  odoHint: { ...Type.caption, color: Colors.textMuted, lineHeight: 18 },
 });

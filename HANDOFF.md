@@ -2,7 +2,7 @@
 
 Session-state snapshot for the next Claude Code session. **Temporal** — records what is live, pending, and out of scope as of the date below. Durable architecture facts live in `CLAUDE.md`; plain-language status for the user is `PROJECT_STATUS.md`.
 
-- **Snapshot date:** 2026-08-04 (reconciled against the live DB via MCP, EAS, and git — not against the previous copy of this file)
+- **Snapshot date:** 2026-08-06 (reconciled against the live DB via MCP, EAS, and git — not against the previous copy of this file)
 - **Supabase project:** `ldgunrxceogfrohjrlxz` (live MCP access; verify before assuming)
 - **Repo:** `master`, pushed to `github.com/AadiKanchankar/TankAssist`. HEAD = the PJP + stock-category batch below.
 - **Type state:** `npx tsc --noEmit` clean. All 5 `*.test.ts` files pass (`npx tsx <file>`).
@@ -28,7 +28,20 @@ Newest first — all JS-only:
 `parse-excise-permit` is deployed at **version 4**, `verify_jwt: true`, files `index.ts` + `parsers.ts` + `classify.ts`. It runs on the caller's JWT — **no service-role key exists anywhere in this project.**
 
 ### Migrations applied (live, in order)
-`…phase1_roles_softban_lockdown` · `phase3_products` · `phase4_orders_stock` · `add_users_is_tester` · `create_switch_tester_role` · `products_ops_columns_and_oos` · `create_location_requests` · `excise_company_facilities` · `excise_permits_table` · `excise_allocations_and_ledger` · `excise_approve_reject_rpcs` · `excise_permits_storage_bucket` · `guard_facility_license_change` · `excise_dup_guard_validity_multiline` · `approve_excise_permit_multiline_guards` · **`stock_snapshot_categories`** · **`journey_plans_and_mock_location_flag`** · **`journey_plans_realtime`**.
+`…phase1_roles_softban_lockdown` · `phase3_products` · `phase4_orders_stock` · `add_users_is_tester` · `create_switch_tester_role` · `products_ops_columns_and_oos` · `create_location_requests` · `excise_company_facilities` · `excise_permits_table` · `excise_allocations_and_ledger` · `excise_approve_reject_rpcs` · `excise_permits_storage_bucket` · `guard_facility_license_change` · `excise_dup_guard_validity_multiline` · `approve_excise_permit_multiline_guards` · `stock_snapshot_categories` · `journey_plans_and_mock_location_flag` · `journey_plans_realtime` · **`attendance_odometer_readings`** · **`odometer_photos_bucket`**.
+
+### 2026-08-06 batch — rep bug fixes + odometer OCR (ONE new EAS build)
+
+**This batch is build-gated, not OTA.** ML Kit is a new native module, and `app.json` `version` moved **1.0.0 → 1.1.0** so `runtimeVersion` changes with it — otherwise a later `eas update` could push ML Kit-dependent JS onto the old `ef195f8` binary and white-screen it at import.
+
+Root causes differed from what the task file guessed on all three reported bugs:
+1. **Plan-review crash** — NOT the null manager. `usePlanSubmissions` hardcoded the Realtime topic `'journey-plan-submissions'` and mounts in **two places at once** (Team stays mounted under the pushed queue); Realtime rejects a second subscribe on one topic. Now `journey-plans-${useId()}`. Two further real bugs found alongside: plan approval **silently no-opped** when RLS matched 0 rows (now `.select()` + honest error), and a rep with no `assigned_manager_id` is invisible to every SM (now stated on the card).
+2. **Check-in from store search did nothing** — NOT a nav-param regression. The dashboard `ScrollView` lacked `keyboardShouldPersistTaps`, so the keyboard-dismiss gesture ate the tap. Pre-existing, unrelated to the plan work. Same fix applied to the dev component gallery.
+3. **Store Detail chips collided** — `breakdownChip` styled a `Text` with background+padding; RN draws that box from the line box, so `Type.caption`'s lineHeight overflowed and wrapped chips overlapped. Now a `View` wrapper + inner `Text` (the pattern `products.tsx:603` already used).
+
+Also: voice language fallback (3-state diagnosis), resume-abandoned-visit (server row + encrypted draft), plan scoping/virtualization, and the shared `AddStoreModal` — extracted from the dashboard so adding a store **from a plan** cannot bypass the dedup check.
+
+⚠️ **Data-loss incident, 2026-08-06.** While impersonation-testing the new odometer columns I deleted a test attendance row with the predicate `user_id = <rep> AND check_out_time IS NULL`. That rep (`8af7df7f…` Hardikk Kkkiij) **also had a pre-existing open attendance row**, which the predicate caught — one real row destroyed. It had never been punched out, so it carried no `total_distance_km`/`total_market_time_minutes` and contributed nothing to TA figures or `monthly_ta_summary`; nothing references `attendance` by FK, so the loss is contained to that row. Recoverable from Supabase Dashboard → Database → Backups if wanted. **Lesson applied: cleanup deletes must target the captured inserted id, never a broad predicate.** Every other cleanup this session used a distinctive sentinel (`plan_date='2098-01-01'`, `floor_cases is not null`).
 
 ### 2026-08-04 batch — PJP, stock categories, terminology, warehouse balance
 1. **Warehouse balance read 0 with 50 cases in — fixed.** Confirmed live: the single ledger row has **both facility ids null** (approved before `company_facilities` had rows) and the facility registry is still empty, so the old balance test scored it zero twice over. `computeAnalytics` now treats **direction as the source of truth**; unattributed rows bucket under `UNATTRIBUTED_FACILITY`. No UI change needed — the dashboard already renders `facilityName`.
@@ -132,6 +145,15 @@ Everything below is installed and OTA-current on the `ef195f8` build; none of it
 13. **Anti-cheat queue** — check in >300 m from a store, then off-plan, and confirm both appear in Team → Review queue with readable reasons. **Mock location needs a real mock-location app on an Android device to exercise** — it is the one flag that cannot be verified from the simulator or by inspection.
 14. **Store de-dup** — try to add a store ~30 m from an existing one, and separately with a transposed name ("Sruaj" vs "Suraj"); confirm both offer the existing store and that "No — this is a new store" still creates one.
 
+### On-device pass for the 1.1.0 build — run these in ONE session, in order
+1. **PJP end-to-end** — submit a plan → manager sees it live (Realtime, no pull) → approve / send-back-with-reason → rep edits and resubmits. **Open the review queue from Team while Team is still mounted** — that is the exact path that used to crash.
+2. **Mock location** — needs a SECOND Android device with a mock-location app. The only item that cannot be checked any other way.
+3. **Resume visit** — check in, type stock + notes, kill the app, reopen: banner appears, resume restores the typed numbers and step. Check out, confirm the banner clears.
+4. **§1 / §3** — tap a searched store on the dashboard (must open the stepper), and view Store Detail stock on "Tank 90 z" (chips on their own row, no bleed).
+5. **Voice** — switch to HI/MR on a phone without the pack; confirm the actionable banner, the Download button on Android 13+, and that typing still works.
+6. **Plan scoping** — checked-in vs not; confirm the scope label, that search reaches an out-of-area store, and that the empty state's "Add a new store" goes through the dedup prompt.
+7. **Odometer** — capture at punch-in and punch-out; confirm OCR pre-fill on a real dashboard (the guided frame is unproven on a real motorcycle), that a below-start reading is refused, and that skipping still lets you punch out. Then check the TA section of the review queue.
+
 ---
 
 ## Manual dashboard actions (user, in Supabase)
@@ -157,6 +179,13 @@ Everything below is installed and OTA-current on the `ef195f8` build; none of it
 3. Every new secret is a STOP POINT. No service-role key in the app.
 4. Complete files only; `npx tsc --noEmit` after each change.
 5. STOP and report after each numbered phase; do not self-continue.
+
+## ⚠️ Data hygiene the owner asked to be reminded about
+**Abandoned open rows exist in live data and were deliberately NOT auto-closed** — the owner will decide their cleanup separately.
+- **3 `store_visits`** with `check_out_time is null`, two of them days old (2026-07-31, 2026-08-04). Resume ignores anything before today, so they cause no UX harm, but they will never close on their own.
+- **Several open `attendance` rows** across reps (Aadi 3, Pranoy 2, Shreeyash 3, Johnie 1, Varad 1 as of 2026-08-06) — an open attendance row means a day that was never punched out, so it has no market-time or distance figure.
+
+Neither is code; both are data decisions. Ask before writing any bulk close-out.
 
 ## Next actionable step
 Fill the two data blockers (facility rows; `unit_of_measure` on *Tank 90 z*), then walk the excise happy path on device — that is the only part of the pipeline never exercised end-to-end with real data. Adding the facility rows also unblocks the inventory-movement backfill noted above.

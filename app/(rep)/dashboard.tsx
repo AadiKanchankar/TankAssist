@@ -39,19 +39,18 @@ import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
 import { totalRouteKm } from '../../lib/haversine';
 import { directionsRouteKm } from '../../lib/directions';
-import StoreLocationPicker from '../../components/StoreLocationPicker';
-import type { StoreLocationValue } from '../../components/StoreLocationPicker';
 import * as Location from 'expo-location';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
 import { useRepDashboard } from '../../hooks/useRepDashboard';
 import { useMyPlan } from '../../hooks/useJourneyPlans';
+import { useOpenVisit } from '../../hooks/useOpenVisit';
+import AddStoreModal from '../../components/AddStoreModal';
+import OdometerCapture, { OdometerResult } from '../../components/OdometerCapture';
+import { uploadOdometerPhoto } from '../../lib/storage';
 import {
   planDateFor,
   PLAN_STATUS_LABEL,
-  findDuplicateCandidates,
-  DuplicateMatch,
 } from '../../lib/journeyPlan';
-import { haversineKm as distanceKm } from '../../lib/haversine';
 
 interface StoreSearchResult {
   id: string;
@@ -69,31 +68,20 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
   const { profile } = useAuthStore();
   const { data, refetch, isPending, isError } = useRepDashboard(profile?.id);
   const { data: plan, refetch: refetchPlan } = useMyPlan(profile?.id, planDateFor());
-  // Duplicate candidates surfaced when the rep tries to add a store.
-  const [dupes, setDupes] = useState<DuplicateMatch[]>([]);
+  const { data: openVisit, refetch: refetchOpenVisit } = useOpenVisit(profile?.id);
   const attendance = data?.attendance ?? null;
   const assignments = data?.assignments ?? [];
   const visits = data?.visits ?? [];
   const reportSubmitted = data?.reportSubmitted ?? false;
   const casesToday = data?.casesToday ?? 0;
   const [punchingOut, setPunchingOut] = useState(false);
+  const [showOdoEnd, setShowOdoEnd] = useState(false);
 
   // Store search + add-store modal state
   const [showStoreModal, setShowStoreModal] = useState(false);
   const [storeSearch, setStoreSearch] = useState('');
   const [storeResults, setStoreResults] = useState<StoreSearchResult[]>([]);
   const [searchingStores, setSearchingStores] = useState(false);
-
-  // Add store form state
-  const [newStoreName, setNewStoreName] = useState('');
-  const [storeLocation, setStoreLocation] = useState<StoreLocationValue>({
-    latitude: null,
-    longitude: null,
-    address: '',
-    state: null,
-  });
-  const [newStoreLicense, setNewStoreLicense] = useState('');
-  const [creatingStore, setCreatingStore] = useState(false);
 
   const today = new Date().toISOString().split('T')[0];
 
@@ -109,13 +97,16 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
     useCallback(() => {
       refetch();
       refetchPlan();
-    }, [refetch, refetchPlan])
+      // Re-checked on every focus, so returning from a killed app (or from the
+      // stepper after checking out) reflects the true server state.
+      refetchOpenVisit();
+    }, [refetch, refetchPlan, refetchOpenVisit])
   );
 
   const { refreshing, onRefresh } = usePullToRefresh(
     useCallback(async () => {
-      await Promise.all([refetch(), refetchPlan()]);
-    }, [refetch, refetchPlan])
+      await Promise.all([refetch(), refetchPlan(), refetchOpenVisit()]);
+    }, [refetch, refetchPlan, refetchOpenVisit])
   );
 
   const isCheckedIn = !!attendance?.check_in_time;
@@ -129,7 +120,20 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
 
   // --- Punch out (unchanged logic) ---
 
-  const handlePunchOut = async () => {
+  /**
+   * Punch-out asks for the closing odometer first, so the day's TA distance is
+   * captured while the rep is still at their bike. Skippable — a missing
+   * reading must never trap someone into an open attendance row.
+   */
+  const startPunchOut = () => {
+    if (attendance?.odo_start != null) {
+      setShowOdoEnd(true);
+      return;
+    }
+    handlePunchOut(null);
+  };
+
+  const handlePunchOut = async (odoEnd: OdometerResult | null) => {
     Alert.alert(
       'End day',
       'Are you sure you want to punch out? This cannot be undone.',
@@ -193,12 +197,30 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
                 distance = totalRouteKm(waypoints);
               }
 
+              let odoEndPath: string | null = null;
+              if (odoEnd) {
+                try {
+                  odoEndPath = await uploadOdometerPhoto(odoEnd.photoUri, profile!.id, 'end');
+                } catch {
+                  // Keep the attested number even if the evidence upload fails.
+                }
+              }
+
               await supabase
                 .from('attendance')
                 .update({
                   check_out_time: checkOutTime,
                   total_market_time_minutes: totalMinutes,
                   total_distance_km: distance,
+                  ...(odoEnd
+                    ? {
+                        odo_end: odoEnd.value,
+                        odo_end_photo_path: odoEndPath,
+                        odo_end_at: checkOutTime,
+                        odo_end_lat: loc.coords.latitude,
+                        odo_end_lng: loc.coords.longitude,
+                      }
+                    : {}),
                 })
                 .eq('id', attendance!.id);
 
@@ -214,14 +236,6 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
   };
 
   // --- Store search + creation (unchanged logic) ---
-
-  const resetStoreModal = () => {
-    setStoreSearch('');
-    setStoreResults([]);
-    setNewStoreName('');
-    setStoreLocation({ latitude: null, longitude: null, address: '', state: null });
-    setNewStoreLicense('');
-  };
 
   // Debounced store search
   useEffect(() => {
@@ -249,82 +263,8 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
     navigation.navigate('StoreVisit', { store });
   };
 
-  const openAddStore = () => {
-    setNewStoreName(storeSearch);
-    setShowStoreModal(true);
-  };
-
-  /**
-   * Steer the rep to an existing store before creating a near-duplicate.
-   * Kills both the many-stores-in-one-spot spam and the typo duplicate
-   * ("Sruaj" for "Suraj") in one move.
-   *
-   * This does NOT block creation — a genuinely new store stays possible, it
-   * just becomes the deliberate choice rather than the silent default. A
-   * client that skips this check is still caught by the manager-visible flag,
-   * which is derived from the store coordinates rather than from whether this
-   * dialog was shown.
-   */
-  const checkForDuplicates = async (): Promise<DuplicateMatch[]> => {
-    const { data: existing } = await supabase
-      .from('stores')
-      .select('id, name, latitude, longitude');
-    return findDuplicateCandidates(
-      newStoreName.trim(),
-      storeLocation.latitude,
-      storeLocation.longitude,
-      (existing as any[]) ?? [],
-      distanceKm,
-    );
-  };
-
-  const handleCreateStore = async (skipDuplicateCheck = false) => {
-    if (!newStoreName.trim()) {
-      Alert.alert('Name required', 'Enter a store name to continue.');
-      return;
-    }
-    if (!skipDuplicateCheck) {
-      const matches = await checkForDuplicates();
-      if (matches.length) {
-        setDupes(matches);
-        return;
-      }
-    }
-    setCreatingStore(true);
-    try {
-      const { data, error } = await supabase
-        .from('stores')
-        .insert({
-          name: newStoreName.trim(),
-          address: storeLocation.address.trim() || null,
-          latitude: storeLocation.latitude,
-          longitude: storeLocation.longitude,
-          license_number: newStoreLicense.trim() || null,
-          state: storeLocation.state,
-          created_by_user_id: profile!.id,
-        })
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      setShowStoreModal(false);
-      setDupes([]);
-      resetStoreModal();
-      navigation.navigate('StoreVisit', {
-        store: {
-          id: data.id,
-          name: data.name,
-          address: data.address,
-          latitude: data.latitude,
-          longitude: data.longitude,
-        },
-      });
-    } catch (err: any) {
-      Alert.alert('Couldn’t add the store', err.message || 'Try again.');
-    }
-    setCreatingStore(false);
-  };
+  // The modal prefills itself from `storeSearch` via initialName.
+  const openAddStore = () => setShowStoreModal(true);
 
   // --- Render ---
 
@@ -378,6 +318,12 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
           },
         ]}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+        // Without this, RN's default ("never") lets the keyboard-dismiss
+        // gesture swallow the first tap outside the input — so tapping a store
+        // in the search results did nothing, because the keyboard is always up
+        // at that moment. Every tappable thing below lives inside this
+        // ScrollView, so the fix belongs here rather than on any one handler.
+        keyboardShouldPersistTaps="handled"
       >
         {/* Greeting + brand mark */}
         <View style={styles.greetRow}>
@@ -449,7 +395,7 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
                   </View>
                 </View>
                 <Pressable
-                  onPress={handlePunchOut}
+                  onPress={startPunchOut}
                   disabled={punchingOut}
                   accessibilityRole="button"
                   accessibilityLabel="Punch out and end day"
@@ -503,6 +449,48 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
             )}
           </MotiView>
         )}
+
+        {/* Unfinished visit — server-resume. An open store_visits row means the
+            rep checked in and the app died before check-out; this is the first
+            thing they should see. The stepper's own same-day lookup picks the
+            visit back up, so navigating with the store is all that's needed. */}
+        {openVisit ? (
+          <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
+            <BentoTile style={styles.resumeTile}>
+              <View style={styles.resumeHead}>
+                <Ionicons name="play-circle-outline" size={20} color={Colors.accent} />
+                <View style={{ flex: 1 }}>
+                  <Text style={[Type.bodyMed, { color: Colors.text }]} numberOfLines={1}>
+                    Unfinished visit at {openVisit.store.name}
+                  </Text>
+                  <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]}>
+                    Checked in{' '}
+                    {new Date(openVisit.check_in_time).toLocaleTimeString('en-IN', {
+                      hour: 'numeric',
+                      minute: '2-digit',
+                    })}{' '}
+                    · never checked out
+                  </Text>
+                </View>
+              </View>
+              <Button
+                title="Resume visit"
+                onPress={() =>
+                  navigation.navigate('StoreVisit', {
+                    store: {
+                      id: openVisit.store.id,
+                      name: openVisit.store.name,
+                      address: openVisit.store.address,
+                      latitude: openVisit.store.latitude,
+                      longitude: openVisit.store.longitude,
+                    },
+                  })
+                }
+                style={{ marginTop: Space.md }}
+              />
+            </BentoTile>
+          </MotiView>
+        ) : null}
 
         {/* Today's plan — leads the day. Approval is optimistic: the rep is
             never frozen waiting on a manager, but pre-approval visits are
@@ -687,114 +675,34 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
         </MotiView>
       </ScrollView>
 
-      {/* Add-store modal */}
-      <Modal
-        visible={showStoreModal}
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={() => {
-          setShowStoreModal(false);
-          resetStoreModal();
+      {/* Closing odometer, then the punch-out itself. startOfDay enables the
+          "odometers don't go backwards" check before anything is written. */}
+      <OdometerCapture
+        visible={showOdoEnd}
+        which="end"
+        startOfDay={attendance?.odo_start ?? null}
+        onCancel={() => {
+          setShowOdoEnd(false);
+          // Skipping the reading must still let them end the day.
+          handlePunchOut(null);
         }}
-      >
-        <View style={styles.modalContainer}>
-          <Header
-            title="Add a store"
-            onBack={() => {
-              setShowStoreModal(false);
-              resetStoreModal();
-            }}
-          />
-          <ScrollView style={styles.modalBody} keyboardShouldPersistTaps="handled">
-            <Text style={styles.fieldLabel}>Store name</Text>
-            <TextInput
-              style={styles.input}
-              value={newStoreName}
-              onChangeText={setNewStoreName}
-              placeholder="Store name"
-              placeholderTextColor={Colors.textMuted}
-            />
+        onConfirm={(r) => {
+          setShowOdoEnd(false);
+          handlePunchOut(r);
+        }}
+      />
 
-            <StoreLocationPicker value={storeLocation} onChange={setStoreLocation} />
-
-            <Text style={styles.fieldLabel}>License number (optional)</Text>
-            <TextInput
-              style={styles.input}
-              value={newStoreLicense}
-              onChangeText={setNewStoreLicense}
-              placeholder="Store license number"
-              placeholderTextColor={Colors.textMuted}
-            />
-
-            <Button
-              title="Add & check in"
-              onPress={() => handleCreateStore()}
-              loading={creatingStore}
-              disabled={!newStoreName.trim()}
-              style={{ marginTop: Space.xl, marginBottom: 48 }}
-            />
-          </ScrollView>
-        </View>
-      </Modal>
-
-      {/* "Did you mean this nearby store?" — steer, don't block. */}
-      <Modal visible={dupes.length > 0} transparent animationType="fade" onRequestClose={() => setDupes([])}>
-        <View style={styles.dupWrap}>
-          <View style={styles.dupCard}>
-            <Text style={[Type.bodyMed, { color: Colors.text }]}>Is it one of these?</Text>
-            <Text style={styles.dupHint}>
-              These stores are already on the system nearby or under a similar name. Picking the
-              existing one keeps its history and stock together.
-            </Text>
-            <ScrollView style={{ maxHeight: 260 }}>
-              {dupes.map((d) => (
-                <Pressable
-                  key={d.store.id}
-                  style={styles.dupRow}
-                  onPress={() => {
-                    setDupes([]);
-                    setShowStoreModal(false);
-                    resetStoreModal();
-                    navigation.navigate('StoreVisit', {
-                      store: {
-                        id: d.store.id,
-                        name: d.store.name,
-                        address: null,
-                        latitude: d.store.latitude,
-                        longitude: d.store.longitude,
-                      },
-                    });
-                  }}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Use existing store ${d.store.name}`}
-                >
-                  <Ionicons name="storefront-outline" size={18} color={Colors.accent} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={[Type.bodyMed, { color: Colors.text }]} numberOfLines={1}>
-                      {d.store.name}
-                    </Text>
-                    <Text style={[Type.caption, { color: Colors.textMuted }]}>
-                      {d.meters !== null ? `${Math.round(d.meters)} m away` : 'Similar name'}
-                      {d.why === 'both' ? ' · similar name' : ''}
-                    </Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
-                </Pressable>
-              ))}
-            </ScrollView>
-            <Button
-              title="No — this is a new store"
-              variant="secondary"
-              onPress={() => {
-                setDupes([]);
-                handleCreateStore(true);
-              }}
-              style={{ marginTop: Space.md }}
-            />
-            <Button title="Go back and edit" variant="secondary" onPress={() => setDupes([])} style={{ marginTop: Space.sm }} />
-          </View>
-        </View>
-      </Modal>
+      <AddStoreModal
+        visible={showStoreModal}
+        initialName={storeSearch}
+        createdByUserId={profile!.id}
+        onClose={() => setShowStoreModal(false)}
+        onResolved={(s) => {
+          setShowStoreModal(false);
+          setStoreSearch('');
+          navigation.navigate('StoreVisit', { store: s });
+        }}
+      />
     </View>
   );
 }
@@ -802,6 +710,8 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: Colors.background },
   content: { padding: Layout.screenPad },
+  resumeTile: { borderColor: Colors.accent },
+  resumeHead: { flexDirection: 'row', alignItems: 'flex-start', gap: Space.sm },
   planOk: { borderColor: Colors.success },
   planBad: { borderColor: Colors.alert },
   planHead: { flexDirection: 'row', alignItems: 'center', gap: Space.sm },

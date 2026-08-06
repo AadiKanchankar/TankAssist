@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useEffect } from 'react';
+import { useEffect, useId } from 'react';
 import { supabase } from '../lib/supabase';
 import { haversineKm } from '../lib/haversine';
 import {
@@ -11,6 +11,7 @@ import {
   sortFlags,
   planDateFor,
 } from '../lib/journeyPlan';
+import { mismatchFlag } from '../lib/odometer';
 
 const SELECT =
   'id, rep_id, plan_date, status, submitted_at, reviewed_by, reviewed_at, reject_reason, journey_plan_stores(store_id, position)';
@@ -109,6 +110,13 @@ export function useSubmitPlan(repId: string | undefined) {
 
 export interface PendingPlan extends JourneyPlan {
   rep_name: string;
+  /**
+   * A rep with no assigned_manager_id is invisible to every sales_manager
+   * (manages_rep only matches an SM to their own reports), so ONLY management
+   * can action their plan. Surfaced on the card so it doesn't sit unreviewed
+   * forever with nobody realising why.
+   */
+  rep_has_manager: boolean;
 }
 
 /** Plans awaiting this manager's approval. RLS scopes to reps they own. */
@@ -124,18 +132,40 @@ export function usePendingPlans() {
         .order('submitted_at', { ascending: true });
       if (error) throw error;
       const rows = (data ?? []).map(shape);
-      const names = await repNames(rows.map((r) => r.rep_id));
-      return rows.map((r) => ({ ...r, rep_name: names[r.rep_id] ?? 'Unknown rep' }));
+      const info = await repInfo(rows.map((r) => r.rep_id));
+      return rows.map((r) => ({
+        ...r,
+        rep_name: info[r.rep_id]?.name ?? 'Unknown rep',
+        rep_has_manager: info[r.rep_id]?.hasManager ?? false,
+      }));
     },
   });
 }
 
-async function repNames(ids: string[]): Promise<Record<string, string>> {
-  const unique = [...new Set(ids)];
+interface RepInfo {
+  name: string;
+  hasManager: boolean;
+}
+
+/**
+ * Names + manager linkage for a set of rep ids.
+ *
+ * Nulls are filtered out before the query: store_visits.user_id is nullable,
+ * and passing a null into .in() errors the whole request rather than just
+ * skipping that row. A missing id simply resolves to "Unknown rep" — an
+ * unattributable row must never take the screen down.
+ */
+async function repInfo(ids: (string | null)[]): Promise<Record<string, RepInfo>> {
+  const unique = [...new Set(ids)].filter((id): id is string => !!id);
   if (!unique.length) return {};
-  const { data } = await supabase.from('users').select('id, name').in('id', unique);
-  const out: Record<string, string> = {};
-  for (const u of data ?? []) out[u.id] = u.name;
+  const { data } = await supabase
+    .from('users')
+    .select('id, name, assigned_manager_id')
+    .in('id', unique);
+  const out: Record<string, RepInfo> = {};
+  for (const u of data ?? []) {
+    out[u.id] = { name: u.name ?? 'Unknown rep', hasManager: !!u.assigned_manager_id };
+  }
   return out;
 }
 
@@ -160,7 +190,10 @@ export function useReviewPlan(reviewerId: string | undefined) {
       if (status === 'rejected' && !reason?.trim()) {
         throw new Error('A reason is required when sending a plan back.');
       }
-      const { error } = await supabase
+      // .select() so we can tell "RLS matched nothing" from "it worked".
+      // Without it an update the policy filters out returns no error and the
+      // UI cheerfully reports success while the plan stays submitted.
+      const { data, error } = await supabase
         .from('journey_plans')
         .update({
           status,
@@ -168,8 +201,15 @@ export function useReviewPlan(reviewerId: string | undefined) {
           reviewed_at: new Date().toISOString(),
           reject_reason: status === 'rejected' ? reason!.trim() : null,
         })
-        .eq('id', planId);
+        .eq('id', planId)
+        .select('id');
       if (error) throw error;
+      if (!data || data.length === 0) {
+        throw new Error(
+          'This plan is no longer yours to review — it may have been reviewed already, ' +
+            'or the rep is not assigned to you. Pull to refresh.',
+        );
+      }
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['pending-plans'] });
@@ -187,10 +227,17 @@ export function useReviewPlan(reviewerId: string | undefined) {
  */
 export function usePlanSubmissions(enabled: boolean) {
   const qc = useQueryClient();
+  // The channel topic MUST be unique per hook instance. Team and the review
+  // queue both mount this, and a native stack keeps Team mounted when the
+  // queue is pushed on top — so a shared topic means two subscribes on one
+  // topic, which Realtime rejects ("can only be called a single time per
+  // channel instance") and which surfaced as a crash on opening the queue.
+  // Same convention as locreq-${repId} / locreq-req-${id}.
+  const instanceId = useId();
   useEffect(() => {
     if (!enabled) return;
     const ch = supabase
-      .channel('journey-plan-submissions')
+      .channel(`journey-plans-${instanceId}`)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'journey_plans' },
@@ -200,7 +247,7 @@ export function usePlanSubmissions(enabled: boolean) {
     return () => {
       supabase.removeChannel(ch);
     };
-  }, [enabled, qc]);
+  }, [enabled, qc, instanceId]);
 }
 
 // ── The exception queue ───────────────────────────────────────────────────
@@ -213,6 +260,24 @@ export interface FlaggedVisit {
   store_name: string;
   check_in_time: string | null;
   flags: VisitFlag[];
+}
+
+/**
+ * A day whose odometer distance far exceeds the tracked GPS route.
+ *
+ * Derived, not stored — same posture as every other flag but mock-location:
+ * both numbers already live on the attendance row, so the signal comes from
+ * the data rather than from whether a client chose to record it.
+ */
+export interface FlaggedDay {
+  attendance_id: string;
+  rep_id: string;
+  rep_name: string;
+  date: string;
+  odoKm: number;
+  gpsKm: number;
+  excessKm: number;
+  reason: string;
 }
 
 const QUEUE_DAYS = 7;
@@ -257,11 +322,14 @@ export function useFlaggedVisits() {
         planBy[`${s.rep_id}|${s.plan_date}`] = s;
       }
 
-      const names = await repNames(rows.map((v) => v.user_id));
+      const info = await repInfo(rows.map((v) => v.user_id));
       const prevByRep: Record<string, VisitForFlags> = {};
       const out: FlaggedVisit[] = [];
 
       for (const v of rows) {
+        // An unattributable visit can't be reviewed against a rep's plan, and
+        // it must not crash the queue for every other row.
+        if (!v.user_id) continue;
         const visit: VisitForFlags = {
           id: v.id,
           store_id: v.store_id,
@@ -281,7 +349,7 @@ export function useFlaggedVisits() {
         out.push({
           visit_id: v.id,
           rep_id: v.user_id,
-          rep_name: names[v.user_id] ?? 'Unknown rep',
+          rep_name: info[v.user_id]?.name ?? 'Unknown rep',
           store_id: v.store_id,
           store_name: (v.store_id && storeName[v.store_id]) || 'Unknown store',
           check_in_time: v.check_in_time,
@@ -289,6 +357,53 @@ export function useFlaggedVisits() {
         });
       }
       return out.reverse(); // newest first
+    },
+  });
+}
+
+/**
+ * Days where the odometer claim outruns the GPS route by a gross margin.
+ *
+ * Only over-claims flag, and the tolerance is deliberately generous — a real
+ * day includes petrol, lunch and wrong turns, so some overshoot is normal and
+ * must never read as dishonesty. See MISMATCH_PERCENT / MISMATCH_FLOOR_KM in
+ * lib/odometer.ts, which are the single place to tune this.
+ */
+export function useOdometerFlags() {
+  return useQuery({
+    queryKey: ['odometer-flags'],
+    refetchOnMount: false,
+    queryFn: async (): Promise<FlaggedDay[]> => {
+      const since = new Date(Date.now() - QUEUE_DAYS * 86_400_000).toISOString();
+      const { data, error } = await supabase
+        .from('attendance')
+        .select('id, user_id, check_in_time, odo_start, odo_end, total_distance_km')
+        .gte('check_in_time', since)
+        .not('odo_end', 'is', null)
+        .order('check_in_time', { ascending: false });
+      if (error) throw error;
+
+      const rows = (data as any[]) ?? [];
+      if (!rows.length) return [];
+      const info = await repInfo(rows.map((r) => r.user_id));
+
+      const out: FlaggedDay[] = [];
+      for (const r of rows) {
+        if (!r.user_id) continue;
+        const m = mismatchFlag(r.odo_start, r.odo_end, r.total_distance_km);
+        if (!m.flagged) continue;
+        out.push({
+          attendance_id: r.id,
+          rep_id: r.user_id,
+          rep_name: info[r.user_id]?.name ?? 'Unknown rep',
+          date: r.check_in_time ? planDateFor(new Date(r.check_in_time)) : '',
+          odoKm: m.odoKm!,
+          gpsKm: m.gpsKm!,
+          excessKm: m.excessKm!,
+          reason: m.reason!,
+        });
+      }
+      return out;
     },
   });
 }

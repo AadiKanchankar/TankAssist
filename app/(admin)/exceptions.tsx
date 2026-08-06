@@ -12,6 +12,7 @@ import {
   usePendingPlans,
   useReviewPlan,
   useFlaggedVisits,
+  useOdometerFlags,
   usePlanSubmissions,
 } from '../../hooks/useJourneyPlans';
 import { PLAN_STATUS_LABEL } from '../../lib/journeyPlan';
@@ -35,6 +36,7 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
   const { profile } = useAuthStore();
   const plans = usePendingPlans();
   const flagged = useFlaggedVisits();
+  const odoFlags = useOdometerFlags();
   const review = useReviewPlan(profile?.id);
 
   // Live: a rep submitting a plan refreshes this list without a pull.
@@ -47,7 +49,8 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
     useCallback(() => {
       plans.refetch();
       flagged.refetch();
-    }, [plans.refetch, flagged.refetch]),
+      odoFlags.refetch();
+    }, [plans.refetch, flagged.refetch, odoFlags.refetch]),
   );
 
   const approve = async (planId: string) => {
@@ -74,7 +77,8 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
 
   const pending = plans.data ?? [];
   const visits = flagged.data ?? [];
-  const loading = plans.isPending || flagged.isPending;
+  const days = odoFlags.data ?? [];
+  const loading = plans.isPending || flagged.isPending || odoFlags.isPending;
 
   return (
     <View style={styles.screen}>
@@ -102,6 +106,15 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
                   </Text>
                 </View>
               </View>
+              {!p.rep_has_manager ? (
+                <View style={[styles.flagRow, styles.flagSoft]}>
+                  <Ionicons name="information-circle-outline" size={16} color={Colors.textSecondary} />
+                  <Text style={styles.flagText}>
+                    This rep has no assigned sales manager, so only management can review their
+                    plans. Assign one in Team to route future plans automatically.
+                  </Text>
+                </View>
+              ) : null}
               <View style={styles.actions}>
                 <Button title="Approve" onPress={() => approve(p.id)} loading={review.isPending} />
                 <Button
@@ -149,6 +162,38 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
                   <Text style={styles.flagText}>{f.reason}</Text>
                 </View>
               ))}
+            </BentoTile>
+          ))
+        )}
+
+        {/* ── Travel-allowance mismatches ── */}
+        <Text style={[Type.section, styles.sectionTitle]}>
+          Travel allowance{days.length ? ` · ${days.length}` : ''}
+        </Text>
+        {!loading && days.length === 0 ? (
+          <BentoTile>
+            <EmptyState
+              icon="speedometer-outline"
+              title="Nothing to review"
+              message="Odometer distances match the tracked routes."
+            />
+          </BentoTile>
+        ) : (
+          days.map((d) => (
+            <BentoTile key={d.attendance_id} style={styles.tile}>
+              <View style={styles.rowTop}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[Type.bodyMed, { color: Colors.text }]}>{d.rep_name}</Text>
+                  <Text style={styles.meta}>{d.date}</Text>
+                </View>
+                <Text style={[Type.bodyMed, { color: Colors.alert }]}>
+                  +{Math.round(d.excessKm)} km
+                </Text>
+              </View>
+              <View style={[styles.flagRow, styles.flagHard]}>
+                <Ionicons name="speedometer-outline" size={16} color={Colors.alert} />
+                <Text style={styles.flagText}>{d.reason}</Text>
+              </View>
             </BentoTile>
           ))
         )}

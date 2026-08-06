@@ -27,7 +27,12 @@ import { supabase, enrollClient } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
 import { useTeam, Member, Role } from '../../hooks/useTeam';
-import { usePendingPlans, useFlaggedVisits, usePlanSubmissions } from '../../hooks/useJourneyPlans';
+import {
+  usePendingPlans,
+  useFlaggedVisits,
+  useOdometerFlags,
+  usePlanSubmissions,
+} from '../../hooks/useJourneyPlans';
 
 type EnrollStep = 'form' | 'otp' | 'done';
 
@@ -84,9 +89,11 @@ export default function AdminTeamScreen({ navigation }: { navigation: any }) {
   const { data, refetch, isPending, isError } = useTeam(profile?.role);
   const { data: plansData, refetch: refetchPlans } = usePendingPlans();
   const { data: flaggedData, refetch: refetchFlagged } = useFlaggedVisits();
+  const { data: odoData, refetch: refetchOdo } = useOdometerFlags();
   const pendingPlans = plansData ?? [];
   const flaggedVisits = flaggedData ?? [];
-  const reviewCount = pendingPlans.length + flaggedVisits.length;
+  const odoMismatches = odoData ?? [];
+  const reviewCount = pendingPlans.length + flaggedVisits.length + odoMismatches.length;
   // Realtime: a rep submitting a plan updates the badge without a pull.
   usePlanSubmissions(true);
   const members = data ?? [];
@@ -112,8 +119,8 @@ export default function AdminTeamScreen({ navigation }: { navigation: any }) {
   const [enrollError, setEnrollError] = useState('');
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([refetch(), refetchPlans(), refetchFlagged()]);
-  }, [refetch, refetchPlans, refetchFlagged]);
+    await Promise.all([refetch(), refetchPlans(), refetchFlagged(), refetchOdo()]);
+  }, [refetch, refetchPlans, refetchFlagged, refetchOdo]);
 
   useFocusEffect(
     useCallback(() => {
@@ -309,6 +316,9 @@ export default function AdminTeamScreen({ navigation }: { navigation: any }) {
                 : 'No plans awaiting approval'}
               {flaggedVisits.length > 0
                 ? ` · ${flaggedVisits.length} flagged visit${flaggedVisits.length === 1 ? '' : 's'}`
+                : ''}
+              {odoMismatches.length > 0
+                ? ` · ${odoMismatches.length} travel-allowance check${odoMismatches.length === 1 ? '' : 's'}`
                 : ''}
             </Text>
           </View>

@@ -52,6 +52,8 @@ import {
   type BucketEntries,
   type SnapshotRow,
 } from '../../lib/stockBuckets';
+import { emptyDraft, type VisitDraft } from '../../lib/visitDraft';
+import { saveDraft, loadDraft, clearDraft } from '../../lib/visitDraftStore';
 
 interface StoreParam {
   id: string;
@@ -142,6 +144,10 @@ export default function StoreVisitScreen({
   // Stepper
   const [stepStack, setStepStack] = useState<Step[]>(['stock']);
   const current = stepStack[stepStack.length - 1];
+  // Set when the mount found an existing open visit, so the draft restore runs
+  // only for a genuine resume and never over a fresh check-in.
+  const [resumedVisitId, setResumedVisitId] = useState<string | null>(null);
+  const draftLoadedRef = useRef(false);
 
   // Data
   const [products, setProducts] = useState<ProductRow[]>([]);
@@ -203,10 +209,14 @@ export default function StoreVisitScreen({
           .maybeSingle();
 
         if (existing) {
+          // Resuming: the server row is the source of truth. The encrypted
+          // draft only layers back what was typed but never committed, and is
+          // applied after the catalog load below so it wins over the prefill.
           setVisitId(existing.id);
           setCheckInTime(existing.check_in_time);
           setNotes(existing.notes || '');
           setCheckInAddress(existing.address ?? null);
+          setResumedVisitId(existing.id);
         } else {
           const lat = loc.coords.latitude;
           const lng = loc.coords.longitude;
@@ -329,6 +339,51 @@ export default function StoreVisitScreen({
       setStepStack(['stock']);
     }
   };
+
+  // ─── Form draft (encrypted, tiny) ───
+  // Restores only what was TYPED. The visit itself resumes from the server row;
+  // if this draft is missing or corrupt the rep simply re-enters the numbers.
+  useEffect(() => {
+    if (!resumedVisitId || draftLoadedRef.current || products.length === 0) return;
+    draftLoadedRef.current = true;
+    loadDraft(resumedVisitId).then((d) => {
+      if (!d) return;
+      setStock((prev) => {
+        const next = { ...prev };
+        for (const [pid, buckets] of Object.entries(d.stock)) {
+          // Ignore products that have since left the catalog.
+          if (!next[pid]) continue;
+          next[pid] = { ...emptyBuckets(), ...(buckets as BucketEntries) };
+        }
+        return next;
+      });
+      if (d.touched.length) setStockTouched(new Set(d.touched.filter((p) => !!products.find((x) => x.id === p))));
+      if (d.notes) setNotes(d.notes);
+      if (d.orderNotes) setOrderNotes(d.orderNotes);
+      const step = STEP_ORDER[d.step];
+      // Never resume onto the prior-order step: that order may already have
+      // been delivered or cancelled since, and it is re-resolved on mount.
+      if (step && step !== 'prev') setStepStack([step]);
+    });
+  }, [resumedVisitId, products]);
+
+  // Persist on change. Cheap and debounced — each save is a Keystore write.
+  useEffect(() => {
+    if (!visitId) return;
+    const t = setTimeout(() => {
+      const draft: VisitDraft = {
+        ...emptyDraft(),
+        step: Math.max(0, STEP_ORDER.indexOf(current)),
+        stock,
+        touched: [...stockTouched],
+        notes,
+        orderNotes,
+        savedAt: '',
+      };
+      saveDraft(visitId, draft);
+    }, 800);
+    return () => clearTimeout(t);
+  }, [visitId, current, stock, stockTouched, notes, orderNotes]);
 
   const setStockField = (pid: string, bucket: StockBucket, field: 'cases' | 'bottles', v: string) => {
     const clean = v.replace(/[^0-9]/g, '');
@@ -603,6 +658,10 @@ export default function StoreVisitScreen({
         })
         .eq('id', visitId);
       if (error) throw error;
+
+      // The visit is committed server-side, so the draft has nothing left to
+      // protect — drop it rather than leaving trade data in the Keystore.
+      await clearDraft(visitId);
 
       // Peak-end: success overlay + haptic, then return.
       setSubmitting(false);

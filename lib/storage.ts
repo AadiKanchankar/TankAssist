@@ -7,6 +7,16 @@ const BUCKET = 'visit-photos';
 export const PERMITS_BUCKET = 'excise-permits';
 /** The only file types that may ever be stored or parsed for a permit. */
 export const PERMIT_MIME_TYPES = ['application/pdf', 'image/jpeg', 'image/png'] as const;
+/**
+ * Locked bucket for odometer evidence photos. NOT visit-photos: that bucket is
+ * readable by any authenticated user, and an anti-cheat photo every rep can
+ * read defeats its own purpose. Rep-insert, manager/management-select only.
+ *
+ * ⚠️ Like PERMITS_BUCKET, any odometer path MUST pass this bucket explicitly
+ * when signing — signing it against the default bucket is the exact bug that
+ * already shipped once with permits.
+ */
+export const ODOMETER_BUCKET = 'odometer-photos';
 
 /** Local date as YYYY-MM-DD (used as a storage path segment). */
 function todayStr(): string {
@@ -28,14 +38,20 @@ function sanitizeName(name: string): string {
   return cleaned || 'store';
 }
 
-/** Low-level: read a local file and upload it to `path` in the private bucket. */
-async function uploadToPath(uri: string, path: string): Promise<string> {
+/**
+ * Low-level: read a local file and upload it to `path`.
+ *
+ * `bucket` defaults to visit-photos because that is where almost everything
+ * goes; anything landing in a locked bucket passes it EXPLICITLY at the call
+ * site, so the bucket is visible in the caller rather than assumed.
+ */
+async function uploadToPath(uri: string, path: string, bucket: string = BUCKET): Promise<string> {
   const base64 = await FileSystem.readAsStringAsync(uri, {
     encoding: FileSystem.EncodingType.Base64,
   });
 
   const { error } = await supabase.storage
-    .from(BUCKET)
+    .from(bucket)
     .upload(path, decode(base64), {
       contentType: 'image/jpeg',
       upsert: false,
@@ -107,6 +123,23 @@ export async function uploadDeliveredPhoto(
 export async function uploadProductImage(uri: string): Promise<string> {
   const path = `product-images/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
   return uploadToPath(uri, path);
+}
+
+/**
+ * Upload an odometer photo into the LOCKED odometer bucket.
+ * Path: odometer/{repId}/{YYYY-MM-DD}/{start|end}.jpg
+ *
+ * One object per reading per day, so a re-take overwrites rather than
+ * accumulating — hence upsert is not used and the caller handles the rare
+ * conflict by re-reading. Reading the object back needs ODOMETER_BUCKET.
+ */
+export async function uploadOdometerPhoto(
+  uri: string,
+  repId: string,
+  which: 'start' | 'end'
+): Promise<string> {
+  const path = `odometer/${repId}/${todayStr()}/${which}-${Date.now()}.jpg`;
+  return uploadToPath(uri, path, ODOMETER_BUCKET);
 }
 
 /**
