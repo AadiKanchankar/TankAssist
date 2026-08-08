@@ -141,16 +141,28 @@ export default function StoreDetailScreen({ route, navigation }: { route: any; n
                         than implying it was all on display. */}
                     {row.cases >= 0 &&
                       (row.breakdown.length > 0 ? (
-                        <View style={styles.breakdownRow}>
-                          {row.breakdown.map((b) => (
-                            <View key={b.label} style={styles.breakdownChip}>
-                              <Text style={styles.breakdownChipText}>
-                                {b.label.replace(' stock', '')} {b.cases} cs
-                                {b.bottles ? ` / ${b.bottles} btl` : ''}
-                              </Text>
-                            </View>
-                          ))}
-                        </View>
+                        <>
+                          <View style={styles.breakdownRow}>
+                            {row.breakdown.map((b) => (
+                              <View key={b.label} style={styles.breakdownChip}>
+                                <Text style={styles.breakdownChipText}>
+                                  {b.label.replace(' stock', '')} {b.cases} cs
+                                  {b.bottles ? ` / ${b.bottles} btl` : ''}
+                                </Text>
+                              </View>
+                            ))}
+                          </View>
+                          {/* Honesty about historical data, same rule as the
+                              unattributed ledger rows: this shelf number is two
+                              older readings added together, and was never taken
+                              as a single shelf count. Say so rather than let it
+                              pass as one. */}
+                          {row.breakdown.some((b) => b.legacy) ? (
+                            <Text style={styles.breakdownNote}>
+                              Shelf figure combines the older separate floor and display counts
+                            </Text>
+                          ) : null}
+                        </>
                       ) : (
                         <Text style={styles.breakdownNone}>Breakdown not recorded</Text>
                       ))}
@@ -357,6 +369,7 @@ const styles = StyleSheet.create({
   },
   breakdownChipText: { ...Type.caption, color: Colors.textSecondary },
   breakdownNone: { ...Type.caption, color: Colors.textMuted, fontStyle: 'italic', marginTop: Space.sm },
+  breakdownNote: { ...Type.caption, color: Colors.textMuted, fontStyle: 'italic', marginTop: Space.xs },
   // No padding here: it is merged after stockRowWrap and would override its
   // paddingVertical top, pulling content back up against the rule. The
   // Space.md padding on stockRowWrap is what keeps the rule clear of chips.

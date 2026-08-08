@@ -48,6 +48,7 @@ import {
   bucketTotals,
   snapshotPayload,
   bucketBreakdown,
+  SNAPSHOT_COLUMNS,
   type StockBucket,
   type BucketEntries,
   type SnapshotRow,
@@ -68,8 +69,6 @@ interface ProductRow {
   name: string;
   unit: string;
   qty_per_carton: number;
-  price_per_case: number | null;
-  price_per_bottle: number | null;
   is_out_of_stock: boolean;
 }
 
@@ -122,7 +121,6 @@ const toInt = (s: string): number => {
 };
 const fmtDate = (iso: string) =>
   new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-const fmtPrice = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 
 export default function StoreVisitScreen({
   route,
@@ -272,7 +270,10 @@ export default function StoreVisitScreen({
     // Active catalog
     const { data: prods } = await supabase
       .from('products')
-      .select('id, name, unit, qty_per_carton, price_per_case, price_per_bottle, is_out_of_stock')
+      // NO price columns. Reps never see or receive pricing: order value is
+      // derived server-side by trg_snapshot_order_item_price from the catalog
+      // price and the quantities below, so the device has no reason to hold it.
+      .select('id, name, unit, qty_per_carton, is_out_of_stock')
       .eq('is_active', true)
       .order('name');
     setProducts((prods as ProductRow[]) || []);
@@ -280,9 +281,7 @@ export default function StoreVisitScreen({
     // Latest stock snapshot per product for this store
     const { data: snaps } = await supabase
       .from('store_stock_snapshots')
-      .select(
-        'product_id, cases, bottles, floor_cases, floor_bottles, display_cases, display_bottles, godown_cases, godown_bottles, recorded_at, recorded_by'
-      )
+      .select(`product_id, ${SNAPSHOT_COLUMNS}, recorded_at, recorded_by`)
       .eq('store_id', store.id)
       .order('recorded_at', { ascending: false });
     const latest: Record<string, StockLatest> = {};
@@ -513,16 +512,8 @@ export default function StoreVisitScreen({
   };
 
   // ─── Step 5: place order (immediate) ───
-  const orderTotal = () => {
-    let total = 0;
-    for (const p of products) {
-      const l = orderLines[p.id];
-      if (!l) continue;
-      if (p.price_per_case != null) total += toInt(l.cases) * p.price_per_case;
-      if (p.price_per_bottle != null) total += toInt(l.bottles) * p.price_per_bottle;
-    }
-    return total;
-  };
+  // No order total on this device. Value is computed server-side from the
+  // catalog price and the quantities the rep enters; the rep is shown neither.
 
   const handlePlaceOrder = async () => {
     const lines = products
@@ -542,12 +533,9 @@ export default function StoreVisitScreen({
       Alert.alert('Add products', 'Add at least one product with a quantity.');
       return;
     }
-    const total = orderTotal();
     Alert.alert(
       'Place order',
-      `${lines.length} product${lines.length === 1 ? '' : 's'}${
-        total > 0 ? ` · ${fmtPrice(total)}` : ''
-      }`,
+      `${lines.length} product${lines.length === 1 ? '' : 's'}`,
       [
         { text: 'Review', style: 'cancel' },
         {
@@ -574,8 +562,10 @@ export default function StoreVisitScreen({
                 bottles: toInt(l.bottles),
                 free_cases: toInt(l.free_cases),
                 free_bottles: toInt(l.free_bottles),
-                price_per_case: p.price_per_case,
-                price_per_bottle: p.price_per_bottle,
+                // Quantities ONLY. trg_snapshot_order_item_price fills
+                // price_per_case/price_per_bottle from the catalog server-side
+                // and overwrites anything sent, so the rep neither knows nor
+                // influences the price.
               }));
               const { error: itErr } = await supabase.from('order_items').insert(itemRows);
               if (itErr) throw itErr;
@@ -796,7 +786,6 @@ export default function StoreVisitScreen({
               setOrderNotes={setOrderNotes}
               placed={orderPlaced}
               busy={orderBusy}
-              total={orderTotal()}
               onPlace={handlePlaceOrder}
             />
           )}
@@ -1135,13 +1124,6 @@ function OrderStep({
         return (
           <BentoTile key={p.id}>
             <Text style={[Type.bodyMed, { color: Colors.text }]}>{p.name}</Text>
-            {p.price_per_case != null || p.price_per_bottle != null ? (
-              <Text style={styles.subHint}>
-                {p.price_per_case != null ? `${fmtPrice(p.price_per_case)}/case` : ''}
-                {p.price_per_case != null && p.price_per_bottle != null ? ' · ' : ''}
-                {p.price_per_bottle != null ? `${fmtPrice(p.price_per_bottle)}/bottle` : ''}
-              </Text>
-            ) : null}
             <View style={styles.qtyRow}>
               <QtyField label="Cases" value={l.cases || ''} onChange={(v) => setField(p.id, 'cases', v)} />
               <QtyField label="Bottles" value={l.bottles || ''} onChange={(v) => setField(p.id, 'bottles', v)} />
@@ -1164,7 +1146,6 @@ function OrderStep({
           inputStyle={styles.textInput}
         />
       </BentoTile>
-      {total > 0 ? <Text style={styles.orderTotal}>Order value: {fmtPrice(total)}</Text> : null}
       <Button title="Place order" onPress={onPlace} loading={busy} />
     </View>
   );
@@ -1295,7 +1276,6 @@ const styles = StyleSheet.create({
   },
   stepBtn: { width: Layout.tap, height: Layout.tap, alignItems: 'center', justifyContent: 'center' },
   qtyInput: { flex: 1, ...Type.section, color: Colors.text, paddingVertical: Space.sm },
-  orderTotal: { ...Type.bodyMed, color: Colors.text, textAlign: 'right' },
   // camera
   fullCamera: { flex: 1 },
   cameraActions: { flexDirection: 'row', gap: Space.sm, padding: Space.lg, backgroundColor: Colors.background },

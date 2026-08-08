@@ -43,6 +43,7 @@ import TesterBadge from './components/TesterBadge';
 import LocationResponder from './components/LocationResponder';
 import JourneyPlanScreen from './app/(rep)/journey-plan';
 import ExceptionsScreen from './app/(admin)/exceptions';
+import ErrorBoundary from './components/ErrorBoundary';
 
 const Stack = createNativeStackNavigator();
 const RepTab = createBottomTabNavigator();
@@ -342,17 +343,23 @@ export default function App() {
           <KickedOutScreen />
         ) : (
           <>
-            <NavigationContainer>
-              {!session || !profile ? (
-                <AuthStack />
-              ) : profile.role === 'rep' ? (
-                // key on role so a tester role-switch fully remounts the tree at
-                // its root (lands on the new role's Dashboard, like a fresh login).
-                <RepTabs key={profile.role} />
-              ) : (
-                <AdminTabs key={profile.role} />
-              )}
-            </NavigationContainer>
+            {/* Wraps the whole navigation tree: a render error anywhere shows a
+                readable, recoverable screen instead of unmounting to nothing.
+                An OTA already shipped a crash that could not be root-caused
+                afterwards because a release build leaves no trace on screen. */}
+            <ErrorBoundary label="Navigation">
+              <NavigationContainer>
+                {!session || !profile ? (
+                  <AuthStack />
+                ) : profile.role === 'rep' ? (
+                  // key on role so a tester role-switch fully remounts the tree at
+                  // its root (lands on the new role's Dashboard, like a fresh login).
+                  <RepTabs key={profile.role} />
+                ) : (
+                  <AdminTabs key={profile.role} />
+                )}
+              </NavigationContainer>
+            </ErrorBoundary>
             <TesterBadge />
           </>
         )}

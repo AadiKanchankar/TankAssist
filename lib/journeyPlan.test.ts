@@ -118,6 +118,22 @@ assert.equal(planDateFor(new Date(2026, 0, 9, 23, 30)), '2026-01-09', 'zero-padd
   assert.doesNotMatch(lateOffPlan.reason, /not on the approved plan for this day/);
 }
 
+// ── auto-closed: surfaced, but soft ───────────────────────────────────────
+// A flat battery is the usual cause, not dishonesty. The point of the flag is
+// that the end time is a system default, not something anyone observed.
+{
+  assert.deepEqual(flagsForVisit(visit({ auto_closed: false }), plan(), null, haversineKm), []);
+  assert.deepEqual(flagsForVisit(visit({ auto_closed: null }), plan(), null, haversineKm), [],
+    'null (pre-feature row) is not a flag');
+
+  const f = flagsForVisit(visit({ auto_closed: true }), plan(), null, haversineKm);
+  assert.equal(f.length, 1);
+  assert.equal(f[0].kind, 'auto_closed');
+  assert.equal(f[0].soft, true, 'not an accusation');
+  assert.match(f[0].reason, /22:30/);
+  assert.match(f[0].reason, /not real observations/, 'says the duration is not evidence');
+}
+
 // ── ordering: hard flags first, soft ones last ────────────────────────────
 {
   const sorted = sortFlags([

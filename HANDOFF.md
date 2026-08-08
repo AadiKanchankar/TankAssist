@@ -2,18 +2,22 @@
 
 Session-state snapshot for the next Claude Code session. **Temporal** — records what is live, pending, and out of scope as of the date below. Durable architecture facts live in `CLAUDE.md`; plain-language status for the user is `PROJECT_STATUS.md`.
 
-- **Snapshot date:** 2026-08-06 (reconciled against the live DB via MCP, EAS, and git — not against the previous copy of this file)
+- **Snapshot date:** 2026-08-08 (reconciled against the live DB via MCP, EAS, and git — not against the previous copy of this file)
 - **Supabase project:** `ldgunrxceogfrohjrlxz` (live MCP access; verify before assuming)
-- **Repo:** `master`, pushed to `github.com/AadiKanchankar/TankAssist`. HEAD = the PJP + stock-category batch below.
-- **Type state:** `npx tsc --noEmit` clean. All 5 `*.test.ts` files pass (`npx tsx <file>`).
-- **`supabase-schema.sql` is CURRENT** — regenerated from live 2026-08-04 after this batch, and `graphify update .` re-run, so the graph resolves `public.journey_plans`, `public.journey_plan_stores` and `public.manages_rep()`. Verified against live: 4/4 + 3/3 policies, 6/6 bucket columns, 2/2 realtime tables.
+- **Repo:** `master`, pushed to `github.com/AadiKanchankar/TankAssist`. HEAD = the 2026-08-08 batch below.
+- **Type state:** `npx tsc --noEmit` clean. All 8 `*.test.ts` files pass (`npx tsx <file>`). `expo-doctor` 18/18.
+- **`supabase-schema.sql` is CURRENT** — regenerated from live 2026-08-08 and `graphify update .` re-run, so the graph resolves the newest objects (`auto_close_stale`, the odometer columns, the shelf bucket).
 
 ---
 
 ## What is actually live right now
 
 ### Installed build
-The newest **FINISHED** Android build is at commit **`ef195f8`** (2026-07-28), profile `preview`, channel `preview`, `runtimeVersion 1.0.0`. It contains all native modules currently in use, so **everything since then has shipped over-the-air** and no build is outstanding.
+⚠️ **Runtime moved to 1.1.0.** ML Kit made this batch build-gated; `app.json` version 1.0.0 → 1.1.0 so `runtimeVersion` changes with it and no OTA can land ML Kit-dependent JS on the old binary.
+
+Build `9759e0f6` (runtime 1.1.0, commit `c65f922`) FINISHED but is **superseded** — it predates the price/shelf/auto-checkout work. Do not install it; use the newest build.
+
+The last build the reps actually ran is `ef195f8` (2026-07-28, runtime 1.0.0) plus OTAs on top.
 
 Build history worth remembering: `048bd05` **ERRORED** (the redesign — missing `babel-preset-expo`, invalid `newArchEnabled`, duplicate `react`), fixed in `49584bf`, which built clean.
 
@@ -28,14 +32,30 @@ Newest first — all JS-only:
 `parse-excise-permit` is deployed at **version 4**, `verify_jwt: true`, files `index.ts` + `parsers.ts` + `classify.ts`. It runs on the caller's JWT — **no service-role key exists anywhere in this project.**
 
 ### Migrations applied (live, in order)
-`…phase1_roles_softban_lockdown` · `phase3_products` · `phase4_orders_stock` · `add_users_is_tester` · `create_switch_tester_role` · `products_ops_columns_and_oos` · `create_location_requests` · `excise_company_facilities` · `excise_permits_table` · `excise_allocations_and_ledger` · `excise_approve_reject_rpcs` · `excise_permits_storage_bucket` · `guard_facility_license_change` · `excise_dup_guard_validity_multiline` · `approve_excise_permit_multiline_guards` · `stock_snapshot_categories` · `journey_plans_and_mock_location_flag` · `journey_plans_realtime` · **`attendance_odometer_readings`** · **`odometer_photos_bucket`**.
+`…phase1_roles_softban_lockdown` · `phase3_products` · `phase4_orders_stock` · `add_users_is_tester` · `create_switch_tester_role` · `products_ops_columns_and_oos` · `create_location_requests` · `excise_company_facilities` · `excise_permits_table` · `excise_allocations_and_ledger` · `excise_approve_reject_rpcs` · `excise_permits_storage_bucket` · `guard_facility_license_change` · `excise_dup_guard_validity_multiline` · `approve_excise_permit_multiline_guards` · `stock_snapshot_categories` · `journey_plans_and_mock_location_flag` · `journey_plans_realtime` · **`attendance_odometer_readings`** · **`odometer_photos_bucket`** · **`order_item_server_side_pricing`** · **`stock_shelf_bucket_merge`** · **`auto_close_stale_visits`** · **`auto_close_stale_per_visit_day`**.
+
+### 2026-08-08 batch — price hiding, shelf merge, auto-checkout (same build)
+
+Folded into the SAME build as the odometer work — no separate build was cut.
+
+1. **Price hidden from reps.** The rep product fetch no longer selects price columns, all price/value/total UI is gone from the order step, and the rep now sends **quantities only**. `trg_snapshot_order_item_price` fills price from the catalog and OVERWRITES the client. Verified live: a line claiming ₹1 stored ₹15000. *Limit:* all app users share the `authenticated` Postgres role and column privileges are per-role, so prices cannot be column-revoked for reps alone without putting management's read behind a definer view — not done, flagged.
+2. **Floor + Display merged into Shelf.** New `shelf_cases`/`shelf_bottles`; merge is **forward only** — pre-merge rows keep floor/display and are summed on read by `shelfFigure()`, which returns `legacy: true` so Store Detail can say "Shelf figure combines the older separate floor and display counts". Nothing rewritten.
+3. **Auto-checkout 22:30 IST** via pg_cron job `auto-close-stale`. ⚠️ **`cron.timezone` here is `GMT`**, so the expression is `'0 17 * * *'` (17:00 UTC = 22:30 IST) — `'30 22 * * *'` would fire at 04:00 IST and close legitimately-open evening visits. Each row closes at 22:30 IST **of its own check-in day**, so the backfill and the nightly run are one code path.
+
+**Backfill result (run 2026-08-07):** 3 store_visits + 10 attendance days auto-closed; open sets went 3 → **0** and 10 → **0**. Closed at their own days' 22:30 IST (31 Jul, 4 Aug, 6 Aug), `duration_minutes` NULL, no invented positions.
+
+⚠️ **THE APP CRASH IS STILL NOT ROOT-CAUSED.** Two theories were raised and BOTH are disproven:
+- *Duplicate Realtime topic* — `RealtimeClient.channel()` dedupes and returns the existing channel, so it never throws. Real defect (unmount kills the sibling's subscription) but not a crash.
+- *useProducts throwing under Suspense* — `suspense` appears nowhere in the codebase and the QueryClient sets no suspense option; React Query v5 surfaces errors via `isError` and never throws to a boundary. This mechanism does not exist here.
+
+Supabase api/realtime logs were empty for the window, so there is no server-side trace. `components/ErrorBoundary.tsx` now wraps the navigation tree: a render error shows a readable, selectable stack instead of unmounting to nothing. **That is a net, not a fix** — the next occurrence is diagnosable in one message. The outstanding input needed is the actual repro: at launch or on a specific screen/tap, and in which role.
 
 ### 2026-08-06 batch — rep bug fixes + odometer OCR (ONE new EAS build)
 
 **This batch is build-gated, not OTA.** ML Kit is a new native module, and `app.json` `version` moved **1.0.0 → 1.1.0** so `runtimeVersion` changes with it — otherwise a later `eas update` could push ML Kit-dependent JS onto the old `ef195f8` binary and white-screen it at import.
 
 Root causes differed from what the task file guessed on all three reported bugs:
-1. **Plan-review crash** — NOT the null manager. `usePlanSubmissions` hardcoded the Realtime topic `'journey-plan-submissions'` and mounts in **two places at once** (Team stays mounted under the pushed queue); Realtime rejects a second subscribe on one topic. Now `journey-plans-${useId()}`. Two further real bugs found alongside: plan approval **silently no-opped** when RLS matched 0 rows (now `.select()` + honest error), and a rep with no `assigned_manager_id` is invisible to every SM (now stated on the card).
+1. **Plan-review "crash"** — NOT the null manager, and (established 2026-08-08) **not actually a crash**. `usePlanSubmissions` hardcoded the Realtime topic and mounts in two places at once (Team stays mounted under the pushed queue), but `RealtimeClient.channel()` dedupes, so the second subscribe never throws — the real defect is that the queue's unmount `removeChannel`s the shared instance and silently kills Team's subscription. Fixed with `journey-plans-${useId()}`. Two further real bugs found alongside: plan approval **silently no-opped** when RLS matched 0 rows (now `.select()` + honest error), and a rep with no `assigned_manager_id` is invisible to every SM (now stated on the card).
 2. **Check-in from store search did nothing** — NOT a nav-param regression. The dashboard `ScrollView` lacked `keyboardShouldPersistTaps`, so the keyboard-dismiss gesture ate the tap. Pre-existing, unrelated to the plan work. Same fix applied to the dev component gallery.
 3. **Store Detail chips collided** — `breakdownChip` styled a `Text` with background+padding; RN draws that box from the line box, so `Type.caption`'s lineHeight overflowed and wrapped chips overlapped. Now a `View` wrapper + inner `Text` (the pattern `products.tsx:603` already used).
 
@@ -146,6 +166,8 @@ Everything below is installed and OTA-current on the `ef195f8` build; none of it
 14. **Store de-dup** — try to add a store ~30 m from an existing one, and separately with a transposed name ("Sruaj" vs "Suraj"); confirm both offer the existing store and that "No — this is a new store" still creates one.
 
 ### On-device pass for the 1.1.0 build — run these in ONE session, in order
+**0. CRASH FIRST, before anything else.** (a) Walk the exact path that crashed on the previous build and confirm it no longer does — tsc-clean never proves a crash gone. (b) Prove the ErrorBoundary actually catches and renders rather than white-screening: turn off the network, open the order step, and confirm you get the readable error screen with a stack, not a blank app. Only then move on to OCR.
+
 1. **PJP end-to-end** — submit a plan → manager sees it live (Realtime, no pull) → approve / send-back-with-reason → rep edits and resubmits. **Open the review queue from Team while Team is still mounted** — that is the exact path that used to crash.
 2. **Mock location** — needs a SECOND Android device with a mock-location app. The only item that cannot be checked any other way.
 3. **Resume visit** — check in, type stock + notes, kill the app, reopen: banner appears, resume restores the typed numbers and step. Check out, confirm the banner clears.
@@ -180,12 +202,8 @@ Everything below is installed and OTA-current on the `ef195f8` build; none of it
 4. Complete files only; `npx tsc --noEmit` after each change.
 5. STOP and report after each numbered phase; do not self-continue.
 
-## ⚠️ Data hygiene the owner asked to be reminded about
-**Abandoned open rows exist in live data and were deliberately NOT auto-closed** — the owner will decide their cleanup separately.
-- **3 `store_visits`** with `check_out_time is null`, two of them days old (2026-07-31, 2026-08-04). Resume ignores anything before today, so they cause no UX harm, but they will never close on their own.
-- **Several open `attendance` rows** across reps (Aadi 3, Pranoy 2, Shreeyash 3, Johnie 1, Varad 1 as of 2026-08-06) — an open attendance row means a day that was never punched out, so it has no market-time or distance figure.
-
-Neither is code; both are data decisions. Ask before writing any bulk close-out.
+## Data hygiene — RESOLVED 2026-08-07
+The previously-flagged stuck-open rows were closed by the approved `auto_close_stale()` path: **3 store_visits + 10 attendance days**, each at 22:30 IST of its own day. Open sets are now 0 and 0, and the nightly cron prevents recurrence. They are marked `auto_closed` and appear as soft flags in the exception queue.
 
 ## Next actionable step
 Fill the two data blockers (facility rows; `unit_of_measure` on *Tank 90 z*), then walk the excise happy path on device — that is the only part of the pipeline never exercised end-to-end with real data. Adding the facility rows also unblocks the inventory-movement backfill noted above.

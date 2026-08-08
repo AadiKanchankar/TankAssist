@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '../lib/supabase';
 import { orderValue } from '../lib/orders';
-import { bucketBreakdown } from '../lib/stockBuckets';
+import { bucketBreakdown, SNAPSHOT_COLUMNS } from '../lib/stockBuckets';
 
 export interface Store {
   id: string;
@@ -40,9 +40,10 @@ export interface StockRow {
   recorded_at: string;
   recorded_by: string;
   recorder_name: string | null;
-  /** Per-bucket split. Empty for rows recorded before the floor/display/godown
-   *  split — those carry a total only, and the UI says so instead of guessing. */
-  breakdown: { label: string; cases: number; bottles: number }[];
+  /** Per-bucket split. Empty for rows recorded before buckets existed — those
+   *  carry a total only, and the UI says so instead of guessing. `legacy` marks
+   *  a shelf figure summed from the old floor+display pair. */
+  breakdown: { label: string; cases: number; bottles: number; legacy: boolean }[];
 }
 
 export interface RecentOrder {
@@ -143,9 +144,7 @@ async function fetchStoreDetail(
     supabase.from('products').select('id, name, unit').eq('is_active', true).order('name'),
     supabase
       .from('store_stock_snapshots')
-      .select(
-        'product_id, cases, bottles, floor_cases, floor_bottles, display_cases, display_bottles, godown_cases, godown_bottles, recorded_at, recorded_by'
-      )
+      .select(`product_id, ${SNAPSHOT_COLUMNS}, recorded_at, recorded_by`)
       .eq('store_id', routeStore.id)
       .order('recorded_at', { ascending: false }),
   ]);

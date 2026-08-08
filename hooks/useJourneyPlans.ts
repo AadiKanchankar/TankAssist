@@ -298,7 +298,7 @@ export function useFlaggedVisits() {
         supabase
           .from('store_visits')
           .select(
-            'id, user_id, store_id, check_in_time, latitude, longitude, distance_from_store_meters, is_mock_location',
+            'id, user_id, store_id, check_in_time, latitude, longitude, distance_from_store_meters, is_mock_location, auto_closed',
           )
           .gte('check_in_time', since)
           .order('check_in_time', { ascending: true }),
@@ -338,6 +338,7 @@ export function useFlaggedVisits() {
           longitude: v.longitude,
           distance_from_store_meters: v.distance_from_store_meters,
           is_mock_location: v.is_mock_location,
+          auto_closed: v.auto_closed,
         };
         const day = v.check_in_time ? planDateFor(new Date(v.check_in_time)) : null;
         const plan = day ? planBy[`${v.user_id}|${day}`] ?? null : null;

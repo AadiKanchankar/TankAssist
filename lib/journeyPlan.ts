@@ -69,7 +69,8 @@ export type FlagKind =
   | 'far_from_store'
   | 'impossible_movement'
   | 'off_plan'
-  | 'plan_not_approved';
+  | 'plan_not_approved'
+  | 'auto_closed';
 
 export interface VisitFlag {
   kind: FlagKind;
@@ -94,6 +95,8 @@ export interface VisitForFlags {
   longitude: number | null;
   distance_from_store_meters: number | null;
   is_mock_location: boolean | null;
+  /** Closed by the 22:30 IST sweep rather than by the rep. */
+  auto_closed?: boolean | null;
 }
 
 /**
@@ -120,7 +123,19 @@ export function flagsForVisit(
     });
   }
 
-  // 2. Distance from the store's own coordinates. Skipped when unknown.
+  // 2. Never checked out — the nightly sweep closed it. Soft: the usual cause
+  //    is a flat battery or a killed app, not dishonesty. It is surfaced so the
+  //    manager knows the visit's end time is a system default, not observed.
+  if (visit.auto_closed === true) {
+    flags.push({
+      kind: 'auto_closed',
+      reason:
+        'Not checked out — closed automatically at 22:30. The end time and duration are not real observations.',
+      soft: true,
+    });
+  }
+
+  // 3. Distance from the store's own coordinates. Skipped when unknown.
   if (
     visit.distance_from_store_meters !== null &&
     visit.distance_from_store_meters > FAR_FROM_STORE_METERS
@@ -196,6 +211,7 @@ export function sortFlags(flags: VisitFlag[]): VisitFlag[] {
     far_from_store: 2,
     off_plan: 3,
     plan_not_approved: 4,
+    auto_closed: 5,
   };
   return [...flags].sort(
     (a, b) => Number(a.soft ?? false) - Number(b.soft ?? false) || rank[a.kind] - rank[b.kind],

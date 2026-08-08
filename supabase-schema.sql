@@ -35,6 +35,10 @@
 --
 -- Re-regenerated 2026-08-06 (rep-bug + odometer batch) after 2 further
 -- migrations: attendance_odometer_readings, odometer_photos_bucket.
+--
+-- Re-regenerated 2026-08-08 after 4 further migrations:
+-- order_item_server_side_pricing, stock_shelf_bucket_merge,
+-- auto_close_stale_visits, auto_close_stale_per_visit_day.
 -- ============================================================
 
 
@@ -105,7 +109,11 @@ create table public.attendance (
   -- Odometers do not run backwards. In the DB, not just the UI, so a stale or
   -- tampered client cannot land an impossible pair.
   constraint attendance_odo_not_decreasing
-    check (odo_end is null or odo_start is null or odo_end >= odo_start)
+    check (odo_end is null or odo_start is null or odo_end >= odo_start),
+  -- true = day closed by the 22:30 IST sweep. odo_end and total_distance_km
+  -- stay NULL, so an auto-closed day contributes ZERO to travel allowance
+  -- rather than a fabricated distance.
+  auto_closed boolean not null default false
 );
 
 create table public.store_visits (
@@ -129,7 +137,11 @@ create table public.store_visits (
   -- location provider. ANDROID ONLY (expo-location fills it from
   -- Location.isFromMockProvider); iOS always records false.
   -- Flag-only — a mocked location never blocks check-in.
-  is_mock_location boolean
+  is_mock_location boolean,
+  -- true = closed by the 22:30 IST sweep, not by the rep. duration_minutes and
+  -- any checkout position stay NULL: we do not know when they actually left,
+  -- and inventing a location is worse than admitting we have none.
+  auto_closed boolean not null default false
 );
 
 create table public.daily_reports (
@@ -227,9 +239,18 @@ create table public.store_stock_snapshots (
   -- three buckets NULL (the split is unknown and is never guessed).
   cases integer not null check (cases >= 0),
   bottles integer not null check (bottles >= 0),
-  -- Three stock buckets. NULL = not recorded / not applicable (many stores
-  -- have no godown), 0 = counted and empty. A bare `check (col >= 0)` admits
-  -- NULL, which is how the >= 0 discipline coexists with absent != zero.
+  -- Stock buckets. NULL = not recorded / not applicable (many stores have no
+  -- godown), 0 = counted and empty. A bare `check (col >= 0)` admits NULL,
+  -- which is how the >= 0 discipline coexists with absent != zero.
+  --
+  -- TWO buckets since 2026-08-07: shelf + godown. Floor and Display turned out
+  -- to be the same thing in the field and merged. The merge is FORWARD ONLY --
+  -- this table is append-only, so pre-merge rows keep floor/display and are
+  -- summed on READ by shelfFigure() in lib/stockBuckets.ts, which marks the
+  -- result `legacy` so the UI never passes it off as a single shelf count.
+  shelf_cases integer check (shelf_cases >= 0),
+  shelf_bottles integer check (shelf_bottles >= 0),
+  -- LEGACY (pre 2026-08-07), read-only. Never written by the app again.
   floor_cases integer check (floor_cases >= 0),
   floor_bottles integer check (floor_bottles >= 0),
   display_cases integer check (display_cases >= 0),
@@ -422,6 +443,58 @@ as $function$
        and (public.get_my_role() = 'management'
          or (public.get_my_role() = 'sales_manager' and u.assigned_manager_id = auth.uid()))
   );
+$function$;
+
+-- Server-side price snapshot for order lines. Fills price from the catalog and
+-- OVERWRITES whatever the client sent, so a rep never needs prices on device
+-- and a tampered client cannot dictate one. Order value = catalog price x rep
+-- quantities. Fires after trg_reject_oos_order_item (same BEFORE INSERT
+-- timing, alphabetical order, 'r' < 's'), so an OOS line is refused first.
+create or replace function public.snapshot_order_item_price()
+  returns trigger language plpgsql security definer set search_path to ''
+as $function$
+begin
+  select p.price_per_case, p.price_per_bottle
+    into new.price_per_case, new.price_per_bottle
+    from public.products p
+   where p.id = new.product_id;
+  return new;
+end
+$function$;
+
+-- Nightly sweep: close anything left open. Each row closes at 22:30
+-- Asia/Kolkata OF ITS OWN check-in day, not "today 22:30" -- a visit left open
+-- on 31 Jul must not be stamped with a 7-day duration. That also makes the
+-- one-time backfill and the nightly cron literally the same code path.
+--
+-- ⚠️ cron.timezone on this project is 'GMT', so the schedule below is written
+-- in UTC. India has no DST; 17:00 UTC is always 22:30 IST.
+create or replace function public.auto_close_stale()
+  returns table(visits integer, days integer)
+  language plpgsql security definer set search_path to ''
+as $function$
+declare v integer; a integer;
+begin
+  update public.store_visits
+     set check_out_time = (date_trunc('day', check_in_time at time zone 'Asia/Kolkata')
+                            + interval '22 hours 30 minutes') at time zone 'Asia/Kolkata',
+         auto_closed = true
+   where check_out_time is null and check_in_time is not null
+     and (date_trunc('day', check_in_time at time zone 'Asia/Kolkata')
+           + interval '22 hours 30 minutes') at time zone 'Asia/Kolkata' <= now();
+  get diagnostics v = row_count;
+
+  update public.attendance
+     set check_out_time = (date_trunc('day', check_in_time at time zone 'Asia/Kolkata')
+                            + interval '22 hours 30 minutes') at time zone 'Asia/Kolkata',
+         auto_closed = true
+   where check_out_time is null and check_in_time is not null
+     and (date_trunc('day', check_in_time at time zone 'Asia/Kolkata')
+           + interval '22 hours 30 minutes') at time zone 'Asia/Kolkata' <= now();
+  get diagnostics a = row_count;
+
+  return query select v, a;
+end
 $function$;
 
 create or replace function public.get_sales_managers()
@@ -684,6 +757,13 @@ create trigger trg_reject_oos_order_item
 create trigger trg_guard_facility_license
   before update on public.company_facilities
   for each row execute function public.guard_facility_license_change();
+
+-- Fires AFTER trg_reject_oos_order_item: same table, same BEFORE INSERT
+-- timing, and Postgres runs same-timing triggers in NAME order ('r' < 's'),
+-- so an out-of-stock line is rejected before anything is priced.
+create trigger trg_snapshot_order_item_price
+  before insert on public.order_items
+  for each row execute function public.snapshot_order_item_price();
 
 
 -- ============================================================
@@ -999,6 +1079,8 @@ revoke execute on function public.switch_tester_role(text)          from anon, p
 revoke execute on function public.approve_excise_permit(uuid)       from anon, public;
 revoke execute on function public.reject_excise_permit(uuid, text)  from anon, public;
 revoke execute on function public.manages_rep(uuid)                 from anon, public;
+-- Cron-only. No app role may invoke the sweep.
+revoke execute on function public.auto_close_stale()                from anon, public, authenticated;
 
 grant execute on function public.get_my_role()                      to authenticated, service_role;
 grant execute on function public.get_sales_managers()               to authenticated;
@@ -1052,6 +1134,23 @@ grant execute on function public.manages_rep(uuid)                  to authentic
 --   number on screen before saving and never needs the stored object back.
 --   Signing an odometer path MUST pass ODOMETER_BUCKET explicitly (lib/storage.ts),
 --   the same lesson as PERMITS_BUCKET.
+
+
+-- ============================================================
+-- 8b. SCHEDULED JOBS (pg_cron)
+-- ============================================================
+-- extension pg_cron lives in schema `extensions`.
+--
+-- ⚠️ cron.timezone on this project is 'GMT', NOT Asia/Kolkata. The expression
+-- below is therefore written in UTC: 17:00 UTC = 22:30 IST. Writing
+-- '30 22 * * *' would fire at 04:00 IST and close visits that are legitimately
+-- still open for the evening. India has no DST, so the offset is fixed.
+--
+-- The function computes its own IST cutoff independently, so the schedule only
+-- decides WHEN TO LOOK; the IST arithmetic is the authority.
+--
+--   select cron.schedule('auto-close-stale', '0 17 * * *',
+--                        $$select public.auto_close_stale()$$);
 
 
 -- ============================================================

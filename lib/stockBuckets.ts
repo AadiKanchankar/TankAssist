@@ -14,18 +14,27 @@
  * are what every pre-existing reader uses; the buckets are the breakdown.
  */
 
-export const STOCK_BUCKETS = ['floor', 'display', 'godown'] as const;
+/**
+ * TWO buckets since 2026-08-07. Floor and Display turned out to be the same
+ * thing in the field, so they merged into `shelf`.
+ *
+ * MERGE FORWARD: `store_stock_snapshots` is append-only, so pre-merge rows keep
+ * their floor and display values and are summed on READ (see shelfFigure).
+ * Nothing is rewritten to fit the newer model.
+ */
+export const STOCK_BUCKETS = ['shelf', 'godown'] as const;
 export type StockBucket = (typeof STOCK_BUCKETS)[number];
 
+/** Buckets that existed before the merge. Read-only; never written again. */
+export const LEGACY_BUCKETS = ['floor', 'display'] as const;
+
 export const BUCKET_LABEL: Record<StockBucket, string> = {
-  floor: 'Floor stock',
-  display: 'Display stock',
+  shelf: 'Shelf stock',
   godown: 'Godown stock',
 };
 
 export const BUCKET_HINT: Record<StockBucket, string> = {
-  floor: 'In the store, not on the shelves',
-  display: 'On the shelves and display',
+  shelf: 'Everything in the store — on the shelves and in back stock',
   godown: 'Leave blank if this store has no godown',
 };
 
@@ -37,8 +46,7 @@ export interface BucketEntry {
 export type BucketEntries = Record<StockBucket, BucketEntry>;
 
 export const emptyBuckets = (): BucketEntries => ({
-  floor: { cases: '', bottles: '' },
-  display: { cases: '', bottles: '' },
+  shelf: { cases: '', bottles: '' },
   godown: { cases: '', bottles: '' },
 });
 
@@ -92,26 +100,29 @@ export function snapshotPayload(b: BucketEntries, perCase: number) {
     if (isBlank(b?.[k])) return { cases: null, bottles: null };
     return { cases: toInt(b[k].cases), bottles: toInt(b[k].bottles) };
   };
-  const floor = col('floor');
-  const display = col('display');
+  const shelf = col('shelf');
   const godown = col('godown');
   const totals = bucketTotals(b, per);
+  // The floor and display columns are deliberately absent: they are read-only
+  // columns now, and writing them again would resurrect a distinction the
+  // field told us does not exist.
   return {
     cases: totals.cases,
     bottles: totals.bottles,
-    floor_cases: floor.cases,
-    floor_bottles: floor.bottles,
-    display_cases: display.cases,
-    display_bottles: display.bottles,
+    shelf_cases: shelf.cases,
+    shelf_bottles: shelf.bottles,
     godown_cases: godown.cases,
     godown_bottles: godown.bottles,
   };
 }
 
-/** A snapshot row as read back from the DB. Legacy rows have null buckets. */
+/** A snapshot row as read back from the DB. Pre-split rows have null buckets. */
 export interface SnapshotRow {
   cases: number;
   bottles: number;
+  shelf_cases: number | null;
+  shelf_bottles: number | null;
+  /** Pre-merge (before 2026-08-07). Summed into shelf on read, never written. */
   floor_cases: number | null;
   floor_bottles: number | null;
   display_cases: number | null;
@@ -120,18 +131,64 @@ export interface SnapshotRow {
   godown_bottles: number | null;
 }
 
+/** Columns to request; every reader needs the legacy pair to resolve shelf. */
+export const SNAPSHOT_COLUMNS =
+  'cases, bottles, shelf_cases, shelf_bottles, floor_cases, floor_bottles, display_cases, display_bottles, godown_cases, godown_bottles';
+
+/**
+ * Shelf figure for a row, resolving the floor+display merge.
+ *
+ * Returns `{ value, legacy }` — `legacy` true when the number came from summing
+ * the old floor and display columns. Callers MUST surface that: the figure is a
+ * sum of two separate readings taken at capture time, not a single shelf count
+ * that was ever recorded as such. Same honesty rule as the unattributed ledger
+ * rows: present what the data actually is, never imply more precision.
+ *
+ * Null-vs-zero survives the merge — if both legacy buckets are null the shelf is
+ * null ("not recorded"), not 0.
+ */
+export function shelfFigure(
+  row: SnapshotRow,
+  field: 'cases' | 'bottles',
+): { value: number | null; legacy: boolean } {
+  const modern = row[`shelf_${field}` as keyof SnapshotRow] as number | null;
+  if (modern !== null && modern !== undefined) return { value: modern, legacy: false };
+  const f = row[`floor_${field}` as keyof SnapshotRow] as number | null;
+  const d = row[`display_${field}` as keyof SnapshotRow] as number | null;
+  if ((f === null || f === undefined) && (d === null || d === undefined)) {
+    return { value: null, legacy: false };
+  }
+  return { value: (f ?? 0) + (d ?? 0), legacy: true };
+}
+
 /**
  * "2 cs / 5 btl" per recorded bucket. Empty array for a legacy row whose split
  * was never captured — callers show the total plus "breakdown not recorded"
  * rather than inventing a split we do not have.
  */
-export function bucketBreakdown(row: SnapshotRow): { label: string; cases: number; bottles: number }[] {
-  const out: { label: string; cases: number; bottles: number }[] = [];
-  for (const k of STOCK_BUCKETS) {
-    const c = row[`${k}_cases` as keyof SnapshotRow] as number | null;
-    const b = row[`${k}_bottles` as keyof SnapshotRow] as number | null;
-    if (c === null && b === null) continue;
-    out.push({ label: BUCKET_LABEL[k], cases: c ?? 0, bottles: b ?? 0 });
+export function bucketBreakdown(
+  row: SnapshotRow,
+): { label: string; cases: number; bottles: number; legacy: boolean }[] {
+  const out: { label: string; cases: number; bottles: number; legacy: boolean }[] = [];
+
+  // Shelf resolves the merge; `legacy` marks a figure summed from the old
+  // floor+display pair so the UI can say so rather than passing it off as a
+  // single shelf reading that was never actually taken.
+  const sc = shelfFigure(row, 'cases');
+  const sb = shelfFigure(row, 'bottles');
+  if (sc.value !== null || sb.value !== null) {
+    out.push({
+      label: BUCKET_LABEL.shelf,
+      cases: sc.value ?? 0,
+      bottles: sb.value ?? 0,
+      legacy: sc.legacy || sb.legacy,
+    });
+  }
+
+  const gc = row.godown_cases;
+  const gb = row.godown_bottles;
+  if (gc !== null || gb !== null) {
+    out.push({ label: BUCKET_LABEL.godown, cases: gc ?? 0, bottles: gb ?? 0, legacy: false });
   }
   return out;
 }
