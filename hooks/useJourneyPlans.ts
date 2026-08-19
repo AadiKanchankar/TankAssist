@@ -10,6 +10,7 @@ import {
   flagsForVisit,
   sortFlags,
   planDateFor,
+  planCutoffDate,
 } from '../lib/journeyPlan';
 import { mismatchFlag } from '../lib/odometer';
 
@@ -119,25 +120,67 @@ export interface PendingPlan extends JourneyPlan {
   rep_has_manager: boolean;
 }
 
-/** Plans awaiting this manager's approval. RLS scopes to reps they own. */
-export function usePendingPlans() {
+export interface PendingPlans {
+  plans: PendingPlan[];
+  /**
+   * Submitted plans too old to be worth approving, which this list deliberately
+   * omits. Surfaced as a COUNT so the empty state can say "4 older plans are no
+   * longer actionable" — a bare "nothing waiting" over a silently dropped pile
+   * would tell the manager they were done when they were not.
+   */
+  staleCount: number;
+}
+
+/**
+ * Plans awaiting this manager's approval. RLS scopes to reps they own.
+ *
+ * Scoped to PLAN_ACTIONABLE_DAYS: the query was previously unbounded and
+ * returned every submitted plan ever, which is both the slowness and the
+ * clutter — live data held 4 submitted plans, all 10-12 days old, none of them
+ * still meaningful to approve.
+ */
+export function usePendingPlans(viewerId?: string) {
   return useQuery({
-    queryKey: ['pending-plans'],
+    queryKey: ['pending-plans', viewerId],
     refetchOnMount: false,
-    queryFn: async (): Promise<PendingPlan[]> => {
-      const { data, error } = await supabase
+    queryFn: async (): Promise<PendingPlans> => {
+      const cutoff = planCutoffDate();
+      // Exclude plans the VIEWER submitted. The read policy lets you see your
+      // own plans (rep_id = auth.uid()), but nobody manages themselves, so
+      // yours can never be approved by you. Listing them as "awaiting your
+      // approval" is what made three live plans look permanently broken —
+      // visible in the queue, refused on every tap.
+      const listBase = supabase
         .from('journey_plans')
         .select(SELECT)
         .eq('status', 'submitted')
-        .order('submitted_at', { ascending: true });
+        .gte('plan_date', cutoff);
+      // head:true — we want the number, not the rows.
+      const staleBase = supabase
+        .from('journey_plans')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'submitted')
+        .lt('plan_date', cutoff);
+
+      const [{ data, error }, { count, error: countError }] = await Promise.all([
+        (viewerId ? listBase.neq('rep_id', viewerId) : listBase).order('submitted_at', {
+          ascending: true,
+        }),
+        viewerId ? staleBase.neq('rep_id', viewerId) : staleBase,
+      ]);
       if (error) throw error;
+      if (countError) throw countError;
+
       const rows = (data ?? []).map(shape);
       const info = await repInfo(rows.map((r) => r.rep_id));
-      return rows.map((r) => ({
-        ...r,
-        rep_name: info[r.rep_id]?.name ?? 'Unknown rep',
-        rep_has_manager: info[r.rep_id]?.hasManager ?? false,
-      }));
+      return {
+        plans: rows.map((r) => ({
+          ...r,
+          rep_name: info[r.rep_id]?.name ?? 'Unknown rep',
+          rep_has_manager: info[r.rep_id]?.hasManager ?? false,
+        })),
+        staleCount: count ?? 0,
+      };
     },
   });
 }
@@ -167,6 +210,39 @@ async function repInfo(ids: (string | null)[]): Promise<Record<string, RepInfo>>
     out[u.id] = { name: u.name ?? 'Unknown rep', hasManager: !!u.assigned_manager_id };
   }
   return out;
+}
+
+/**
+ * Why a review update matched no rows.
+ *
+ * Called only on the failure path, so the extra round-trip costs nothing in
+ * the normal case. Distinguishes the causes that actually occur: already
+ * reviewed (by whom), your own plan, or genuinely not yours.
+ */
+async function explainFailedReview(planId: string, reviewerId?: string): Promise<string> {
+  const { data } = await supabase
+    .from('journey_plans')
+    .select('status, rep_id, reviewed_by')
+    .eq('id', planId)
+    .maybeSingle();
+
+  if (!data) return 'This plan is no longer visible to you. Pull to refresh.';
+
+  const row = data as { status: PlanStatus; rep_id: string; reviewed_by: string | null };
+
+  if (row.status !== 'submitted') {
+    const who = row.reviewed_by ? (await repInfo([row.reviewed_by]))[row.reviewed_by]?.name : null;
+    const verb = row.status === 'approved' ? 'approved' : 'sent back';
+    return who
+      ? `Already ${verb} by ${who}. Pull to refresh.`
+      : `This plan was already ${verb}. Pull to refresh.`;
+  }
+
+  if (reviewerId && row.rep_id === reviewerId) {
+    return 'This is your own plan — it has to be reviewed by someone else.';
+  }
+
+  return 'This rep is not assigned to you, so their plan is not yours to review.';
 }
 
 /**
@@ -205,10 +281,12 @@ export function useReviewPlan(reviewerId: string | undefined) {
         .select('id');
       if (error) throw error;
       if (!data || data.length === 0) {
-        throw new Error(
-          'This plan is no longer yours to review — it may have been reviewed already, ' +
-            'or the rep is not assigned to you. Pull to refresh.',
-        );
+        // 0 rows has several distinct causes and the old message guessed at
+        // them ("reviewed already, or the rep is not assigned to you"), which
+        // was wrong for every stuck plan. Read the row back and say what
+        // actually happened — including WHO reviewed it, per the idempotency
+        // requirement, so a second approve is answered with a fact.
+        throw new Error(await explainFailedReview(planId, reviewerId));
       }
     },
     onSuccess: () => {
@@ -283,6 +361,51 @@ export interface FlaggedDay {
 const QUEUE_DAYS = 7;
 
 /**
+ * Hard cap on visits scanned per queue open.
+ *
+ * A 7-day window is normally far under this; the cap exists so one abnormal
+ * week (or a manager with a large team) cannot turn the queue into an
+ * unbounded fetch. Flags are derived client-side, so the row count is real
+ * work, not just transfer.
+ */
+const VISIT_SCAN_LIMIT = 500;
+
+/**
+ * How many work artifacts each visit produced, keyed by visit id.
+ *
+ * Three narrow selects of just `visit_id` rather than a counting RPC: the ids
+ * are already in hand and the window is bounded to QUEUE_DAYS, so adding a
+ * database object for a tally the client can do would be the expensive way
+ * round.
+ *
+ * A failure here THROWS rather than returning partial counts. A missing row
+ * reads as "this rep recorded nothing", so silently swallowing a network error
+ * would accuse every honest rep in the window — the one direction this flag
+ * must never fail in.
+ */
+async function artifactCounts(visitIds: string[]): Promise<Record<string, number>> {
+  const out: Record<string, number> = {};
+  if (!visitIds.length) return out;
+
+  const results = await Promise.all([
+    supabase.from('store_visit_photos').select('visit_id').in('visit_id', visitIds),
+    supabase.from('store_stock_snapshots').select('visit_id').in('visit_id', visitIds),
+    supabase.from('orders').select('visit_id').in('visit_id', visitIds),
+    // A challan logged inside a visit is work done at that shop, so it must
+    // count — otherwise a rep whose only task there was recording a delivery
+    // gets accused of a phantom visit.
+    supabase.from('challans').select('visit_id').in('visit_id', visitIds),
+  ]);
+  for (const { data, error } of results) {
+    if (error) throw error;
+    for (const row of (data as { visit_id: string | null }[]) ?? []) {
+      if (row.visit_id) out[row.visit_id] = (out[row.visit_id] ?? 0) + 1;
+    }
+  }
+  return out;
+}
+
+/**
  * Visits with at least one flag, newest first — the manager reviews THESE, not
  * all activity. Every flag but mock-location is derived here rather than
  * stored, so a client that skips a check still gets caught, and an approved
@@ -294,28 +417,40 @@ export function useFlaggedVisits() {
     refetchOnMount: false,
     queryFn: async (): Promise<FlaggedVisit[]> => {
       const since = new Date(Date.now() - QUEUE_DAYS * 86_400_000).toISOString();
-      const [{ data: visits, error }, { data: stores }] = await Promise.all([
-        supabase
-          .from('store_visits')
-          .select(
-            'id, user_id, store_id, check_in_time, latitude, longitude, distance_from_store_meters, is_mock_location, auto_closed',
-          )
-          .gte('check_in_time', since)
-          .order('check_in_time', { ascending: true }),
-        supabase.from('stores').select('id, name'),
-      ]);
+      const { data: visits, error } = await supabase
+        .from('store_visits')
+        .select(
+          'id, user_id, store_id, check_in_time, check_out_time, notes, latitude, longitude, distance_from_store_meters, is_mock_location, auto_closed',
+        )
+        .gte('check_in_time', since)
+        // Newest first so the cap keeps the RECENT window when a busy week
+        // exceeds it — an ascending limit would keep the oldest and silently
+        // hide today's flags, the exact opposite of what a queue is for.
+        .order('check_in_time', { ascending: false })
+        .limit(VISIT_SCAN_LIMIT);
       if (error) throw error;
-      const rows = (visits as any[]) ?? [];
+      // Back to chronological: the movement check compares each visit with the
+      // same rep's PREVIOUS one, which only holds in time order.
+      const rows = ((visits as any[]) ?? []).reverse();
       if (!rows.length) return [];
+
+      const storeIds = [...new Set(rows.map((v) => v.store_id).filter(Boolean))];
+
+      // One parallel wave. These were three sequential round-trips, and the
+      // store lookup fetched the ENTIRE stores table to build a name map.
+      const [artifacts, { data: stores }, { data: planRows }] = await Promise.all([
+        artifactCounts(rows.map((v) => v.id)),
+        supabase.from('stores').select('id, name').in('id', storeIds),
+        supabase
+          .from('journey_plans')
+          .select(SELECT)
+          .gte('plan_date', planDateFor(new Date(Date.now() - QUEUE_DAYS * 86_400_000))),
+      ]);
 
       const storeName: Record<string, string> = {};
       for (const s of stores ?? []) storeName[s.id] = s.name;
 
       // Plans covering the same window, keyed rep|local-date.
-      const { data: planRows } = await supabase
-        .from('journey_plans')
-        .select(SELECT)
-        .gte('plan_date', planDateFor(new Date(Date.now() - QUEUE_DAYS * 86_400_000)));
       const planBy: Record<string, JourneyPlan> = {};
       for (const p of planRows ?? []) {
         const s = shape(p);
@@ -334,11 +469,15 @@ export function useFlaggedVisits() {
           id: v.id,
           store_id: v.store_id,
           check_in_time: v.check_in_time,
+          check_out_time: v.check_out_time,
           latitude: v.latitude,
           longitude: v.longitude,
           distance_from_store_meters: v.distance_from_store_meters,
           is_mock_location: v.is_mock_location,
           auto_closed: v.auto_closed,
+          // A written note is work too, so it counts against the phantom-visit
+          // flag even though it carries no timestamp of its own.
+          artifact_count: (artifacts[v.id] ?? 0) + (v.notes?.trim() ? 1 : 0),
         };
         const day = v.check_in_time ? planDateFor(new Date(v.check_in_time)) : null;
         const plan = day ? planBy[`${v.user_id}|${day}`] ?? null : null;

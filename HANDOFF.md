@@ -2,15 +2,27 @@
 
 Session-state snapshot for the next Claude Code session. **Temporal** — records what is live, pending, and out of scope as of the date below. Durable architecture facts live in `CLAUDE.md`; plain-language status for the user is `PROJECT_STATUS.md`.
 
-- **Snapshot date:** 2026-08-08 (reconciled against the live DB via MCP, EAS, and git — not against the previous copy of this file)
+- **Snapshot date:** 2026-08-19 (reconciled against the live DB via MCP and git)
 - **Supabase project:** `ldgunrxceogfrohjrlxz` (live MCP access; verify before assuming)
-- **Repo:** `master`, pushed to `github.com/AadiKanchankar/TankAssist`. HEAD = the 2026-08-08 batch below.
-- **Type state:** `npx tsc --noEmit` clean. All 8 `*.test.ts` files pass (`npx tsx <file>`). `expo-doctor` 18/18.
-- **`supabase-schema.sql` is CURRENT** — regenerated from live 2026-08-08 and `graphify update .` re-run, so the graph resolves the newest objects (`auto_close_stale`, the odometer columns, the shelf bucket).
+- **Repo:** `master`, pushed to `github.com/AadiKanchankar/TankAssist`.
+- **Type state:** `npx tsc --noEmit` clean. `*.test.ts` files pass (`npx tsx <file>`). `expo-doctor` **18/18** after `npx expo install --fix` cleared patch drift on `expo`, `expo-file-system`, `expo-location`, `expo-sharing`, `expo-updates`.
+- **⚠️ `supabase-schema.sql` is STALE** — it predates the 2026-08-19 batch: `challans`/`challan_items`, `push_tokens`, the scoped manager-read policies, the rewritten `manages_rep`, `notify_plan_submitted` + its trigger, `pg_net`, and 7 new indexes. **Regenerate it from live via MCP before trusting it**, and do not hand-edit.
 
 ---
 
 ## What is actually live right now
+
+### 2026-08-19 batch — time-in-store, challans, review queue, push (NOT YET BUILT)
+All DB work is **applied to live** and impersonation-tested. The client code is written and `tsc`-clean but **no EAS build has been cut**, so none of it is on a device yet.
+
+- **§1 time-in-store** — derived `no_work_recorded` flag only. The artifact-**span** design was rejected against live data (spans 0.00–0.54 min vs tap gaps up to 14 min) because the stepper flushes every artifact at check-out; see CLAUDE.md. 10 of 24 rep-closed visits would flag all-time, **1** inside the 7-day queue window.
+- **§2 challans** — `challans` + `challan_items` + `challan-photos` bucket, 9/9 RLS checks passed. **No manager-facing screen yet.** Auto-OCR deliberately out of scope. No `updated_at`, so corrections leave no audit trail.
+- **§3 review queue** — cross-manager leakage fixed (was 27 visits + 19 attendance rows leaked to a sales_manager owning 1 rep), 7 indexes, virtualized 3-section rebuild, 7-day plan freshness, and the approve fix. **Root cause of "broken approve" was NOT the silent-RLS-noop class** — it was `manages_rep` requiring `role='rep'`, which permanently stranded 3 plans authored via the tester role-switch.
+- **§3.5 push** — `push_tokens` + `register_push_token` + `notify_plan_submitted` trigger via `pg_net` → Expo. 8/8 RLS checks passed. **Pre-build end-to-end test passed:** Expo returned HTTP 200 and parsed our payload, rejecting the deliberately fake token with `DeviceNotRegistered`. That validates trigger → Expo; it does **NOT** validate the FCM credential, which is only exercised once a real device token exists.
+
+**Blocking the build:** the FCM service-account key must be uploaded via `eas credentials` → Android → *Push Notifications: FCM V1*. Then `eas build --profile preview --platform android`.
+
+⚠️ **Never put the service-account key in the repo, the database, or Supabase Vault.** Vault holds zero secrets and the trigger reads none, by design.
 
 ### Installed build
 ⚠️ **Runtime moved to 1.1.0.** ML Kit made this batch build-gated; `app.json` version 1.0.0 → 1.1.0 so `runtimeVersion` changes with it and no OTA can land ML Kit-dependent JS on the old binary.

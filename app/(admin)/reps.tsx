@@ -87,10 +87,14 @@ export default function AdminTeamScreen({ navigation }: { navigation: any }) {
   const insets = useSafeAreaInsets();
   const isManagement = profile?.role === 'management';
   const { data, refetch, isPending, isError } = useTeam(profile?.role);
-  const { data: plansData, refetch: refetchPlans } = usePendingPlans();
+  const { data: plansData, refetch: refetchPlans } = usePendingPlans(profile?.id);
   const { data: flaggedData, refetch: refetchFlagged } = useFlaggedVisits();
   const { data: odoData, refetch: refetchOdo } = useOdometerFlags();
-  const pendingPlans = plansData ?? [];
+  // Only the ACTIONABLE plans count toward the badge — a stale plan the queue
+  // no longer offers for approval must not keep the badge lit forever.
+  // Only the ACTIONABLE plans count toward the badge — stale ones, and the
+  // viewer's own (nobody reviews their own plan), must not keep it lit.
+  const pendingPlans = plansData?.plans ?? [];
   const flaggedVisits = flaggedData ?? [];
   const odoMismatches = odoData ?? [];
   const reviewCount = pendingPlans.length + flaggedVisits.length + odoMismatches.length;

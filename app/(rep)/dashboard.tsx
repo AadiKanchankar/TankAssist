@@ -492,6 +492,38 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
           </MotiView>
         ) : null}
 
+        {/* Delivery challan. Store and visit are prefilled from the open visit
+            when there is one; with no visit open the screen asks which store,
+            so a challan is never blocked on being checked in. */}
+        <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
+          <BentoTile>
+            <View style={styles.resumeHead}>
+              <Ionicons name="document-text-outline" size={20} color={Colors.accent} />
+              <View style={{ flex: 1 }}>
+                <Text style={[Type.bodyMed, { color: Colors.text }]}>Delivery challan</Text>
+                <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]}>
+                  {openVisit
+                    ? `Photograph and record one for ${openVisit.store.name}`
+                    : 'Photograph one and type in its quantities'}
+                </Text>
+              </View>
+            </View>
+            <Button
+              title="Log a challan"
+              variant="secondary"
+              onPress={() =>
+                navigation.navigate('Challan', {
+                  store: openVisit
+                    ? { id: openVisit.store.id, name: openVisit.store.name }
+                    : undefined,
+                  visitId: openVisit?.id ?? null,
+                })
+              }
+              style={{ marginTop: Space.md }}
+            />
+          </BentoTile>
+        </MotiView>
+
         {/* Today's plan — leads the day. Approval is optimistic: the rep is
             never frozen waiting on a manager, but pre-approval visits are
             flagged for review. */}

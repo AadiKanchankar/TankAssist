@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict';
 import {
   planDateFor,
+  planCutoffDate,
   nearDateBoundary,
   flagsForVisit,
   sortFlags,
@@ -47,10 +48,53 @@ const visit = (o: Partial<VisitForFlags> = {}): VisitForFlags => ({
 assert.equal(planDateFor(new Date(2026, 7, 4, 9, 0)), '2026-08-04');
 assert.equal(planDateFor(new Date(2026, 0, 9, 23, 30)), '2026-01-09', 'zero-padded');
 
+// ── plan freshness: stale plans leave the actionable queue ────────────────
+{
+  // Live data at the time of writing: 4 submitted plans dated 6-8 Aug, read on
+  // 18 Aug — every one of them stale, which is exactly the pile the cutoff is
+  // meant to clear out of the approval list.
+  const today = new Date(2026, 7, 18); // 18 Aug 2026, local
+  assert.equal(planCutoffDate(today), '2026-08-11', 'cutoff is 7 days back, local');
+  assert.ok('2026-08-08' < planCutoffDate(today), 'an 8 Aug plan is stale on 18 Aug');
+  assert.ok('2026-08-11' >= planCutoffDate(today), 'the boundary day itself stays actionable');
+  assert.ok('2026-08-18' >= planCutoffDate(today), "today's plan is actionable");
+  // Month boundaries must not produce a malformed date the query would reject.
+  assert.equal(planCutoffDate(new Date(2026, 0, 3)), '2025-12-27', 'crosses into the prior year');
+}
+
 // ── the clean case: nothing to flag ───────────────────────────────────────
 {
   const f = flagsForVisit(visit(), plan(), null, haversineKm);
   assert.deepEqual(f, [], 'an on-plan, approved, nearby, non-mocked visit is silent');
+}
+
+// ── phantom visit: checked in and out having recorded nothing ─────────────
+{
+  const closed = { check_out_time: '2026-08-04T10:20:00' };
+  const kinds = (v: Partial<VisitForFlags>) =>
+    flagsForVisit(visit(v), plan(), null, haversineKm).map((f) => f.kind);
+
+  assert.ok(
+    kinds({ ...closed, artifact_count: 0 }).includes('no_work_recorded'),
+    'a closed visit with zero artifacts is flagged',
+  );
+  assert.ok(
+    !kinds({ ...closed, artifact_count: 1 }).includes('no_work_recorded'),
+    'one artifact — a single photo, or just a note — clears it',
+  );
+  // The three ways this flag must stay silent rather than accuse.
+  assert.ok(
+    !kinds({ ...closed }).includes('no_work_recorded'),
+    'uncounted (undefined) is not zero — a caller that did not tally must not accuse',
+  );
+  assert.ok(
+    !kinds({ artifact_count: 0 }).includes('no_work_recorded'),
+    'a still-open visit has produced nothing YET, which is not nothing',
+  );
+  assert.ok(
+    !kinds({ ...closed, artifact_count: 0, auto_closed: true }).includes('no_work_recorded'),
+    'the nightly sweep already flags the row; a flat battery earns one flag, not two',
+  );
 }
 
 // ── an APPROVED plan clears the status flag; submitted/rejected do not ────

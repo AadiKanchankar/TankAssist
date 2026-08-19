@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "846225371728",
+    "project_id": "tank-assist-b33dc",
+    "storage_bucket": "tank-assist-b33dc.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:846225371728:android:f7a2eb1ac5f1463f739755",
+        "android_client_info": {
+          "package_name": "com.anonymous.TankAssistCodex"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDwGra2A9ytJocNweDPRwuEhUdS4x5CcvI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

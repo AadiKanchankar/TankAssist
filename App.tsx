@@ -42,6 +42,7 @@ import OrderDetailScreen from './app/(shared)/order-detail';
 import TesterBadge from './components/TesterBadge';
 import LocationResponder from './components/LocationResponder';
 import JourneyPlanScreen from './app/(rep)/journey-plan';
+import ChallanScreen from './app/(rep)/challan';
 import ExceptionsScreen from './app/(admin)/exceptions';
 import ErrorBoundary from './components/ErrorBoundary';
 
@@ -58,6 +59,7 @@ function RepDashboardStack() {
       <RepDashStack.Screen name="Attendance" component={AttendanceScreen} />
       <RepDashStack.Screen name="StoreVisit" component={StoreVisitScreen} />
       <RepDashStack.Screen name="JourneyPlan" component={JourneyPlanScreen} />
+      <RepDashStack.Screen name="Challan" component={ChallanScreen} />
     </RepDashStack.Navigator>
   );
 }

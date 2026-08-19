@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { supabase } from '../lib/supabase';
+import { registerPushToken, unregisterPushToken } from '../lib/push';
 import { Session, User } from '@supabase/supabase-js';
 
 interface UserProfile {
@@ -83,6 +84,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             profile,
             initialized: true,
           });
+          // Also register on app start, not only at login: someone already
+          // signed in when this build lands would otherwise never register
+          // until they happened to log out and back in. The RPC upserts, so
+          // repeating it every launch is harmless and refreshes last_seen_at.
+          void registerPushToken();
         }
       } else {
         set({ initialized: true });
@@ -158,6 +164,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Enforce one active session per rep. Runs after the new session is
       // established so it revokes the OTHER devices, not this one.
       await enforceSingleSession(profile?.role);
+      // Deliberately NOT awaited: this can raise the OS permission dialog, and
+      // blocking on it would freeze the OTP screen behind a system prompt.
+      void registerPushToken();
     } else {
       set({ loading: false });
     }
@@ -177,6 +186,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   logout: async () => {
     intentionalLogout = true;
+    // BEFORE signOut: the delete policy is user_id = auth.uid(), so once the
+    // session is gone the row cannot be removed — and the next person to hold
+    // this handset would keep receiving the previous user's notifications.
+    await unregisterPushToken();
     await supabase.auth.signOut();
     set({ session: null, user: null, profile: null, kickedOut: false });
   },
@@ -192,6 +205,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     intentionalLogout = true;
     set({ session: null, user: null, profile: null, deactivated: true });
     try {
+      // Same ordering rule as logout, and it still works for a deactivated
+      // account: the push_tokens delete policy keys off auth.uid() alone and
+      // does not go through get_my_role(), which returns NULL once inactive.
+      await unregisterPushToken();
       await supabase.auth.signOut();
     } catch {
       // Local state is already cleared; a failed server sign-out is non-fatal.

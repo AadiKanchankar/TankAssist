@@ -17,6 +17,18 @@ export const PERMIT_MIME_TYPES = ['application/pdf', 'image/jpeg', 'image/png'] 
  * already shipped once with permits.
  */
 export const ODOMETER_BUCKET = 'odometer-photos';
+/**
+ * Locked bucket for delivery-challan photos. Rep-insert; readable by the
+ * uploading rep (they need to see the photo while transcribing it) plus
+ * managers and management.
+ *
+ * That read rule is the one difference from ODOMETER_BUCKET, and it is
+ * deliberate: an odometer photo is evidence ABOUT the rep, so they must not
+ * read it back; a challan is a document the rep is transcribing FOR us.
+ *
+ * ⚠️ Same signing rule as the other locked buckets — pass this explicitly.
+ */
+export const CHALLAN_BUCKET = 'challan-photos';
 
 /** Local date as YYYY-MM-DD (used as a storage path segment). */
 function todayStr(): string {
@@ -140,6 +152,19 @@ export async function uploadOdometerPhoto(
 ): Promise<string> {
   const path = `odometer/${repId}/${todayStr()}/${which}-${Date.now()}.jpg`;
   return uploadToPath(uri, path, ODOMETER_BUCKET);
+}
+
+/**
+ * Upload a delivery-challan photo into the LOCKED challan bucket.
+ * Path: challans/{repId}/{YYYY-MM-DD}/{timestamp}.jpg
+ *
+ * Timestamped rather than keyed on the challan id, because the photo is taken
+ * BEFORE the row exists — the rep photographs the document, then transcribes
+ * it. Reading the object back needs CHALLAN_BUCKET passed explicitly.
+ */
+export async function uploadChallanPhoto(uri: string, repId: string): Promise<string> {
+  const path = `challans/${repId}/${todayStr()}/${Date.now()}.jpg`;
+  return uploadToPath(uri, path, CHALLAN_BUCKET);
 }
 
 /**

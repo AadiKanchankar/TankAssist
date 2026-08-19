@@ -47,3 +47,11 @@ graphify-out/
 
 # local agent tooling config — machine-specific absolute paths, not portable
 .claude/
+
+# ── Firebase / FCM credentials ───────────────────────────────────────────
+# The service-account key can send a notification to EVERY user of this app.
+# It belongs in EAS credentials, never in the repo. The glob is deliberate:
+# a regenerated key downloads with a DIFFERENT random suffix, so pinning only
+# the current filename would let the next one slip straight through.
+*firebase-adminsdk*.json
+tank-assist-b33dc-firebase-adminsdk-fbsvc-01f28ea115.json

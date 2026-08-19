@@ -52,6 +52,24 @@ export function planDateFor(d: Date = new Date()): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+/**
+ * How old a plan may be and still be worth approving.
+ *
+ * Approving a week-old plan is a no-op in the real world: the day it described
+ * is over, and the visits it would have authorised have already happened and
+ * been flagged (or not) on their own. Stale plans stay readable as history —
+ * they are evidence, and journey_plans has no DELETE grant — they just leave
+ * the "needs approval" list so the queue means what it says.
+ */
+export const PLAN_ACTIONABLE_DAYS = 7;
+
+/** Oldest plan_date still worth surfacing for approval, as YYYY-MM-DD. */
+export function planCutoffDate(today: Date = new Date()): string {
+  const d = new Date(today);
+  d.setDate(d.getDate() - PLAN_ACTIONABLE_DAYS);
+  return planDateFor(d);
+}
+
 /** Local hours after which a visit is close enough to midnight to be ambiguous. */
 const LATE_HOUR = 22;
 const EARLY_HOUR = 4;
@@ -70,7 +88,8 @@ export type FlagKind =
   | 'impossible_movement'
   | 'off_plan'
   | 'plan_not_approved'
-  | 'auto_closed';
+  | 'auto_closed'
+  | 'no_work_recorded';
 
 export interface VisitFlag {
   kind: FlagKind;
@@ -97,6 +116,16 @@ export interface VisitForFlags {
   is_mock_location: boolean | null;
   /** Closed by the 22:30 IST sweep rather than by the rep. */
   auto_closed?: boolean | null;
+  /** Null while the rep is still inside — an open visit has produced nothing YET. */
+  check_out_time?: string | null;
+  /**
+   * How many pieces of work this visit produced: shop/stock photos, stock
+   * snapshots, orders, and a non-empty feedback note. Counted by the caller.
+   *
+   * `undefined` means the caller did not count them, which is NOT the same as
+   * zero — the flag stays silent rather than accusing on missing input.
+   */
+  artifact_count?: number;
 }
 
 /**
@@ -135,7 +164,39 @@ export function flagsForVisit(
     });
   }
 
-  // 3. Distance from the store's own coordinates. Skipped when unknown.
+  // 3. A completed visit that produced no work at all — the phantom visit:
+  //    tapped in, tapped out, recorded nothing.
+  //
+  //    This is the PRESENCE half of "time in store". Duration itself comes from
+  //    the check-in/check-out gap (store_visits.duration_minutes), which is
+  //    client-clock and therefore spoofable; what is not spoofable from a
+  //    rep's sofa is a live shelf photo of that specific shop. So the artifact
+  //    SET is the honesty signal and the tap gap is merely the measurement.
+  //
+  //    Deliberately NOT a span: the stepper buffers photos and stock locally
+  //    and flushes them in one burst inside handleCheckOut, so every artifact
+  //    lands within seconds of check-out (verified against live data — max
+  //    observed span 33 s against tap gaps up to 14 min). last-minus-first
+  //    would measure the upload loop, not the visit, and would flag everyone.
+  //
+  //    Skipped while the visit is still open (no work YET is not no work) and
+  //    when the nightly sweep closed it — an auto_closed row already carries
+  //    its own flag saying the record is incomplete, and a rep whose battery
+  //    died should not collect a second, harsher accusation for it.
+  if (
+    visit.artifact_count !== undefined &&
+    visit.artifact_count === 0 &&
+    visit.check_out_time &&
+    visit.auto_closed !== true
+  ) {
+    flags.push({
+      kind: 'no_work_recorded',
+      reason:
+        'Checked in and out without recording anything — no photo, stock count, order or note.',
+    });
+  }
+
+  // 4. Distance from the store's own coordinates. Skipped when unknown.
   if (
     visit.distance_from_store_meters !== null &&
     visit.distance_from_store_meters > FAR_FROM_STORE_METERS
@@ -146,7 +207,7 @@ export function flagsForVisit(
     });
   }
 
-  // 3. Physically implausible movement between consecutive visits.
+  // 5. Physically implausible movement between consecutive visits.
   if (
     prevVisit &&
     prevVisit.latitude !== null && prevVisit.longitude !== null &&
@@ -168,7 +229,7 @@ export function flagsForVisit(
     }
   }
 
-  // 4. Plan status. An APPROVED plan clears this — deliberately read live, so
+  // 6. Plan status. An APPROVED plan clears this — deliberately read live, so
   //    a manager approving at noon retroactively clears the morning's visits.
   if (!plan) {
     flags.push({ kind: 'plan_not_approved', reason: 'No journey plan was submitted for this day.' });
@@ -185,7 +246,7 @@ export function flagsForVisit(
     });
   }
 
-  // 5. Off-plan store. Only meaningful once a plan exists.
+  // 7. Off-plan store. Only meaningful once a plan exists.
   if (plan && visit.store_id && !plan.store_ids.includes(visit.store_id)) {
     const ambiguous = visit.check_in_time ? nearDateBoundary(visit.check_in_time) : false;
     flags.push({
@@ -208,10 +269,13 @@ export function sortFlags(flags: VisitFlag[]): VisitFlag[] {
   const rank: Record<FlagKind, number> = {
     mock_location: 0,
     impossible_movement: 1,
-    far_from_store: 2,
-    off_plan: 3,
-    plan_not_approved: 4,
-    auto_closed: 5,
+    // Above far_from_store: 300 m can be GPS drift in a dense market, but a
+    // visit with nothing recorded in it has no innocent instrument explanation.
+    no_work_recorded: 2,
+    far_from_store: 3,
+    off_plan: 4,
+    plan_not_approved: 5,
+    auto_closed: 6,
   };
   return [...flags].sort(
     (a, b) => Number(a.soft ?? false) - Number(b.soft ?? false) || rank[a.kind] - rank[b.kind],
