@@ -39,6 +39,16 @@
 -- Re-regenerated 2026-08-08 after 4 further migrations:
 -- order_item_server_side_pricing, stock_shelf_bucket_merge,
 -- auto_close_stale_visits, auto_close_stale_per_visit_day.
+--
+-- Re-regenerated 2026-08-19 (time-in-store / challan / review-queue / push
+-- batch) after 7 further migrations: challans_capture_and_manual_entry,
+-- challan_photos_bucket, scope_manager_reads_to_own_reps,
+-- scope_challan_items_read_to_own_reps, review_queue_indexes,
+-- manages_rep_orphan_routing_and_self_exclusion, notify_plan_submitted_push.
+-- Live at that point: 22 tables, 1 view, 69 policies, 14 functions,
+-- 51 indexes, 4 triggers.
+--  • pg_net (0.20.3) is now ENABLED — it is what notify_plan_submitted() uses
+--    to POST to Expo. Its functions live in the `net` schema.
 -- ============================================================
 
 
@@ -302,6 +312,54 @@ create table public.location_requests (
     check (status = any (array['pending'::text, 'completed'::text, 'expired'::text]))
 );
 
+-- ── Delivery challans (rep capture + manual entry) ──────────────────────
+-- Auto-OCR is deliberately OUT of scope: handwritten mixed-script carbon
+-- copies are not reliably readable offline. Shaped so a future printed-challan
+-- parser can populate the same fields the manual form does.
+
+create table public.challans (
+  id uuid primary key default gen_random_uuid(),
+  store_id uuid not null references public.stores(id),
+  -- Provenance only; a challan can be photographed outside a check-in.
+  visit_id uuid references public.store_visits(id) on delete set null,
+  -- The date ON the challan, not the upload date. Editable.
+  challan_date date not null default current_date,
+  -- Nullable: handwritten carbon copies are often illegible, and the natural
+  -- key for matching a challan to an excise permit later.
+  challan_number text,
+  photo_path text not null,          -- challan-photos bucket, never public
+  recorded_by uuid not null references public.users(id),
+  notes text,
+  created_at timestamptz not null default now()
+);
+
+create table public.challan_items (
+  id uuid primary key default gen_random_uuid(),
+  challan_id uuid not null references public.challans(id) on delete cascade,
+  product_id uuid not null references public.products(id),
+  -- Loose BOTTLE counts by beer trade size class (Qt 650ml, Pint 330ml,
+  -- Nip 180ml). NOT converted to cases: qty_per_carton is per PRODUCT but
+  -- these are three SIZES, so a mixed total over one carton size is fiction.
+  qty_qts   integer not null default 0 check (qty_qts   >= 0),
+  qty_pints integer not null default 0 check (qty_pints >= 0),
+  qty_nips  integer not null default 0 check (qty_nips  >= 0),
+  -- A line recording nothing is a mis-tap, not data.
+  constraint challan_items_nonempty check (((qty_qts + qty_pints) + qty_nips) > 0),
+  unique (challan_id, product_id)
+);
+
+-- ── Push notification device tokens ─────────────────────────────────────
+create table public.push_tokens (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(id) on delete cascade,
+  -- UNIQUE on the token ALONE, not (user_id, token): a handset maps to exactly
+  -- ONE person, so a shared device makes the token MOVE, never duplicate.
+  token text not null unique,
+  platform text not null check (platform = any (array['android'::text, 'ios'::text])),
+  created_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now()
+);
+
 -- ── Excise permits → inventory ledger (management-only) ─────────────────
 
 -- Our own factories/warehouses. Anything NOT here is an external party (L1).
@@ -418,6 +476,26 @@ create index inventory_movements_product_id_direction_idx
 
 create index journey_plan_stores_plan_idx on public.journey_plan_stores using btree (plan_id);
 
+-- Challans + push tokens.
+create index challans_store_date_idx  on public.challans using btree (store_id, challan_date desc);
+create index challans_recorded_by_idx on public.challans using btree (recorded_by, created_at desc);
+create index push_tokens_user_id_idx  on public.push_tokens using btree (user_id);
+
+-- Review-queue performance (2026-08-19). Every one of these backs a filter the
+-- exception queue runs on every open; without them each was a sequential scan.
+create index store_visits_check_in_time_idx on public.store_visits using btree (check_in_time desc);
+create index store_visits_user_id_idx on public.store_visits using btree (user_id);
+create index attendance_user_id_check_in_time_idx
+  on public.attendance using btree (user_id, check_in_time desc);
+-- Artifact counts behind the no_work_recorded flag look these up by visit_id.
+-- store_visit_photos already had one; these three did not.
+create index store_stock_snapshots_visit_id_idx on public.store_stock_snapshots using btree (visit_id);
+create index orders_visit_id_idx on public.orders using btree (visit_id);
+create index challans_visit_id_idx on public.challans using btree (visit_id);
+-- Partial: the queue only ever asks for submitted plans.
+create index journey_plans_submitted_idx on public.journey_plans using btree (submitted_at)
+  where (status = 'submitted'::text);
+
 
 -- ============================================================
 -- 3. FUNCTIONS / RPCs
@@ -434,14 +512,32 @@ $function$;
 -- The manager→rep ownership test, factored out of the six PJP policies that
 -- need it. Same relationship location_requests enforces inline; hardened like
 -- get_my_role (STABLE, SECURITY DEFINER, search_path='').
+-- Rewritten 2026-08-19. Three rules, all verified by impersonation:
+--  1. ORPHAN ROUTING — a rep with no assigned_manager_id is reviewable by ANY
+--     sales_manager plus management, not management alone.
+--  2. The MANAGEMENT branch no longer requires the target to be role='rep':
+--     three live plans were permanently unapprovable because their author used
+--     the tester role-switch back to 'management'. The sales_manager branch
+--     KEEPS the role test, or the orphan fallback would let one manager reach
+--     another manager's rows.
+--  3. p_rep <> auth.uid() — NOBODY MANAGES THEMSELVES. Load-bearing: without
+--     it, rule 2 would have made self-approval possible. Every table using this
+--     function has its own self-read path, so excluding self costs no access.
 create or replace function public.manages_rep(p_rep uuid)
   returns boolean language sql stable security definer set search_path to ''
 as $function$
   select exists (
     select 1 from public.users u
-     where u.id = p_rep and u.role = 'rep'
-       and (public.get_my_role() = 'management'
-         or (public.get_my_role() = 'sales_manager' and u.assigned_manager_id = auth.uid()))
+     where u.id = p_rep
+       and p_rep <> auth.uid()
+       and (
+         public.get_my_role() = 'management'
+         or (
+           public.get_my_role() = 'sales_manager'
+           and u.role = 'rep'
+           and (u.assigned_manager_id = auth.uid() or u.assigned_manager_id is null)
+         )
+       )
   );
 $function$;
 
@@ -707,7 +803,94 @@ begin
 end;
 $function$;
 
+-- The ONLY legal writer for push_tokens (that table has no INSERT/UPDATE
+-- policy at all, the same posture as orders). Reassigns a token held by a
+-- previous user so a shared handset follows whoever is actually signed in.
+create or replace function public.register_push_token(p_token text, p_platform text)
+  returns void language plpgsql security definer set search_path to ''
+as $function$
+begin
+  if public.get_my_role() is null then raise exception 'Not permitted'; end if;
+  if p_platform not in ('android','ios') then raise exception 'Unknown platform'; end if;
+  if coalesce(btrim(p_token), '') = '' then raise exception 'Empty push token'; end if;
+
+  delete from public.push_tokens where token = p_token and user_id <> auth.uid();
+
+  insert into public.push_tokens (user_id, token, platform)
+  values (auth.uid(), p_token, p_platform)
+  on conflict (token) do update
+    set user_id = auth.uid(), platform = p_platform, last_seen_at = now();
+end;
+$function$;
+
 -- ── Trigger functions ───────────────────────────────────────────────────
+
+-- Push on plan submission. Sending happens ENTIRELY inside Postgres: an Edge
+-- Function runs on the caller's JWT (the anon-key-only invariant), so a rep's
+-- client could not read a manager's token, and the definer-RPC workaround
+-- would let any signed-in client harvest every device token in the system.
+--
+-- NO FCM CREDENTIAL IS INVOLVED. We post to Expo, where the Expo push token is
+-- itself the credential; Expo relays to FCM using the service-account key held
+-- in EAS credentials. That key must never reach this database, Vault, or the
+-- repo — Vault holds zero secrets and this function reads none.
+create or replace function public.notify_plan_submitted()
+  returns trigger language plpgsql security definer set search_path to ''
+as $function$
+declare
+  v_mgr    uuid;
+  v_name   text;
+  v_tokens text[];
+  v_body   jsonb;
+begin
+  -- Fire only on ENTRY into 'submitted'. A rep editing an already-submitted
+  -- plan does not re-notify: the manager already has that item in the queue.
+  if new.status <> 'submitted' then return new; end if;
+  if tg_op = 'UPDATE' and old.status = 'submitted' then return new; end if;
+
+  select u.name, u.assigned_manager_id into v_name, v_mgr
+    from public.users u where u.id = new.rep_id;
+
+  -- MIRRORS manages_rep() but cannot call it: manages_rep asks "can THIS
+  -- CALLER manage X" and needs auth.uid(); a trigger has no caller. The two
+  -- must be kept in step BY HAND — change one, change both. Management can
+  -- review anything, but is only NOTIFIED when the rep has no designated
+  -- manager, or every plan would buzz every director.
+  select array_agg(distinct pt.token) into v_tokens
+    from public.users m
+    join public.push_tokens pt on pt.user_id = m.id
+   where m.is_active
+     and m.id <> new.rep_id
+     and (
+       (v_mgr is not null and m.id = v_mgr)
+       or (v_mgr is null and m.role in ('sales_manager', 'management'))
+     );
+
+  if v_tokens is null or array_length(v_tokens, 1) is null then return new; end if;
+
+  -- Minimal payload: who, what, a deep-link id. Nothing that should not sit
+  -- on a lock screen.
+  select jsonb_agg(jsonb_build_object(
+           'to', t,
+           'title', 'Plan awaiting approval',
+           'body', coalesce(v_name, 'A rep') || ' submitted a plan for ' || new.plan_date,
+           'data', jsonb_build_object('planId', new.id),
+           'channelId', 'default'
+         ))
+    into v_body
+    from unnest(v_tokens) t;
+
+  -- Fire-and-forget: pg_net is async and a push failure must NEVER fail the
+  -- submission. The existing Realtime subscription still updates open screens.
+  perform net.http_post(
+    url     := 'https://exp.host/--/api/v2/push/send',
+    body    := v_body,
+    headers := jsonb_build_object('Content-Type', 'application/json')
+  );
+
+  return new;
+end;
+$function$;
 
 -- Out-of-stock is enforced in the DB, not just the picker: a stale client
 -- cannot place an OOS line.
@@ -764,6 +947,12 @@ create trigger trg_guard_facility_license
 create trigger trg_snapshot_order_item_price
   before insert on public.order_items
   for each row execute function public.snapshot_order_item_price();
+
+-- AFTER, and scoped to the status column: the push is a side effect and must
+-- never be able to fail a plan submission.
+create trigger trg_notify_plan_submitted
+  after insert or update of status on public.journey_plans
+  for each row execute function public.notify_plan_submitted();
 
 
 -- ============================================================
@@ -834,6 +1023,9 @@ alter table public.permit_product_allocations enable row level security;
 alter table public.inventory_movements        enable row level security;
 alter table public.journey_plans              enable row level security;
 alter table public.journey_plan_stores        enable row level security;
+alter table public.challans                   enable row level security;
+alter table public.challan_items              enable row level security;
+alter table public.push_tokens                enable row level security;
 
 -- ── users ──────────────────────────────────────────────────────────────
 -- Self-read survives deactivation so the app can show "account deactivated".
@@ -870,8 +1062,12 @@ create policy "Assignments: manager delete" on public.store_assignments for dele
 
 -- ── attendance ─────────────────────────────────────────────────────────
 create policy "Attendance: read own" on public.attendance for select using (auth.uid() = user_id);
-create policy "Attendance: manager read all" on public.attendance for select
-  using (get_my_role() = any (array['sales_manager'::text, 'management'::text]));
+-- Scoped 2026-08-19: was an unscoped manager read, measured live at 20 of 20
+-- rows visible to a sales_manager owning one rep. The management branch is
+-- checked FIRST and separately because manages_rep requires role='rep', so
+-- relying on it alone would hide non-rep rows from management too.
+create policy "Attendance: manager read own reps" on public.attendance for select
+  using (get_my_role() = 'management'::text or manages_rep(user_id));
 create policy "Attendance: insert own" on public.attendance for insert
   with check ((auth.uid() = user_id) and (get_my_role() is not null));
 create policy "Attendance: update own" on public.attendance for update
@@ -879,8 +1075,10 @@ create policy "Attendance: update own" on public.attendance for update
 
 -- ── store_visits ───────────────────────────────────────────────────────
 create policy "Visits: read own" on public.store_visits for select using (auth.uid() = user_id);
-create policy "Visits: manager read all" on public.store_visits for select
-  using (get_my_role() = any (array['sales_manager'::text, 'management'::text]));
+-- Scoped 2026-08-19: was unscoped, measured live at 28 of 28 visits visible to
+-- a sales_manager owning one rep. See the attendance note above.
+create policy "Visits: manager read own reps" on public.store_visits for select
+  using (get_my_role() = 'management'::text or manages_rep(user_id));
 create policy "Visits: insert own" on public.store_visits for insert
   with check ((auth.uid() = user_id) and (get_my_role() is not null));
 create policy "Visits: update own" on public.store_visits for update
@@ -1038,6 +1236,46 @@ create policy "PlanStores: rep delete via plan" on public.journey_plan_stores fo
                   where (p.id = journey_plan_stores.plan_id) and (p.rep_id = auth.uid())
                     and (p.status = any (array['submitted'::text, 'rejected'::text]))));
 
+-- ── challans ── correctable (UPDATE exists), but NEVER deletable ────────
+-- UPDATE exists here unlike the permit/ledger tables because correction is the
+-- whole point of a manual-entry rail. recorded_by is pinned so a row cannot be
+-- reassigned. No DELETE policy: the photo is evidence.
+create policy "Challans: rep insert own" on public.challans for insert to authenticated
+  with check ((recorded_by = auth.uid()) and (get_my_role() is not null));
+create policy "Challans: read own or manager" on public.challans for select to authenticated
+  using ((recorded_by = auth.uid()) or (get_my_role() = 'management'::text)
+         or manages_rep(recorded_by));
+create policy "Challans: rep update own" on public.challans for update to authenticated
+  using ((recorded_by = auth.uid()) and (get_my_role() is not null))
+  with check (recorded_by = auth.uid());
+create policy "Challans: management update" on public.challans for update to authenticated
+  using (get_my_role() = 'management'::text)
+  with check (get_my_role() = 'management'::text);
+
+-- ── challan_items ── FOR ALL so a rep can delete a line while correcting ─
+-- Mirrors the parent's scoping explicitly rather than leaning on RLS applying
+-- inside a policy subquery, which is not a subtlety to bet a boundary on.
+create policy "Challan items: read with parent" on public.challan_items for select to authenticated
+  using (exists (select 1 from public.challans c
+                  where (c.id = challan_items.challan_id)
+                    and ((c.recorded_by = auth.uid()) or (get_my_role() = 'management'::text)
+                         or manages_rep(c.recorded_by))));
+create policy "Challan items: owner write" on public.challan_items for all to authenticated
+  using ((exists (select 1 from public.challans c
+                   where (c.id = challan_items.challan_id) and (c.recorded_by = auth.uid())))
+         and (get_my_role() is not null))
+  with check (exists (select 1 from public.challans c
+                       where (c.id = challan_items.challan_id) and (c.recorded_by = auth.uid())));
+
+-- ── push_tokens ── NO insert/update policy: register_push_token() only ──
+-- A device token is a CAPABILITY: anyone holding it can push to that handset.
+-- So there is no cross-user read AT ALL — not even for management. This is the
+-- one table where a manager has no business reading a rep's row.
+create policy "Push tokens: read own" on public.push_tokens for select to authenticated
+  using (user_id = auth.uid());
+create policy "Push tokens: delete own" on public.push_tokens for delete to authenticated
+  using (user_id = auth.uid());
+
 
 -- ============================================================
 -- 7. GRANTS (API roles)
@@ -1093,6 +1331,16 @@ grant execute on function public.reject_excise_permit(uuid, text)   to authentic
 -- project and granting one here would contradict the anon-key-only design.
 grant execute on function public.manages_rep(uuid)                  to authenticated;
 
+-- Challans: no DELETE (the photo is evidence). challan_items keeps DELETE so a
+-- rep can remove a line while correcting the form.
+grant select, insert, update         on public.challans                   to authenticated;
+grant select, insert, update, delete on public.challan_items              to authenticated;
+-- push_tokens: SELECT + DELETE only. register_push_token() is the sole writer.
+grant select, delete                 on public.push_tokens                to authenticated;
+grant execute on function public.register_push_token(text, text)    to authenticated;
+-- notify_plan_submitted() is a trigger function: EXECUTE revoked from every
+-- API role so it can never be invoked directly via /rest/v1/rpc.
+
 
 -- ============================================================
 -- 8. STORAGE (buckets + policies) — reference, managed via the storage API
@@ -1134,6 +1382,18 @@ grant execute on function public.manages_rep(uuid)                  to authentic
 --   number on screen before saving and never needs the stored object back.
 --   Signing an odometer path MUST pass ODOMETER_BUCKET explicitly (lib/storage.ts),
 --   the same lesson as PERMITS_BUCKET.
+--
+-- challan-photos  private, file_size_limit 5242880 (5 MB),
+--   allowed_mime_types = {image/jpeg, image/png}
+--   Paths: challans/{repId}/{YYYY-MM-DD}/{timestamp}.jpg
+--   Policies:
+--     INSERT  bucket_id = 'challan-photos' and get_my_role() is not null
+--     SELECT  bucket_id = 'challan-photos' and (owner = auth.uid()
+--               or get_my_role() = any (array['sales_manager','management']))
+--   The read rule is the one difference from odometer-photos, and it is
+--   deliberate: an odometer photo is evidence ABOUT the rep so they must not
+--   read it back, while a challan is a document the rep is transcribing FOR us
+--   and they need to see it while typing. Pass CHALLAN_BUCKET when signing.
 
 
 -- ============================================================
