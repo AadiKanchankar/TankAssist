@@ -6,7 +6,7 @@ Session-state snapshot for the next Claude Code session. **Temporal** — record
 - **Supabase project:** `ldgunrxceogfrohjrlxz` (live MCP access; verify before assuming)
 - **Repo:** `master`, pushed to `github.com/AadiKanchankar/TankAssist`.
 - **Type state:** `npx tsc --noEmit` clean. `*.test.ts` files pass (`npx tsx <file>`). `expo-doctor` **18/18** after `npx expo install --fix` cleared patch drift on `expo`, `expo-file-system`, `expo-location`, `expo-sharing`, `expo-updates`.
-- **⚠️ `supabase-schema.sql` is STALE** — it predates the 2026-08-19 batch: `challans`/`challan_items`, `push_tokens`, the scoped manager-read policies, the rewritten `manages_rep`, `notify_plan_submitted` + its trigger, `pg_net`, and 7 new indexes. **Regenerate it from live via MCP before trusting it**, and do not hand-edit.
+- **`supabase-schema.sql` is CURRENT** — regenerated from live 2026-08-19 and verified object-by-object (22 tables, 14 functions, 4 triggers, 69 policies, every non-implicit index) rather than assumed.
 
 ---
 
