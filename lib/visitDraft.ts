@@ -23,14 +23,28 @@
  * The Keystore I/O lives in visitDraftStore.ts.
  */
 
-export const DRAFT_PREFIX = 'visit_draft.';
+/**
+ * Bump this whenever the MEANING of a stored field changes.
+ *
+ * v2: the stepper's STEP_ORDER was resequenced (required capture first), and
+ * `step` below is a positional INDEX into that array — so a v1 draft would
+ * restore the rep onto a different step than the one they left. Retiring old
+ * drafts costs a re-typed form at worst; silently resuming onto the wrong step
+ * is the kind of small wrongness nobody reports and everybody works around.
+ */
+export const DRAFT_PREFIX = 'visit_draft.v2.';
 
 /** Cap so a runaway note can't turn a convenience into dozens of Keystore writes. */
 export const MAX_NOTES_CHARS = 1200;
 export const MAX_DRAFT_CHARS = 6000;
 
 export interface VisitDraft {
-  /** Index into the stepper's STEP_ORDER, so resume lands where they left off. */
+  /**
+   * Index into the stepper's STEP_ORDER, so resume lands where they left off.
+   *
+   * ⚠️ POSITIONAL. Reordering STEP_ORDER changes what an existing draft's index
+   * means, so any resequencing must bump DRAFT_PREFIX above.
+   */
   step: number;
   /** productId -> bucket -> { cases, bottles }, all as typed strings. */
   stock: Record<string, Record<string, { cases: string; bottles: string }>>;

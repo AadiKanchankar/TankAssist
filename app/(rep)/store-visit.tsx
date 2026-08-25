@@ -111,7 +111,9 @@ type Step = 'prev' | 'stock' | 'shop' | 'stockphoto' | 'order' | 'notes';
 type CameraTarget = 'shop' | 'stock' | 'delivered';
 
 // Sentence case (DESIGN §9). Order drives the progress indicator.
-const STEP_ORDER: Step[] = ['prev', 'stock', 'shop', 'stockphoto', 'order', 'notes'];
+// Required capture first (stock + the photo evidencing it), optional work
+// after (shop photos, placing an order, feedback). See the transition switch.
+const STEP_ORDER: Step[] = ['prev', 'stock', 'stockphoto', 'shop', 'order', 'notes'];
 const STEP_TITLES: Record<Step, string> = {
   prev: 'Previous order',
   stock: 'Update stock',
@@ -505,9 +507,19 @@ export default function StoreVisitScreen({
     }
     let next: Step | 'checkout';
     switch (current) {
-      case 'stock': next = 'shop'; break;
-      case 'shop': next = stockEnteredPositive() ? 'stockphoto' : 'order'; break;
-      case 'stockphoto': next = 'order'; break;
+      // 2a: required capture first, optional work after. The stock reading and
+      // the photo that evidences it are the mandatory pair and now run
+      // back-to-back; general shop photos, placing an order and feedback are
+      // all optional and follow. Previously the optional shop-photo step sat
+      // BETWEEN the stock reading and its own evidence photo, interrupting the
+      // one sequence a rep must complete.
+      //
+      // Sequencing only — no new gating. The stock photo keeps exactly the
+      // condition it already had (required once a positive reading exists);
+      // nothing that was skippable became mandatory.
+      case 'stock': next = stockEnteredPositive() ? 'stockphoto' : 'shop'; break;
+      case 'stockphoto': next = 'shop'; break;
+      case 'shop': next = 'order'; break;
       case 'order': next = 'notes'; break;
       case 'notes': next = 'checkout'; break;
       default: next = 'checkout';
