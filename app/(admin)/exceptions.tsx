@@ -7,12 +7,13 @@ import {
   RefreshControl,
   Modal,
   TextInput,
+  Pressable,
   Alert,
   ActivityIndicator,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors, Type, Space, Radius } from '../../constants/colors';
+import { Colors, Type, Space, Radius, Layout, tabularNums } from '../../constants/colors';
 import Header from '../../components/Header';
 import Button from '../../components/Button';
 import BentoTile from '../../components/BentoTile';
@@ -41,36 +42,55 @@ const fmtWhen = (iso: string | null) =>
       })
     : '—';
 
+/** Which way the queue is chunked. Two options only — Hick's law. */
+type GroupBy = 'type' | 'rep';
+
 /**
- * One row of the queue. The three flag families have nothing in common beyond
- * "a manager should look at this", so they stay separate shapes rather than
- * being forced into a shared type that would need narrowing anyway.
+ * One row. The three families stay separate shapes rather than being forced
+ * into a shared type that would need narrowing back out anyway; `sortKey` and
+ * the rep fields are the only things every row must carry, because both
+ * grouping views need to sort and bucket without knowing the kind.
  */
 type Row =
-  | { kind: 'odometer'; key: string; day: FlaggedDay }
-  | { kind: 'visit'; key: string; visit: FlaggedVisit }
-  | { kind: 'plan'; key: string; plan: PendingPlan }
+  | { kind: 'odometer'; key: string; sortKey: string; repId: string; repName: string; day: FlaggedDay }
+  | { kind: 'visit'; key: string; sortKey: string; repId: string; repName: string; visit: FlaggedVisit }
+  | { kind: 'plan'; key: string; sortKey: string; repId: string; repName: string; plan: PendingPlan }
   | { kind: 'empty'; key: string; icon: any; title: string; message: string };
 
 interface QueueSection {
+  key: string;
   title: string;
+  /** Shown in the header pill. Counts real rows, never the empty placeholder. */
   count: number;
+  collapsible: boolean;
   data: Row[];
 }
+
+const TYPE_ORDER = ['odometer', 'visit', 'plan'] as const;
+const TYPE_TITLE: Record<(typeof TYPE_ORDER)[number], string> = {
+  odometer: 'Odometer flags',
+  visit: 'Location & visit flags',
+  plan: 'Day plans',
+};
 
 /**
  * The manager's exception queue.
  *
- * This is the payoff of the whole anti-cheat design: it floats the FLAGGED
- * items, not all activity — "review these 3", never "audit all 300". Every
- * flag carries its own reason, and nothing here was ever blocked from
- * happening; this is where a manager decides whether it mattered.
+ * Floats the FLAGGED items, not all activity — "review these 3", never "audit
+ * all 300". Every flag carries its own reason, and nothing here was ever
+ * blocked from happening; this is where a manager decides whether it mattered.
  *
- * Three labelled sections with sticky headers (Common Region + chunking): the
- * families need different judgements — a distance claim, a visit's honesty, a
- * plan approval — so mixing them into one stream made the manager re-orient at
- * every card. SectionList rather than a ScrollView of .map() so a busy week
- * renders the visible window instead of mounting every card at once.
+ * UX shape, and why:
+ *  • NEWEST FIRST everywhere. The old queue put the oldest plan on top, which
+ *    buried the item most worth acting on under everything already stale.
+ *  • TWO grouping views, no more (Hick's). "By type" is triage by kind of
+ *    judgement; "by rep" is the view a manager with 20 reps actually needs,
+ *    because a rep with four flags is a conversation, not four tasks.
+ *  • COLLAPSIBLE sections (chunking + Common Region) so 20 reps is a short
+ *    scannable list of names, expanded one at a time.
+ *  • A SUMMARY HEADER so the eye lands on the total before the detail; the
+ *    number goes alert-coloured only when something actually needs action
+ *    (Von Restorff works only if it is rare).
  */
 export default function ExceptionsScreen({ navigation }: { navigation: any }) {
   const { profile } = useAuthStore();
@@ -82,6 +102,8 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
   // Live: a rep submitting a plan refreshes this list without a pull.
   usePlanSubmissions(true);
 
+  const [groupBy, setGroupBy] = useState<GroupBy>('type');
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [rejecting, setRejecting] = useState<string | null>(null);
   const [reason, setReason] = useState('');
   /**
@@ -135,61 +157,145 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
   const days = odoFlags.data ?? [];
   const loading = plans.isPending || flagged.isPending || odoFlags.isPending;
 
-  const sections: QueueSection[] = useMemo(() => {
-    const fill = (rows: Row[], empty: Row): Row[] =>
-      rows.length ? rows : loading ? [] : [empty];
+  const toggleSection = (key: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
 
-    return [
-      {
-        title: 'Odometer flags',
-        count: days.length,
-        data: fill(
-          days.map((d) => ({ kind: 'odometer' as const, key: d.attendance_id, day: d })),
-          {
-            kind: 'empty',
-            key: 'empty-odo',
-            icon: 'speedometer-outline',
-            title: 'Distances add up',
-            message: 'Odometer claims match the tracked routes.',
-          },
-        ),
-      },
-      {
-        title: 'Location & visit flags',
-        count: visits.length,
-        data: fill(
-          visits.map((v) => ({ kind: 'visit' as const, key: v.visit_id, visit: v })),
-          {
-            kind: 'empty',
-            key: 'empty-visits',
-            icon: 'shield-checkmark-outline',
-            title: 'Nothing to review',
-            message: 'No visit in the last 7 days raised a flag.',
-          },
-        ),
-      },
-      {
-        title: 'Day plans',
-        count: pending.length,
-        data: fill(
-          pending.map((p) => ({ kind: 'plan' as const, key: p.id, plan: p })),
-          {
-            kind: 'empty',
-            key: 'empty-plans',
-            icon: 'checkmark-done-outline',
-            title: 'Nothing waiting',
-            message: staleCount
-              ? // Never let a silently-filtered pile read as "you're done".
-                `${staleCount} older plan${staleCount === 1 ? '' : 's'} ` +
-                `${staleCount === 1 ? 'is' : 'are'} past the ${PLAN_ACTIONABLE_DAYS}-day window ` +
-                'and no longer actionable. They stay in the rep’s history.'
-              : 'Every plan has been reviewed.',
-          },
-        ),
-      },
+  /** Every actionable row, newest first, in one flat list. */
+  const allRows: Row[] = useMemo(() => {
+    const rows: Row[] = [
+      ...days.map((d) => ({
+        kind: 'odometer' as const,
+        key: `odo-${d.attendance_id}`,
+        // A day flag has only a date; pin it to end-of-day so it sorts against
+        // timestamped rows without appearing to happen at midnight.
+        sortKey: `${d.date}T23:59:59`,
+        repId: d.rep_id,
+        repName: d.rep_name,
+        day: d,
+      })),
+      ...visits.map((v) => ({
+        kind: 'visit' as const,
+        key: `visit-${v.visit_id}`,
+        sortKey: v.check_in_time ?? '',
+        repId: v.rep_id,
+        repName: v.rep_name,
+        visit: v,
+      })),
+      ...pending.map((p) => ({
+        kind: 'plan' as const,
+        key: `plan-${p.id}`,
+        sortKey: p.submitted_at,
+        repId: p.rep_id,
+        repName: p.rep_name,
+        plan: p,
+      })),
     ];
-  }, [days, visits, pending, staleCount, loading]);
+    return rows.sort((a, b) => (b as any).sortKey.localeCompare((a as any).sortKey));
+  }, [days, visits, pending]);
 
+  const totalActionable = allRows.length;
+
+  const sections: QueueSection[] = useMemo(() => {
+    const hide = (key: string, rows: Row[]) => (collapsed.has(key) ? [] : rows);
+
+    if (groupBy === 'rep') {
+      // One section per rep, the rep with the most recent item first — same
+      // newest-first rule as the flat list, lifted one level up.
+      const byRep = new Map<string, { name: string; rows: Row[] }>();
+      for (const r of allRows) {
+        if (r.kind === 'empty') continue;
+        const entry = byRep.get(r.repId) ?? { name: r.repName, rows: [] };
+        entry.rows.push(r);
+        byRep.set(r.repId, entry);
+      }
+      if (byRep.size === 0) {
+        return loading
+          ? []
+          : [
+              {
+                key: 'empty',
+                title: 'Nothing to review',
+                count: 0,
+                collapsible: false,
+                data: [
+                  {
+                    kind: 'empty',
+                    key: 'empty-all',
+                    icon: 'shield-checkmark-outline',
+                    title: 'All clear',
+                    message: 'No rep has anything waiting on you.',
+                  },
+                ],
+              },
+            ];
+      }
+      return [...byRep.entries()].map(([repId, { name, rows }]) => ({
+        key: `rep-${repId}`,
+        title: name,
+        count: rows.length,
+        collapsible: true,
+        data: hide(`rep-${repId}`, rows),
+      }));
+    }
+
+    // ── by type ──
+    const buckets: Record<string, Row[]> = { odometer: [], visit: [], plan: [] };
+    for (const r of allRows) if (r.kind !== 'empty') buckets[r.kind].push(r);
+
+    const emptyFor: Record<string, { icon: string; title: string; message: string }> = {
+      odometer: {
+        icon: 'speedometer-outline',
+        title: 'Distances add up',
+        message: 'Odometer claims match the tracked routes.',
+      },
+      visit: {
+        icon: 'shield-checkmark-outline',
+        title: 'Nothing to review',
+        message: 'No recent visit raised a flag.',
+      },
+      plan: {
+        icon: 'checkmark-done-outline',
+        title: 'Nothing waiting',
+        message: staleCount
+          ? // Never let a silently-filtered pile read as "you're done".
+            `${staleCount} older plan${staleCount === 1 ? '' : 's'} ` +
+            `${staleCount === 1 ? 'is' : 'are'} past the ${PLAN_ACTIONABLE_DAYS}-day window ` +
+            'and no longer actionable. They stay in the rep’s history.'
+          : 'Every plan has been reviewed.',
+      },
+    };
+
+    return TYPE_ORDER.map((kind) => {
+      const rows = buckets[kind];
+      const key = `type-${kind}`;
+      const e = emptyFor[kind];
+      return {
+        key,
+        title: TYPE_TITLE[kind],
+        count: rows.length,
+        collapsible: rows.length > 0,
+        data: rows.length
+          ? hide(key, rows)
+          : loading
+            ? []
+            : [
+                {
+                  kind: 'empty' as const,
+                  key: `empty-${kind}`,
+                  icon: e.icon,
+                  title: e.title,
+                  message: e.message,
+                },
+              ],
+      };
+    });
+  }, [groupBy, allRows, collapsed, loading, staleCount]);
+
+  // ── Row renderers ────────────────────────────────────────────────────────
   const renderItem = ({ item }: { item: Row }) => {
     if (item.kind === 'empty') {
       return (
@@ -199,16 +305,22 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
       );
     }
 
+    // In the by-rep view the name is the section header, so repeating it on
+    // every card is noise; by type, the rep is the thing you need to know.
+    const showRep = groupBy === 'type';
+
     if (item.kind === 'odometer') {
       const d = item.day;
       return (
         <BentoTile style={styles.tile}>
           <View style={styles.rowTop}>
             <View style={{ flex: 1 }}>
-              <Text style={[Type.bodyMed, { color: Colors.text }]}>{d.rep_name}</Text>
+              <Text style={[Type.bodyMed, { color: Colors.text }]}>
+                {showRep ? d.rep_name : 'Odometer'}
+              </Text>
               <Text style={styles.meta}>{d.date}</Text>
             </View>
-            <Text style={[Type.bodyMed, { color: Colors.alert }]}>
+            <Text style={[Type.bodyMed, tabularNums, { color: Colors.alert }]}>
               +{Math.round(d.excessKm)} km
             </Text>
           </View>
@@ -230,7 +342,8 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
                 {v.store_name}
               </Text>
               <Text style={styles.meta}>
-                {v.rep_name} · {fmtWhen(v.check_in_time)}
+                {showRep ? `${v.rep_name} · ` : ''}
+                {fmtWhen(v.check_in_time)}
               </Text>
             </View>
           </View>
@@ -253,10 +366,13 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
       <BentoTile style={styles.tile}>
         <View style={styles.rowTop}>
           <View style={{ flex: 1 }}>
-            <Text style={[Type.bodyMed, { color: Colors.text }]}>{p.rep_name}</Text>
+            <Text style={[Type.bodyMed, { color: Colors.text }]}>
+              {showRep ? p.rep_name : `Plan for ${p.plan_date}`}
+            </Text>
             <Text style={styles.meta}>
-              {p.plan_date} · {p.store_ids.length} store{p.store_ids.length === 1 ? '' : 's'} ·
-              sent {fmtWhen(p.submitted_at)}
+              {showRep ? `${p.plan_date} · ` : ''}
+              {p.store_ids.length} store{p.store_ids.length === 1 ? '' : 's'} · sent{' '}
+              {fmtWhen(p.submitted_at)}
             </Text>
           </View>
         </View>
@@ -303,19 +419,82 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
         stickySectionHeadersEnabled
         contentContainerStyle={styles.content}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-        renderSectionHeader={({ section }) => (
-          <View style={styles.sectionHeader}>
-            <Text style={[Type.section, { color: Colors.text }]}>{section.title}</Text>
-            {section.count > 0 ? (
-              <View style={styles.countPill}>
-                <Text style={styles.countText}>{section.count}</Text>
+        ListHeaderComponent={
+          <View>
+            {/* Summary first: the total, then how it breaks down. */}
+            <View style={styles.summary}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.summaryLabel}>Needs your attention</Text>
+                <Text
+                  style={[
+                    Type.display,
+                    tabularNums,
+                    { color: totalActionable ? Colors.alert : Colors.textSecondary },
+                  ]}
+                >
+                  {loading ? '—' : totalActionable}
+                </Text>
               </View>
+              <View style={styles.breakdown}>
+                <Text style={styles.breakdownRow}>{days.length} odometer</Text>
+                <Text style={styles.breakdownRow}>{visits.length} visit</Text>
+                <Text style={styles.breakdownRow}>{pending.length} plan</Text>
+              </View>
+            </View>
+
+            {/* Two views, no more. */}
+            <View style={styles.toggle} accessibilityRole="tablist">
+              {(['type', 'rep'] as GroupBy[]).map((g) => (
+                <Pressable
+                  key={g}
+                  onPress={() => setGroupBy(g)}
+                  style={[styles.toggleBtn, groupBy === g && styles.toggleBtnActive]}
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: groupBy === g }}
+                  accessibilityLabel={g === 'type' ? 'Group by flag type' : 'Group by rep'}
+                >
+                  <Text style={[styles.toggleText, groupBy === g && styles.toggleTextActive]}>
+                    {g === 'type' ? 'By type' : 'By rep'}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+
+            {loading ? (
+              <ActivityIndicator color={Colors.accent} style={{ marginTop: Space.lg }} />
             ) : null}
           </View>
-        )}
-        ListHeaderComponent={
-          loading ? <ActivityIndicator color={Colors.accent} style={{ marginTop: Space.lg }} /> : null
         }
+        renderSectionHeader={({ section }) => {
+          const s = section as unknown as QueueSection;
+          const isCollapsed = collapsed.has(s.key);
+          return (
+            <Pressable
+              onPress={() => s.collapsible && toggleSection(s.key)}
+              style={styles.sectionHeader}
+              disabled={!s.collapsible}
+              accessibilityRole={s.collapsible ? 'button' : 'header'}
+              accessibilityState={s.collapsible ? { expanded: !isCollapsed } : undefined}
+              accessibilityLabel={`${s.title}, ${s.count} item${s.count === 1 ? '' : 's'}`}
+            >
+              {s.collapsible ? (
+                <Ionicons
+                  name={isCollapsed ? 'chevron-forward' : 'chevron-down'}
+                  size={18}
+                  color={Colors.textSecondary}
+                />
+              ) : null}
+              <Text style={[Type.section, { color: Colors.text, flex: 1 }]} numberOfLines={1}>
+                {s.title}
+              </Text>
+              {s.count > 0 ? (
+                <View style={styles.countPill}>
+                  <Text style={styles.countText}>{s.count}</Text>
+                </View>
+              ) : null}
+            </Pressable>
+          );
+        }}
         ListFooterComponent={
           <Text style={styles.footNote}>
             Nothing here was blocked — reps are never stopped from working. These are the items
@@ -362,12 +541,46 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: Colors.background },
   content: { padding: Space.md, paddingBottom: Space.xl },
-  // Sticky, so the section a card belongs to is never off-screen while
-  // scrolling a long family. Opaque background for the same reason.
+
+  summary: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.card,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Layout.cardPad,
+  },
+  summaryLabel: { ...Type.label, color: Colors.textSecondary },
+  breakdown: { alignItems: 'flex-end', gap: 2 },
+  breakdownRow: { ...Type.caption, color: Colors.textSecondary },
+
+  toggle: {
+    flexDirection: 'row',
+    gap: Space.xs,
+    backgroundColor: Colors.surfaceAlt,
+    borderRadius: Radius.pill,
+    padding: Space.xs,
+    marginTop: Space.md,
+  },
+  toggleBtn: {
+    flex: 1,
+    minHeight: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: Radius.pill,
+  },
+  toggleBtnActive: { backgroundColor: Colors.accent },
+  toggleText: { ...Type.label, color: Colors.textSecondary },
+  toggleTextActive: { color: Colors.white },
+
+  // Sticky, so the group a card belongs to is never off-screen while scrolling
+  // a long one. Opaque background for the same reason.
   sectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: Space.sm,
+    minHeight: Layout.tap,
     paddingTop: Space.lg,
     paddingBottom: Space.sm,
     backgroundColor: Colors.background,
@@ -382,6 +595,7 @@ const styles = StyleSheet.create({
     borderColor: Colors.borderStrong,
   },
   countText: { ...Type.caption, color: Colors.textSecondary, textAlign: 'center' },
+
   tile: { marginBottom: Space.sm },
   rowTop: { flexDirection: 'row', alignItems: 'flex-start' },
   meta: { ...Type.caption, color: Colors.textMuted, marginTop: 2 },

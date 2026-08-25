@@ -54,12 +54,12 @@ assert.equal(planDateFor(new Date(2026, 0, 9, 23, 30)), '2026-01-09', 'zero-padd
   // 18 Aug — every one of them stale, which is exactly the pile the cutoff is
   // meant to clear out of the approval list.
   const today = new Date(2026, 7, 18); // 18 Aug 2026, local
-  assert.equal(planCutoffDate(today), '2026-08-11', 'cutoff is 7 days back, local');
+  assert.equal(planCutoffDate(today), '2026-08-15', 'cutoff is 3 days back, local');
   assert.ok('2026-08-08' < planCutoffDate(today), 'an 8 Aug plan is stale on 18 Aug');
-  assert.ok('2026-08-11' >= planCutoffDate(today), 'the boundary day itself stays actionable');
+  assert.ok('2026-08-15' >= planCutoffDate(today), 'the boundary day itself stays actionable');
   assert.ok('2026-08-18' >= planCutoffDate(today), "today's plan is actionable");
   // Month boundaries must not produce a malformed date the query would reject.
-  assert.equal(planCutoffDate(new Date(2026, 0, 3)), '2025-12-27', 'crosses into the prior year');
+  assert.equal(planCutoffDate(new Date(2026, 0, 2)), '2025-12-30', 'crosses into the prior year');
 }
 
 // ── the clean case: nothing to flag ───────────────────────────────────────

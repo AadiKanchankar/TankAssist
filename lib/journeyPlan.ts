@@ -61,7 +61,7 @@ export function planDateFor(d: Date = new Date()): string {
  * they are evidence, and journey_plans has no DELETE grant — they just leave
  * the "needs approval" list so the queue means what it says.
  */
-export const PLAN_ACTIONABLE_DAYS = 7;
+export const PLAN_ACTIONABLE_DAYS = 3;
 
 /** Oldest plan_date still worth surfacing for approval, as YYYY-MM-DD. */
 export function planCutoffDate(today: Date = new Date()): string {

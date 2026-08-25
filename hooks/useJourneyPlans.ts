@@ -163,8 +163,11 @@ export function usePendingPlans(viewerId?: string) {
         .lt('plan_date', cutoff);
 
       const [{ data, error }, { count, error: countError }] = await Promise.all([
+        // Newest first. Oldest-on-top was the single worst thing about the old
+        // queue: the item a manager most needs to act on sat at the bottom of
+        // the scroll, behind everything already stale.
         (viewerId ? listBase.neq('rep_id', viewerId) : listBase).order('submitted_at', {
-          ascending: true,
+          ascending: false,
         }),
         viewerId ? staleBase.neq('rep_id', viewerId) : staleBase,
       ]);
