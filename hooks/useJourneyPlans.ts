@@ -423,7 +423,7 @@ export function useFlaggedVisits() {
       const { data: visits, error } = await supabase
         .from('store_visits')
         .select(
-          'id, user_id, store_id, check_in_time, check_out_time, notes, latitude, longitude, distance_from_store_meters, is_mock_location, auto_closed',
+          'id, user_id, store_id, check_in_time, check_out_time, notes, latitude, longitude, distance_from_store_meters, checkout_distance_meters, is_mock_location, auto_closed',
         )
         .gte('check_in_time', since)
         // Newest first so the cap keeps the RECENT window when a busy week
@@ -476,6 +476,7 @@ export function useFlaggedVisits() {
           latitude: v.latitude,
           longitude: v.longitude,
           distance_from_store_meters: v.distance_from_store_meters,
+          checkout_distance_meters: v.checkout_distance_meters,
           is_mock_location: v.is_mock_location,
           auto_closed: v.auto_closed,
           // A written note is work too, so it counts against the phantom-visit

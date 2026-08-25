@@ -89,7 +89,8 @@ export type FlagKind =
   | 'off_plan'
   | 'plan_not_approved'
   | 'auto_closed'
-  | 'no_work_recorded';
+  | 'no_work_recorded'
+  | 'far_at_checkout';
 
 export interface VisitFlag {
   kind: FlagKind;
@@ -101,6 +102,17 @@ export interface VisitFlag {
 
 /** Beyond this from the store's recorded coordinates, a check-in is worth a look. */
 export const FAR_FROM_STORE_METERS = 300;
+/**
+ * Beyond this at CHECK-OUT, the exit is worth a look.
+ *
+ * Tighter than the check-in threshold on purpose, and they measure different
+ * things. Check-in tolerance is loose because a rep arriving at a dense market
+ * may legitimately register a few hundred metres off; checkout is a deliberate
+ * act the rep performs, so leaving the shop and closing the visit from down
+ * the road is a different claim. Flag-don't-block: the rep is warned it will
+ * be flagged and may still check out.
+ */
+export const FAR_AT_CHECKOUT_METERS = 100;
 /** Sustained speed above this between two visits is not plausible on the ground. */
 export const IMPLAUSIBLE_KMH = 120;
 /** Two stores closer than this are probably the same shop entered twice. */
@@ -118,6 +130,12 @@ export interface VisitForFlags {
   auto_closed?: boolean | null;
   /** Null while the rep is still inside — an open visit has produced nothing YET. */
   check_out_time?: string | null;
+  /**
+   * Metres between the rep and the store when they checked OUT. Null on an
+   * auto-closed visit (nobody observed the exit) and on rows predating the
+   * column — neither is evidence of anything.
+   */
+  checkout_distance_meters?: number | null;
   /**
    * How many pieces of work this visit produced: shop/stock photos, stock
    * snapshots, orders, and a non-empty feedback note. Counted by the caller.
@@ -196,7 +214,28 @@ export function flagsForVisit(
     });
   }
 
-  // 4. Distance from the store's own coordinates. Skipped when unknown.
+  // 4. Checked out from too far away. A DISTINCT reason from both the
+  //    check-in distance below and no_work_recorded above: this one says the
+  //    rep closed the visit from down the road, which is a different claim
+  //    from arriving off-target or from doing nothing while there. Kept
+  //    separate so a manager reads separate reasons rather than the same
+  //    accusation three times — a visit may legitimately raise all three, and
+  //    each should be answerable on its own.
+  //
+  //    Skipped when null: an auto-closed visit has no observed exit position,
+  //    and rows predating the column never had one.
+  if (
+    visit.checkout_distance_meters !== null &&
+    visit.checkout_distance_meters !== undefined &&
+    visit.checkout_distance_meters > FAR_AT_CHECKOUT_METERS
+  ) {
+    flags.push({
+      kind: 'far_at_checkout',
+      reason: `Checked out ${Math.round(visit.checkout_distance_meters)} m from the store — the rep had already left when they closed the visit.`,
+    });
+  }
+
+  // 5. Distance from the store's own coordinates. Skipped when unknown.
   if (
     visit.distance_from_store_meters !== null &&
     visit.distance_from_store_meters > FAR_FROM_STORE_METERS
@@ -207,7 +246,7 @@ export function flagsForVisit(
     });
   }
 
-  // 5. Physically implausible movement between consecutive visits.
+  // 6. Physically implausible movement between consecutive visits.
   if (
     prevVisit &&
     prevVisit.latitude !== null && prevVisit.longitude !== null &&
@@ -229,7 +268,7 @@ export function flagsForVisit(
     }
   }
 
-  // 6. Plan status. An APPROVED plan clears this — deliberately read live, so
+  // 7. Plan status. An APPROVED plan clears this — deliberately read live, so
   //    a manager approving at noon retroactively clears the morning's visits.
   if (!plan) {
     flags.push({ kind: 'plan_not_approved', reason: 'No journey plan was submitted for this day.' });
@@ -246,7 +285,7 @@ export function flagsForVisit(
     });
   }
 
-  // 7. Off-plan store. Only meaningful once a plan exists.
+  // 8. Off-plan store. Only meaningful once a plan exists.
   if (plan && visit.store_id && !plan.store_ids.includes(visit.store_id)) {
     const ambiguous = visit.check_in_time ? nearDateBoundary(visit.check_in_time) : false;
     flags.push({
@@ -272,10 +311,13 @@ export function sortFlags(flags: VisitFlag[]): VisitFlag[] {
     // Above far_from_store: 300 m can be GPS drift in a dense market, but a
     // visit with nothing recorded in it has no innocent instrument explanation.
     no_work_recorded: 2,
-    far_from_store: 3,
-    off_plan: 4,
-    plan_not_approved: 5,
-    auto_closed: 6,
+    // Above far_from_store for the same reason the threshold is tighter:
+    // check-in drift is an instrument artefact, checkout is a deliberate act.
+    far_at_checkout: 3,
+    far_from_store: 4,
+    off_plan: 5,
+    plan_not_approved: 6,
+    auto_closed: 7,
   };
   return [...flags].sort(
     (a, b) => Number(a.soft ?? false) - Number(b.soft ?? false) || rank[a.kind] - rank[b.kind],

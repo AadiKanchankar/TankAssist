@@ -40,6 +40,7 @@ import {
 } from '../../lib/storage';
 import { reverseGeocode } from '../../lib/geocoding';
 import { haversineKm } from '../../lib/haversine';
+import { FAR_AT_CHECKOUT_METERS } from '../../lib/journeyPlan';
 import {
   STOCK_BUCKETS,
   BUCKET_LABEL,
@@ -661,6 +662,46 @@ export default function StoreVisitScreen({
       setStepStack((s) => [...s, 'stockphoto']);
       return;
     }
+    // ── 2d: location-guarded exit (flag, never block) ────────────────────
+    // Read the position ONCE and reuse it for both the warning and the stored
+    // evidence, so the number the rep was warned about is exactly the number
+    // the manager later sees.
+    let checkoutPos: { lat: number; lng: number; distance: number | null } | null = null;
+    try {
+      const loc = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.BestForNavigation,
+      });
+      const lat = loc.coords.latitude;
+      const lng = loc.coords.longitude;
+      checkoutPos = {
+        lat,
+        lng,
+        distance:
+          store.latitude != null && store.longitude != null
+            ? Math.round(haversineKm(lat, lng, store.latitude, store.longitude) * 1000)
+            : null,
+      };
+    } catch {
+      // No fix available. Check-out must NEVER be blocked on GPS — a rep in a
+      // basement still has to close their visit. The columns stay null, which
+      // reads as "not observed" rather than "close enough".
+    }
+
+    if (checkoutPos?.distance != null && checkoutPos.distance > FAR_AT_CHECKOUT_METERS) {
+      const proceed = await new Promise<boolean>((resolve) => {
+        Alert.alert(
+          'You’re away from the store',
+          `You’re about ${checkoutPos!.distance} m from ${store.name}. You can still check out, but it will be flagged for your manager to review.`,
+          [
+            { text: 'Go back', style: 'cancel', onPress: () => resolve(false) },
+            { text: 'Check out anyway', onPress: () => resolve(true) },
+          ],
+          { cancelable: false },
+        );
+      });
+      if (!proceed) return;
+    }
+
     setSubmitting(true);
     try {
       const checkOutTime = new Date().toISOString();
@@ -711,6 +752,12 @@ export default function StoreVisitScreen({
           duration_minutes: durationMinutes,
           notes: notes.trim() || null,
           photo_url: firstPhotoPath,
+          // Stored, not just checked: the far_at_checkout flag is derived from
+          // these on the manager's side, so a client that skips the warning
+          // above is still caught.
+          checkout_latitude: checkoutPos?.lat ?? null,
+          checkout_longitude: checkoutPos?.lng ?? null,
+          checkout_distance_meters: checkoutPos?.distance ?? null,
         })
         .eq('id', visitId);
       if (error) throw error;

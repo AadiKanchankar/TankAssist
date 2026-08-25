@@ -97,6 +97,50 @@ assert.equal(planDateFor(new Date(2026, 0, 9, 23, 30)), '2026-01-09', 'zero-padd
   );
 }
 
+// ── checked out from too far away ─────────────────────────────────────────
+{
+  const closed = { check_out_time: '2026-08-04T10:20:00' };
+  const kinds = (v: Partial<VisitForFlags>) =>
+    flagsForVisit(visit(v), plan(), null, haversineKm).map((f) => f.kind);
+
+  assert.ok(
+    kinds({ ...closed, checkout_distance_meters: 400 }).includes('far_at_checkout'),
+    '400 m from the store at checkout is flagged',
+  );
+  assert.ok(
+    !kinds({ ...closed, checkout_distance_meters: 100 }).includes('far_at_checkout'),
+    'exactly at the threshold is not over it',
+  );
+  assert.ok(
+    !kinds({ ...closed }).includes('far_at_checkout'),
+    'null/undefined is not evidence — an auto-closed visit has no observed exit',
+  );
+
+  // The brief's own warning: one visit must not be penalised three times for
+  // the same thing. These are three DIFFERENT claims and must coexist as
+  // separate reasons, each answerable on its own.
+  const all = flagsForVisit(
+    visit({
+      ...closed,
+      checkout_distance_meters: 400,
+      distance_from_store_meters: 900,
+      artifact_count: 0,
+    }),
+    plan(),
+    null,
+    haversineKm,
+  );
+  const kindList = all.map((f) => f.kind);
+  assert.ok(kindList.includes('far_at_checkout'), 'checkout distance stands on its own');
+  assert.ok(kindList.includes('far_from_store'), 'check-in distance is a separate reason');
+  assert.ok(kindList.includes('no_work_recorded'), 'doing nothing is a separate reason again');
+  assert.equal(
+    new Set(all.map((f) => f.reason)).size,
+    all.length,
+    'no two flags repeat the same sentence at the manager',
+  );
+}
+
 // ── an APPROVED plan clears the status flag; submitted/rejected do not ────
 {
   const sub = flagsForVisit(visit(), plan({ status: 'submitted' }), null, haversineKm);
