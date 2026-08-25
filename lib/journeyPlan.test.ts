@@ -97,6 +97,38 @@ assert.equal(planDateFor(new Date(2026, 0, 9, 23, 30)), '2026-01-09', 'zero-padd
   );
 }
 
+// ── closed because the rep checked in at the next shop ────────────────────
+{
+  const closed = { check_out_time: '2026-08-04T10:20:00' };
+  const kinds = (v: Partial<VisitForFlags>) =>
+    flagsForVisit(visit(v), plan(), null, haversineKm).map((f) => f.kind);
+
+  assert.ok(
+    kinds({ ...closed, closed_on_next_checkin: true }).includes('closed_on_next_checkin'),
+    'an abandoned visit is flagged, never silently finalised',
+  );
+
+  // NOT soft — the deliberate difference from the 22:30 sweep. A flat battery
+  // is innocent; a rep who checked in at the next shop had a working phone.
+  const f = flagsForVisit(
+    visit({ ...closed, closed_on_next_checkin: true }),
+    plan(),
+    null,
+    haversineKm,
+  ).find((x) => x.kind === 'closed_on_next_checkin')!;
+  assert.equal(f.soft, undefined, 'not marked soft, unlike auto_closed');
+
+  // The asymmetry that matters: auto_closed SUPPRESSES no_work_recorded (one
+  // flag for a flat battery), but closed_on_next_checkin must NOT — walking to
+  // the next shop explains the missing checkout, not the missing work.
+  const abandoned = kinds({ ...closed, closed_on_next_checkin: true, artifact_count: 0 });
+  assert.ok(abandoned.includes('closed_on_next_checkin'), 'ended irregularly');
+  assert.ok(abandoned.includes('no_work_recorded'), 'AND captured nothing — both shown');
+
+  const battery = kinds({ ...closed, auto_closed: true, artifact_count: 0 });
+  assert.ok(!battery.includes('no_work_recorded'), 'a flat battery still earns only one flag');
+}
+
 // ── checked out from too far away ─────────────────────────────────────────
 {
   const closed = { check_out_time: '2026-08-04T10:20:00' };

@@ -44,6 +44,12 @@ import { usePullToRefresh } from '../../hooks/usePullToRefresh';
 import { useRepDashboard } from '../../hooks/useRepDashboard';
 import { useMyPlan } from '../../hooks/useJourneyPlans';
 import { useOpenVisit } from '../../hooks/useOpenVisit';
+import {
+  readCheckoutPosition,
+  isFarCheckout,
+  confirmFarCheckout,
+  closeVisit,
+} from '../../lib/visitCheckout';
 import AddStoreModal from '../../components/AddStoreModal';
 import OdometerCapture, { OdometerResult } from '../../components/OdometerCapture';
 import { uploadOdometerPhoto } from '../../lib/storage';
@@ -258,6 +264,42 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
     return () => clearTimeout(timeout);
   }, [storeSearch]);
 
+  /** Set briefly after a successful checkout so the card can confirm, then go. */
+  const [checkedOutFlash, setCheckedOutFlash] = useState(false);
+  const [checkingOut, setCheckingOut] = useState(false);
+
+  /**
+   * Check out of the open visit without reopening the stepper.
+   *
+   * Safe because the "still in the store" interstitial already committed every
+   * photo and stock reading — by the time this card is used, closing the visit
+   * is only a timestamp and a position. Shares lib/visitCheckout with the
+   * stepper so the two exits cannot drift apart.
+   */
+  const handleCheckOutFromCard = async () => {
+    if (!openVisit || checkingOut) return;
+    const pos = await readCheckoutPosition(openVisit.store);
+    if (isFarCheckout(pos) && !(await confirmFarCheckout(pos!, openVisit.store.name))) return;
+    setCheckingOut(true);
+    try {
+      await closeVisit({
+        visitId: openVisit.id,
+        checkInTime: openVisit.check_in_time,
+        pos,
+      });
+      // Confirm in place, then let the refetch remove the card entirely.
+      setCheckedOutFlash(true);
+      setTimeout(() => {
+        setCheckedOutFlash(false);
+        refetchOpenVisit();
+      }, 1200);
+    } catch (e: any) {
+      Alert.alert('Couldn’t check out', e?.message ?? 'Try again.');
+    } finally {
+      setCheckingOut(false);
+    }
+  };
+
   const handleSelectStore = (store: StoreSearchResult) => {
     setShowStoreModal(false);
     navigation.navigate('StoreVisit', { store });
@@ -456,12 +498,18 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
             visit back up, so navigating with the store is all that's needed. */}
         {openVisit ? (
           <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
-            <BentoTile style={styles.resumeTile}>
+            <BentoTile style={checkedOutFlash ? styles.resumeTileDone : styles.resumeTile}>
               <View style={styles.resumeHead}>
-                <Ionicons name="play-circle-outline" size={20} color={Colors.accent} />
+                <Ionicons
+                  name={checkedOutFlash ? 'checkmark-circle' : 'play-circle-outline'}
+                  size={20}
+                  color={checkedOutFlash ? Colors.success : Colors.accent}
+                />
                 <View style={{ flex: 1 }}>
                   <Text style={[Type.bodyMed, { color: Colors.text }]} numberOfLines={1}>
-                    Unfinished visit at {openVisit.store.name}
+                    {checkedOutFlash
+                      ? `Checked out of ${openVisit.store.name}`
+                      : `Open visit at ${openVisit.store.name}`}
                   </Text>
                   <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]}>
                     Checked in{' '}
@@ -473,21 +521,34 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
                   </Text>
                 </View>
               </View>
-              <Button
-                title="Resume visit"
-                onPress={() =>
-                  navigation.navigate('StoreVisit', {
-                    store: {
-                      id: openVisit.store.id,
-                      name: openVisit.store.name,
-                      address: openVisit.store.address,
-                      latitude: openVisit.store.latitude,
-                      longitude: openVisit.store.longitude,
-                    },
-                  })
-                }
-                style={{ marginTop: Space.md }}
-              />
+              {/* Hidden during the confirmation flash: `checkingOut` has
+                  already cleared by then, so leaving them tappable would let a
+                  second tap re-stamp check_out_time on a closed visit. */}
+              <View style={[styles.openVisitActions, checkedOutFlash && { display: 'none' }]}>
+                <Button
+                  title="Resume"
+                  variant="secondary"
+                  onPress={() =>
+                    navigation.navigate('StoreVisit', {
+                      store: {
+                        id: openVisit.store.id,
+                        name: openVisit.store.name,
+                        address: openVisit.store.address,
+                        latitude: openVisit.store.latitude,
+                        longitude: openVisit.store.longitude,
+                      },
+                    })
+                  }
+                />
+                {/* Red, because closing the visit is the consequential action
+                    here — the one the rep must not do by accident. */}
+                <Button
+                  title="Check out"
+                  variant="danger"
+                  loading={checkingOut}
+                  onPress={handleCheckOutFromCard}
+                />
+              </View>
             </BentoTile>
           </MotiView>
         ) : null}
@@ -743,7 +804,11 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: Colors.background },
   content: { padding: Layout.screenPad },
   resumeTile: { borderColor: Colors.accent },
+  // Confirms the checkout in place for a moment before the card disappears,
+  // so the action visibly lands instead of the card just vanishing.
+  resumeTileDone: { borderColor: Colors.success, backgroundColor: Colors.bgSuccess },
   resumeHead: { flexDirection: 'row', alignItems: 'flex-start', gap: Space.sm },
+  openVisitActions: { flexDirection: 'row', gap: Space.sm, marginTop: Space.md },
   planOk: { borderColor: Colors.success },
   planBad: { borderColor: Colors.alert },
   planHead: { flexDirection: 'row', alignItems: 'center', gap: Space.sm },

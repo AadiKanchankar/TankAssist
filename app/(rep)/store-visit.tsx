@@ -9,6 +9,7 @@ import {
   Pressable,
   ActivityIndicator,
   Image,
+  Modal,
 } from 'react-native';
 import { MotiView } from 'moti';
 import { useReducedMotion } from 'react-native-reanimated';
@@ -40,7 +41,13 @@ import {
 } from '../../lib/storage';
 import { reverseGeocode } from '../../lib/geocoding';
 import { haversineKm } from '../../lib/haversine';
-import { FAR_AT_CHECKOUT_METERS } from '../../lib/journeyPlan';
+import {
+  readCheckoutPosition,
+  isFarCheckout,
+  confirmFarCheckout,
+  closeVisit,
+  closeVisitOnNextCheckin,
+} from '../../lib/visitCheckout';
 import {
   STOCK_BUCKETS,
   BUCKET_LABEL,
@@ -180,6 +187,8 @@ export default function StoreVisitScreen({
   const [orderBusy, setOrderBusy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
+  /** The "are you still in the store?" interstitial, shown before any exit. */
+  const [showStillHere, setShowStillHere] = useState(false);
 
   /**
    * The rep is already checked in somewhere else.
@@ -192,24 +201,20 @@ export default function StoreVisitScreen({
    * `replace`, not `navigate`: this screen is the wrong store, so it should
    * not sit on the stack behind the right one.
    */
-  const blockOnOtherStore = (open: any) => {
-    const other = open?.stores ?? null;
-    const name = other?.name ?? 'another store';
-    Alert.alert(
-      'You’re still checked in',
-      `You’re still checked in at ${name}. Check out there first — you can’t be in two shops at once.`,
-      [
-        { text: 'Not now', style: 'cancel', onPress: () => navigation.goBack() },
-        {
-          text: `Check out at ${name}`,
-          onPress: () =>
-            navigation.replace('StoreVisit', {
-              store: other ?? { id: open.store_id, name },
-            }),
-        },
-      ],
-      { cancelable: false },
-    );
+  const confirmCloseAndContinue = (open: any): Promise<boolean> => {
+    const name = open?.stores?.name ?? 'another store';
+    return new Promise((resolve) => {
+      Alert.alert(
+        'You’re still checked in',
+        `You’re still checked in at ${name}. Close that visit and check in here instead?\n\n` +
+          'It will be marked as closed automatically, and your manager will see it was never checked out properly.',
+        [
+          { text: 'Not now', style: 'cancel', onPress: () => resolve(false) },
+          { text: `Close ${name} & check in`, onPress: () => resolve(true) },
+        ],
+        { cancelable: false },
+      );
+    });
   };
 
   // ─── Mount: lock check-in (unchanged), then load stepper data ───
@@ -246,14 +251,24 @@ export default function StoreVisitScreen({
           .limit(1)
           .maybeSingle();
 
-        // Open somewhere ELSE: never insert, and never show a raw constraint
-        // error. Send them to close the visit they actually have.
+        // Open somewhere ELSE. The rule holds — you cannot be in two shops at
+        // once — but moving between shops is the NORMAL thing an honest rep
+        // does, so it costs one tap, not a trip back to the previous store.
+        //
+        // Closing A is never silent: it writes closed_on_next_checkin, which
+        // raises a non-soft flag for the manager. Otherwise this would be a
+        // loophole handing out tidy records for visits never properly finished.
         if (openVisit && openVisit.store_id !== store.id) {
-          blockOnOtherStore(openVisit);
-          return;
+          const proceed = await confirmCloseAndContinue(openVisit);
+          if (!proceed) {
+            navigation.goBack();
+            return;
+          }
+          await closeVisitOnNextCheckin(openVisit.id);
+          // Fall through and check in here.
         }
 
-        const existing = openVisit;
+        const existing = openVisit && openVisit.store_id === store.id ? openVisit : null;
 
         if (existing) {
           // Resuming: the server row is the source of truth. The encrypted
@@ -310,7 +325,16 @@ export default function StoreVisitScreen({
                 .limit(1)
                 .maybeSingle();
               if (raced) {
-                blockOnOtherStore(raced);
+                const proceed = await confirmCloseAndContinue(raced);
+                if (!proceed) {
+                  navigation.goBack();
+                  return;
+                }
+                await closeVisitOnNextCheckin(raced.id);
+                // Re-enter the screen rather than duplicating the insert here:
+                // the mount path already handles every case correctly, and one
+                // copy of it is easier to keep right than two.
+                navigation.replace('StoreVisit', { store });
                 return;
               }
             }
@@ -648,67 +672,29 @@ export default function StoreVisitScreen({
   };
 
   // ─── Checkout ───
-  const handleCheckout = async () => {
-    if (!visitId) return;
-    // Only products the rep engaged with get a snapshot (0 is a valid "sold out"
-    // reading; untouched products are simply not re-recorded this visit).
-    const touchedProducts = products.filter((p) => stockTouched.has(p.id));
-    const anyPositive = touchedProducts.some((p) => {
-      const t = bucketTotals(stock[p.id] ?? emptyBuckets(), p.qty_per_carton);
-      return t.cases > 0 || t.bottles > 0;
-    });
-    if (anyPositive && !stockPhotoUri) {
-      Alert.alert('Stock photo needed', 'You entered stock levels — add a stock photo before finishing.');
-      setStepStack((s) => [...s, 'stockphoto']);
-      return;
-    }
-    // ── 2d: location-guarded exit (flag, never block) ────────────────────
-    // Read the position ONCE and reuse it for both the warning and the stored
-    // evidence, so the number the rep was warned about is exactly the number
-    // the manager later sees.
-    let checkoutPos: { lat: number; lng: number; distance: number | null } | null = null;
-    try {
-      const loc = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.BestForNavigation,
-      });
-      const lat = loc.coords.latitude;
-      const lng = loc.coords.longitude;
-      checkoutPos = {
-        lat,
-        lng,
-        distance:
-          store.latitude != null && store.longitude != null
-            ? Math.round(haversineKm(lat, lng, store.latitude, store.longitude) * 1000)
-            : null,
-      };
-    } catch {
-      // No fix available. Check-out must NEVER be blocked on GPS — a rep in a
-      // basement still has to close their visit. The columns stay null, which
-      // reads as "not observed" rather than "close enough".
-    }
+  // Only products the rep engaged with get a snapshot (0 is a valid "sold out"
+  // reading; untouched products are simply not re-recorded this visit).
+  const touchedProductList = () => products.filter((p) => stockTouched.has(p.id));
 
-    if (checkoutPos?.distance != null && checkoutPos.distance > FAR_AT_CHECKOUT_METERS) {
-      const proceed = await new Promise<boolean>((resolve) => {
-        Alert.alert(
-          'You’re away from the store',
-          `You’re about ${checkoutPos!.distance} m from ${store.name}. You can still check out, but it will be flagged for your manager to review.`,
-          [
-            { text: 'Go back', style: 'cancel', onPress: () => resolve(false) },
-            { text: 'Check out anyway', onPress: () => resolve(true) },
-          ],
-          { cancelable: false },
-        );
-      });
-      if (!proceed) return;
-    }
-
-    setSubmitting(true);
-    try {
-      const checkOutTime = new Date().toISOString();
-      const durationMinutes = Math.round(
-        (Date.parse(checkOutTime) - Date.parse(checkInTime!)) / 60000
-      );
-
+  /**
+   * Commit everything the stepper buffered locally — photos and stock — and
+   * return the cover photo path.
+   *
+   * Split out because it now runs from TWO exits: the deliberate checkout, and
+   * the "still in the store" path that saves without closing the visit. The
+   * stepper holds photos in component state and the encrypted draft
+   * deliberately does not cache binaries, so leaving this screen without
+   * flushing would silently lose them — which is exactly what would have
+   * happened if the dashboard card checked out a visit abandoned mid-stepper.
+   *
+   * Safe to run twice: on a resumed visit the photo/stock buffers start empty,
+   * so a second flush inserts nothing.
+   */
+  const flushVisitData = async (): Promise<string | null> => {
+      // Throws rather than silently no-opping: reaching here without a visit
+      // means the check-in never landed, and quietly "succeeding" would tell
+      // the rep their photos were saved when nothing was written.
+      if (!visitId) throw new Error('This visit isn’t checked in yet.');
       let firstPhotoPath: string | null = null;
       for (let i = 0; i < shopPhotoUris.length; i++) {
         const path = await uploadStoreVisitPhoto(shopPhotoUris[i], store.id, store.name, visitId, i);
@@ -730,7 +716,7 @@ export default function StoreVisitScreen({
         if (error) throw error;
       }
 
-      for (const p of touchedProducts) {
+      for (const p of touchedProductList()) {
         const b = stock[p.id] ?? emptyBuckets();
         // A product marked touched but left entirely blank across all three
         // buckets records nothing — the rep opened it and moved on.
@@ -745,36 +731,88 @@ export default function StoreVisitScreen({
         if (error) throw error;
       }
 
+    return firstPhotoPath;
+  };
+
+  /** The stock photo is required once any positive reading has been entered. */
+  const stockPhotoMissing = () => {
+    const anyPositive = touchedProductList().some((p) => {
+      const t = bucketTotals(stock[p.id] ?? emptyBuckets(), p.qty_per_carton);
+      return t.cases > 0 || t.bottles > 0;
+    });
+    return anyPositive && !stockPhotoUri;
+  };
+
+  /**
+   * Finishing the stepper no longer checks out directly — it asks whether the
+   * rep has actually left. A rep who is still standing in the shop should be
+   * able to finish data entry without being forced to close the visit.
+   */
+  const handleCheckout = () => {
+    if (!visitId) return;
+    if (stockPhotoMissing()) {
+      Alert.alert('Stock photo needed', 'You entered stock levels — add a stock photo before finishing.');
+      setStepStack((s) => [...s, 'stockphoto']);
+      return;
+    }
+    setShowStillHere(true);
+  };
+
+  /**
+   * "I'm still in the store": commit everything, leave the visit OPEN.
+   *
+   * This is what makes the dashboard's checkout card safe — by the time it is
+   * used, nothing is left buffered on the device, so closing the visit is just
+   * a timestamp and a position.
+   */
+  const saveAndStay = async () => {
+    setShowStillHere(false);
+    setSubmitting(true);
+    try {
+      const firstPhotoPath = await flushVisitData();
       const { error } = await supabase
         .from('store_visits')
-        .update({
-          check_out_time: checkOutTime,
-          duration_minutes: durationMinutes,
-          notes: notes.trim() || null,
-          photo_url: firstPhotoPath,
-          // Stored, not just checked: the far_at_checkout flag is derived from
-          // these on the manager's side, so a client that skips the warning
-          // above is still caught.
-          checkout_latitude: checkoutPos?.lat ?? null,
-          checkout_longitude: checkoutPos?.lng ?? null,
-          checkout_distance_meters: checkoutPos?.distance ?? null,
-        })
-        .eq('id', visitId);
+        .update({ notes: notes.trim() || null, photo_url: firstPhotoPath })
+        .eq('id', visitId!);
       if (error) throw error;
+      // Committed server-side, so the draft has nothing left to protect.
+      await clearDraft(visitId!);
+      setSubmitting(false);
+      navigation.goBack();
+    } catch (err: any) {
+      setSubmitting(false);
+      Alert.alert('Couldn’t save', err.message || 'Try again.');
+    }
+  };
 
-      // The visit is committed server-side, so the draft has nothing left to
-      // protect — drop it rather than leaving trade data in the Keystore.
-      await clearDraft(visitId);
+  /** "I've left the store": commit, then close the visit for real. */
+  const finishAndCheckOut = async () => {
+    setShowStillHere(false);
+    // Read the position ONCE and reuse it for both the warning and the stored
+    // evidence, so the number the rep was warned about is exactly the number
+    // the manager later sees.
+    const pos = await readCheckoutPosition(store);
+    if (isFarCheckout(pos) && !(await confirmFarCheckout(pos!, store.name))) return;
+
+    setSubmitting(true);
+    try {
+      const firstPhotoPath = await flushVisitData();
+      await closeVisit({
+        visitId: visitId!,
+        checkInTime,
+        pos,
+        extra: { notes: notes.trim() || null, photo_url: firstPhotoPath },
+      });
+      await clearDraft(visitId!);
 
       // Peak-end: success overlay + haptic, then return.
       setSubmitting(false);
       setShowSuccess(true);
       setTimeout(() => navigation.goBack(), 1400);
-      return;
     } catch (err: any) {
+      setSubmitting(false);
       Alert.alert('Couldn’t check out', err.message || 'Try again.');
     }
-    setSubmitting(false);
   };
 
   // ─── Render ───
@@ -941,6 +979,47 @@ export default function StoreVisitScreen({
           />
         </View>
       )}
+
+      {/* Are you still in the store? Asked before ANY exit, so a rep standing
+          in the shop can finish data entry without being pushed out of it. */}
+      <Modal
+        visible={showStillHere}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowStillHere(false)}
+      >
+        <View style={styles.stillWrap}>
+          <View style={styles.stillCard}>
+            <Ionicons name="storefront-outline" size={28} color={Colors.accent} />
+            <Text style={styles.stillTitle}>Are you still in the store?</Text>
+            <Text style={styles.stillBody}>
+              Everything you’ve entered is saved either way. If you’re still here, the visit stays
+              open and you can check out from your dashboard when you leave.
+            </Text>
+            <Button
+              title="I’m still in the store"
+              onPress={saveAndStay}
+              loading={submitting}
+              style={{ marginTop: Space.lg }}
+            />
+            <Button
+              title="I’ve left — check out"
+              variant="secondary"
+              onPress={finishAndCheckOut}
+              style={{ marginTop: Space.sm }}
+            />
+            <Pressable
+              onPress={() => setShowStillHere(false)}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Go back to the visit"
+              style={{ marginTop: Space.md, minHeight: Layout.tap, justifyContent: 'center' }}
+            >
+              <Text style={styles.stillCancel}>Back to the visit</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
 
       {showSuccess && <SuccessOverlay label="Checked out" />}
     </View>
@@ -1312,6 +1391,27 @@ function QtyField({
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: Colors.background },
+  stillWrap: {
+    flex: 1,
+    backgroundColor: '#0007',
+    justifyContent: 'center',
+    padding: Layout.screenPad,
+  },
+  stillCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.card,
+    padding: Space.xl,
+    alignItems: 'center',
+  },
+  stillTitle: { ...Type.title, color: Colors.text, marginTop: Space.md, textAlign: 'center' },
+  stillBody: {
+    ...Type.body,
+    color: Colors.textSecondary,
+    marginTop: Space.sm,
+    textAlign: 'center',
+    lineHeight: 22,
+  },
+  stillCancel: { ...Type.label, color: Colors.textSecondary, textAlign: 'center' },
   initText: { ...Type.body, color: Colors.textMuted, marginTop: Space.md },
   // Progress
   progress: {

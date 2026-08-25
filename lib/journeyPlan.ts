@@ -90,7 +90,8 @@ export type FlagKind =
   | 'plan_not_approved'
   | 'auto_closed'
   | 'no_work_recorded'
-  | 'far_at_checkout';
+  | 'far_at_checkout'
+  | 'closed_on_next_checkin';
 
 export interface VisitFlag {
   kind: FlagKind;
@@ -128,6 +129,8 @@ export interface VisitForFlags {
   is_mock_location: boolean | null;
   /** Closed by the 22:30 IST sweep rather than by the rep. */
   auto_closed?: boolean | null;
+  /** Closed because the rep checked in at the next shop without closing this one. */
+  closed_on_next_checkin?: boolean | null;
   /** Null while the rep is still inside — an open visit has produced nothing YET. */
   check_out_time?: string | null;
   /**
@@ -182,6 +185,21 @@ export function flagsForVisit(
     });
   }
 
+  // 2b. Closed because the rep checked in at the next shop without closing
+  //     this one. NOT soft, and that is the deliberate difference from the
+  //     22:30 sweep above: a flat battery is a real innocent explanation, but
+  //     this rep demonstrably had a working phone — they checked in with it
+  //     moments later. It is a procedural miss, not an accident, and closing
+  //     it silently would hand out a tidy record for a visit never properly
+  //     finished.
+  if (visit.closed_on_next_checkin === true) {
+    flags.push({
+      kind: 'closed_on_next_checkin',
+      reason:
+        'Closed automatically when the rep checked in at the next store — not checked out here. The end time and duration are not real observations.',
+    });
+  }
+
   // 3. A completed visit that produced no work at all — the phantom visit:
   //    tapped in, tapped out, recorded nothing.
   //
@@ -201,6 +219,12 @@ export function flagsForVisit(
   //    when the nightly sweep closed it — an auto_closed row already carries
   //    its own flag saying the record is incomplete, and a rep whose battery
   //    died should not collect a second, harsher accusation for it.
+  //
+  //    ⚠️ Deliberately NOT skipped for closed_on_next_checkin. The asymmetry is
+  //    the point: a flat battery explains both the missing checkout AND the
+  //    missing work, but walking to the next shop explains only the checkout.
+  //    An abandoned visit that recorded nothing must show BOTH reasons — it
+  //    ended irregularly, and it captured nothing while it was open.
   if (
     visit.artifact_count !== undefined &&
     visit.artifact_count === 0 &&
@@ -315,9 +339,10 @@ export function sortFlags(flags: VisitFlag[]): VisitFlag[] {
     // check-in drift is an instrument artefact, checkout is a deliberate act.
     far_at_checkout: 3,
     far_from_store: 4,
-    off_plan: 5,
-    plan_not_approved: 6,
-    auto_closed: 7,
+    closed_on_next_checkin: 5,
+    off_plan: 6,
+    plan_not_approved: 7,
+    auto_closed: 8,
   };
   return [...flags].sort(
     (a, b) => Number(a.soft ?? false) - Number(b.soft ?? false) || rank[a.kind] - rank[b.kind],
