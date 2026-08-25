@@ -17,6 +17,12 @@ export interface CasesTrend {
   total: number;
   rangeLabel: string;
   granularity: Gran;
+  /**
+   * True when this range reaches back before ORDERS_CUTOVER_DATE while scoped
+   * to a product. Those days have no product dimension at all, so they are
+   * omitted — the longer ranges (1Y/3Y/5Y) are the ones that hit this.
+   */
+  legacyExcluded: boolean;
 }
 
 // Tiered granularity (brief §4): daily 1W–1M, weekly 3M–1Y, monthly 3Y–5Y.
@@ -40,7 +46,7 @@ const fmtDay = (d: Date) => d.toLocaleDateString('en-GB', { day: '2-digit', mont
 const fmtMonth = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
 const fmtFull = (d: Date) => d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 
-async function fetchTrend(range: TrendRange): Promise<CasesTrend> {
+async function fetchTrend(range: TrendRange, productId?: string): Promise<CasesTrend> {
   const cfg = RANGE_CFG[range];
   const today = startOfDay(new Date());
   const rawStart =
@@ -53,7 +59,11 @@ async function fetchTrend(range: TrendRange): Promise<CasesTrend> {
   // ── ONE hybrid call for the whole range. casesSold applies the ORDERS_CUTOVER
   // split per day internally and returns byDay; we only re-bucket that map here,
   // never reimplementing the cutover for any bucket size. ──
-  const { byDay } = await casesSold(toDateStr(rangeStart), toDateStr(endExclusive));
+  const { byDay, legacyExcluded } = await casesSold(
+    toDateStr(rangeStart),
+    toDateStr(endExclusive),
+    productId ? { productId } : {},
+  );
 
   const sumDays = (from: Date, to: Date): number => {
     let s = 0;
@@ -89,9 +99,18 @@ async function fetchTrend(range: TrendRange): Promise<CasesTrend> {
   }
 
   const total = buckets.reduce((s, b) => s + b.value, 0);
-  return { buckets, total, rangeLabel: `${fmtFull(rangeStart)} – ${fmtFull(today)}`, granularity: cfg.gran };
+  return {
+    buckets,
+    total,
+    rangeLabel: `${fmtFull(rangeStart)} – ${fmtFull(today)}`,
+    granularity: cfg.gran,
+    legacyExcluded,
+  };
 }
 
-export function useCasesTrend(range: TrendRange) {
-  return useQuery({ queryKey: ['cases-trend', range], queryFn: () => fetchTrend(range) });
+export function useCasesTrend(range: TrendRange, productId?: string) {
+  return useQuery({
+    queryKey: ['cases-trend', range, productId ?? 'all'],
+    queryFn: () => fetchTrend(range, productId),
+  });
 }

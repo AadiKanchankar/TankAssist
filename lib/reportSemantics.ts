@@ -27,10 +27,25 @@ export interface CasesResult {
   byDay: Record<string, number>;
   byStore: Record<string, number>;
   total: number;
+  /**
+   * True when a PRODUCT filter forced pre-cutover figures out of this result.
+   *
+   * `store_visits.cases_sold` is a bare integer with no product dimension —
+   * verified against the live schema — so legacy days cannot be attributed to
+   * a product at all. Rather than quietly mixing a whole-company legacy number
+   * into a single product's total (which would overstate it, invisibly), those
+   * days are dropped and this flag is raised so the UI can say so.
+   *
+   * Only ever true when the requested window actually reaches back before
+   * ORDERS_CUTOVER_DATE; a product-filtered query entirely after the cutover
+   * is exact and leaves this false.
+   */
+  legacyExcluded: boolean;
 }
 export interface CasesFilter {
   userId?: string; // scope to one rep (placed_by / visit user)
   storeId?: string; // scope to one store
+  productId?: string; // scope to one product — see legacyExcluded above
 }
 
 /**
@@ -51,8 +66,14 @@ export async function casesSold(
     if (storeId) byStore[storeId] = (byStore[storeId] || 0) + n;
   };
 
+  // A product filter cannot reach the legacy figures at all: cases_sold is one
+  // integer per VISIT with no product on it. Skipping those days is the only
+  // honest option — attributing a whole-company legacy number to one product
+  // would silently overstate it.
+  const legacyExcluded = !!filter.productId && startYmd < ORDERS_CUTOVER_DATE;
+
   // Legacy visit cases for days strictly before the cutover.
-  if (startYmd < ORDERS_CUTOVER_DATE) {
+  if (startYmd < ORDERS_CUTOVER_DATE && !filter.productId) {
     let q = supabase
       .from('store_visits')
       .select('check_in_time, cases_sold, store_id')
@@ -71,7 +92,10 @@ export async function casesSold(
   if (endExclusiveYmd > ORDERS_CUTOVER_DATE) {
     let q = supabase
       .from('orders')
-      .select('created_at, store_id, order_items(cases)')
+      // product_id comes along so a product filter can be applied per LINE.
+      // Filtering the join server-side would drop whole orders that merely
+      // contain other products too, which is a different question.
+      .select('created_at, store_id, order_items(cases, product_id)')
       .neq('status', 'cancelled')
       .gte('created_at', `${startYmd}T00:00:00`)
       .lt('created_at', `${endExclusiveYmd}T00:00:00`);
@@ -81,17 +105,16 @@ export async function casesSold(
     for (const o of (data as any[]) || []) {
       const d = toDateStr(new Date(o.created_at));
       if (d >= ORDERS_CUTOVER_DATE) {
-        const cases = (o.order_items || []).reduce(
-          (s: number, it: any) => s + (it.cases || 0),
-          0
-        );
+        const cases = (o.order_items || [])
+          .filter((it: any) => !filter.productId || it.product_id === filter.productId)
+          .reduce((s: number, it: any) => s + (it.cases || 0), 0);
         add(d, o.store_id, cases);
       }
     }
   }
 
   const total = Object.values(byDay).reduce((s, n) => s + n, 0);
-  return { byDay, byStore, total };
+  return { byDay, byStore, total, legacyExcluded };
 }
 
 /** Per-day cases for one rep over [startYmd, endExclusiveYmd). */

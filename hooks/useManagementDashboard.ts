@@ -32,13 +32,15 @@ export interface ManagementDashboardData {
   attention: AttentionStore[];
   topStores: TopStore[];
   monthTitle: string;
+  /** A product scope dropped pre-cutover figures — see CasesResult.legacyExcluded. */
+  legacyExcluded: boolean;
 }
 
 const FILTER_KEYS = Object.keys(ORDER_FILTER_STATUSES) as OrderFilter[];
 
 // Wraps the management KPI dashboard's original load() verbatim — same fetches,
 // same hybrid casesSold calls; only the setState calls become a returned object.
-async function fetchManagementDashboard(): Promise<ManagementDashboardData> {
+async function fetchManagementDashboard(productId?: string): Promise<ManagementDashboardData> {
   const now = new Date();
   const mStartStr = toDateStr(monthStart(now));
   const nextMStr = toDateStr(nextMonthStart(now));
@@ -48,9 +50,10 @@ async function fetchManagementDashboard(): Promise<ManagementDashboardData> {
   const today = toDateStr(now);
   const staleCutoff = toDateStr(addDays(now, -STALE_VISIT_DAYS));
 
+  const scope = productId ? { productId } : {};
   const [thisM, lastM] = await Promise.all([
-    casesSold(mStartStr, nextMStr),
-    casesSold(lastMStartStr, mStartStr),
+    casesSold(mStartStr, nextMStr, scope),
+    casesSold(lastMStartStr, mStartStr, scope),
   ]);
 
   const daysInMonth = addDays(nextMonthStart(now), -1).getDate();
@@ -106,6 +109,10 @@ async function fetchManagementDashboard(): Promise<ManagementDashboardData> {
   const storeHasSnap = new Set<string>();
   const storeNonZero = new Set<string>();
   for (const s of (snaps as any[]) || []) {
+    // Stock DOES carry product_id, so "stock at zero" scopes exactly. Note the
+    // other attention reason — "no visit in Nd" — has no product dimension at
+    // all and stays whole-company; the screen labels it accordingly.
+    if (productId && s.product_id !== productId) continue;
     const key = `${s.store_id}|${s.product_id}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -139,14 +146,15 @@ async function fetchManagementDashboard(): Promise<ManagementDashboardData> {
     attention,
     topStores,
     monthTitle: monthName(now),
+    legacyExcluded: thisM.legacyExcluded || lastM.legacyExcluded,
   };
 }
 
-export function useManagementDashboard() {
+export function useManagementDashboard(productId?: string) {
   const now = new Date();
   const monthKey = `${now.getFullYear()}-${now.getMonth()}`;
   return useQuery({
-    queryKey: ['management-dashboard', monthKey],
-    queryFn: fetchManagementDashboard,
+    queryKey: ['management-dashboard', monthKey, productId ?? 'all'],
+    queryFn: () => fetchManagementDashboard(productId),
   });
 }

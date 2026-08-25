@@ -6,6 +6,7 @@ import {
   ScrollView,
   RefreshControl,
   Pressable,
+  Modal,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -33,6 +34,7 @@ import { monthName } from '../../lib/reportExport';
 import { useManagementDashboard } from '../../hooks/useManagementDashboard';
 import { useCasesTrend, TREND_RANGES, TrendRange } from '../../hooks/useCasesTrend';
 import { useInventoryAnalytics, fmtQty } from '../../hooks/useInventoryAnalytics';
+import { useProducts } from '../../hooks/useProducts';
 
 // Pipeline buckets with DISTINCT on-brand colours (order metadata collides
 // dispatched/in_transit on ink, so the donut/legend use this explicit set).
@@ -48,7 +50,21 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
   const reduce = useReducedMotion();
   const insets = useSafeAreaInsets();
   const { profile } = useAuthStore();
-  const { data, refetch, isPending, isError } = useManagementDashboard();
+  /**
+   * null = every product (the whole company). Threaded into every hook whose
+   * metric can actually be split; see the audit note by the selector below.
+   *
+   * Switching flips each queryKey, so `data` goes undefined and the existing
+   * `isPending && !data` branch paints the skeleton — no spinner, and crucially
+   * no stale numbers left on screen labelled as the newly-picked product.
+   */
+  const [productId, setProductId] = useState<string | null>(null);
+  const [pickingProduct, setPickingProduct] = useState(false);
+  const { data: catalog } = useProducts();
+  const selectedProduct = (catalog ?? []).find((p: any) => p.id === productId) ?? null;
+  const scopeLabel = selectedProduct?.name ?? 'All products';
+
+  const { data, refetch, isPending, isError } = useManagementDashboard(productId ?? undefined);
 
   const pipeline = data?.pipeline ?? {
     to_process: 0,
@@ -96,9 +112,9 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
   const [selBar, setSelBar] = useState<number | null>(null);
   // Inventory ledger analytics (excise permits → movements). Company-wide first,
   // expand a product for its per-warehouse split.
-  const { data: inv } = useInventoryAnalytics();
+  const { data: inv } = useInventoryAnalytics(productId ?? undefined);
   const [openProduct, setOpenProduct] = useState<string | null>(null);
-  const { data: trend } = useCasesTrend(range);
+  const { data: trend } = useCasesTrend(range, productId ?? undefined);
   const buckets = trend?.buckets ?? [];
   const many = buckets.length > 12; // scroll + wider bars past ~12 buckets
   const selIdx = selBar != null && selBar < buckets.length ? selBar : buckets.length - 1;
@@ -143,7 +159,19 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
               {formattedDate}
             </Text>
           </View>
-          <Text style={styles.brandMark}>Tank No. 90</Text>
+          {/* Product scope. Tap to switch — the floor the brief asked for; a
+              long-press gesture would be less discoverable, not more. */}
+          <Pressable
+            onPress={() => setPickingProduct(true)}
+            style={styles.scopeChip}
+            accessibilityRole="button"
+            accessibilityLabel={`Dashboard scope: ${scopeLabel}. Tap to change product.`}
+          >
+            <Text style={styles.scopeChipText} numberOfLines={1}>
+              {scopeLabel}
+            </Text>
+            <Ionicons name="chevron-down" size={14} color={Colors.accent} />
+          </Pressable>
         </View>
 
         {/* Inventory — FY movement + current warehouse balance */}
@@ -435,6 +463,52 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
           </BentoTile>
         </MotiView>
       </ScrollView>
+
+      {/* Product switcher. A sheet rather than a nested screen, so changing
+          scope never costs a navigation round-trip. */}
+      <Modal
+        visible={pickingProduct}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setPickingProduct(false)}
+      >
+        <Pressable style={styles.sheetBackdrop} onPress={() => setPickingProduct(false)}>
+          <Pressable style={styles.sheet} onPress={() => {}}>
+            <Text style={[Type.section, { color: Colors.text }]}>Show figures for</Text>
+            <Text style={styles.sheetNote}>
+              Inventory, cases and stock split exactly by product. Field activity, the order
+              pipeline and “no visit in 7d” have no product dimension and stay company-wide.
+            </Text>
+            <ScrollView style={{ maxHeight: 340 }}>
+              {[{ id: null as string | null, name: 'All products' }, ...(catalog ?? [])].map(
+                (p: any) => {
+                  const active = (p.id ?? null) === productId;
+                  return (
+                    <Pressable
+                      key={p.id ?? 'all'}
+                      onPress={() => {
+                        setProductId(p.id ?? null);
+                        setPickingProduct(false);
+                      }}
+                      style={[styles.sheetRow, active && styles.sheetRowActive]}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected: active }}
+                      accessibilityLabel={`Show figures for ${p.name}`}
+                    >
+                      <Text style={[Type.body, { color: Colors.text, flex: 1 }]} numberOfLines={1}>
+                        {p.name}
+                      </Text>
+                      {active ? (
+                        <Ionicons name="checkmark" size={18} color={Colors.accent} />
+                      ) : null}
+                    </Pressable>
+                  );
+                },
+              )}
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -451,6 +525,45 @@ const styles = StyleSheet.create({
   content: { padding: Layout.screenPad },
   greetRow: { flexDirection: 'row', alignItems: 'flex-start' },
   brandMark: { ...Type.label, color: Colors.accent },
+  scopeChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Space.xs,
+    maxWidth: 150,
+    minHeight: 36,
+    paddingHorizontal: Space.md,
+    borderRadius: Radius.pill,
+    borderWidth: 1,
+    borderColor: Colors.accent,
+    backgroundColor: Colors.surfaceAlt,
+  },
+  scopeChipText: { ...Type.label, color: Colors.accent, flexShrink: 1 },
+  sheetBackdrop: { flex: 1, backgroundColor: '#0006', justifyContent: 'flex-end' },
+  sheet: {
+    backgroundColor: Colors.surface,
+    borderTopLeftRadius: Radius.card,
+    borderTopRightRadius: Radius.card,
+    padding: Layout.screenPad,
+    paddingBottom: Space.xxl,
+  },
+  sheetNote: {
+    ...Type.caption,
+    color: Colors.textSecondary,
+    marginTop: Space.xs,
+    marginBottom: Space.md,
+    lineHeight: 17,
+  },
+  sheetRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: Layout.tap,
+    paddingHorizontal: Space.md,
+    borderRadius: Radius.sm,
+  },
+  sheetRowActive: { backgroundColor: Colors.surfaceAlt },
+  // Marks a tile whose metric has no product dimension, so a company-wide
+  // number is never silently read as the selected product's.
+  scopeNote: { ...Type.caption, color: Colors.textMuted, marginTop: Space.xs },
   onDarkMuted: { color: Colors.textOnDark, opacity: 0.7 },
   deltaRow: { flexDirection: 'row', alignItems: 'center', gap: Space.xs, marginTop: Space.sm },
   trendHead: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: Space.md },
