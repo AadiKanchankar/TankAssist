@@ -16,10 +16,17 @@ export interface OpenVisit {
  * and even a device swap with no local storage involved. The encrypted draft
  * (lib/visitDraft) only restores what was typed on top of it.
  *
- * Scoped to today deliberately. Live data already holds visits left open for
- * days; offering to "resume" a week-old visit would be nonsense, and it would
- * also fight the stepper, whose own check-in lookup is same-day. Anything
- * older is an abandoned record for a manager to reconcile, not a session.
+ * NO LONGER scoped to today. It was, on the reasoning that resuming a week-old
+ * visit is nonsense — but store_visits_one_open_per_user now makes an open
+ * visit BLOCKING: while it exists the rep cannot check in anywhere else. A
+ * day-scoped query would hide the exact row standing in their way, leaving the
+ * dashboard silent while every check-in failed. If it is open, it is the
+ * rep's current session whether it started an hour ago or on Tuesday, and the
+ * dashboard must offer the way to close it.
+ *
+ * In practice the 22:30 IST sweep closes stragglers overnight, so a
+ * multi-day-old row means the sweep did not run — which is precisely when the
+ * rep most needs to see it.
  */
 export function useOpenVisit(repId: string | undefined) {
   return useQuery({
@@ -27,15 +34,11 @@ export function useOpenVisit(repId: string | undefined) {
     enabled: !!repId,
     refetchOnMount: false,
     queryFn: async (): Promise<OpenVisit | null> => {
-      const today = new Date();
-      const p = (n: number) => String(n).padStart(2, '0');
-      const ymd = `${today.getFullYear()}-${p(today.getMonth() + 1)}-${p(today.getDate())}`;
       const { data, error } = await supabase
         .from('store_visits')
         .select('id, store_id, check_in_time, stores(id, name, address, latitude, longitude)')
         .eq('user_id', repId!)
         .is('check_out_time', null)
-        .gte('check_in_time', `${ymd}T00:00:00`)
         .order('check_in_time', { ascending: false })
         .limit(1)
         .maybeSingle();

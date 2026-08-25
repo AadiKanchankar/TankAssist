@@ -180,6 +180,37 @@ export default function StoreVisitScreen({
   const [submitting, setSubmitting] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
 
+  /**
+   * The rep is already checked in somewhere else.
+   *
+   * You cannot be in two shops at once, so the rule holds — but an honest rep
+   * who forgot to check out of shop A before reaching shop B must not be
+   * stranded. Name the store and offer a one-tap route to close it, rather
+   * than surfacing the 23505 the index raises.
+   *
+   * `replace`, not `navigate`: this screen is the wrong store, so it should
+   * not sit on the stack behind the right one.
+   */
+  const blockOnOtherStore = (open: any) => {
+    const other = open?.stores ?? null;
+    const name = other?.name ?? 'another store';
+    Alert.alert(
+      'You’re still checked in',
+      `You’re still checked in at ${name}. Check out there first — you can’t be in two shops at once.`,
+      [
+        { text: 'Not now', style: 'cancel', onPress: () => navigation.goBack() },
+        {
+          text: `Check out at ${name}`,
+          onPress: () =>
+            navigation.replace('StoreVisit', {
+              store: other ?? { id: open.store_id, name },
+            }),
+        },
+      ],
+      { cancelable: false },
+    );
+  };
+
   // ─── Mount: lock check-in (unchanged), then load stepper data ───
   useEffect(() => {
     (async () => {
@@ -194,17 +225,34 @@ export default function StoreVisitScreen({
           accuracy: Location.Accuracy.BestForNavigation,
         });
         const now = new Date().toISOString();
-        const today = new Date().toISOString().split('T')[0];
 
-        const { data: existing } = await supabase
+        // ── One open visit at a time ──────────────────────────────────────
+        // Look for ANY open visit by this rep — not scoped to this store, and
+        // deliberately NOT scoped to today.
+        //
+        // The store_visits_one_open_per_user index makes a second open row
+        // impossible, so "the rep's open visit" is now unambiguous and the old
+        // date window existed only to disambiguate something that can no
+        // longer happen. Dropping it also matters: a straggler the 22:30 sweep
+        // missed must still be FINDABLE, or routing the rep here to close it
+        // would fail to resume, try to insert, and trap them against the index.
+        const { data: openVisit } = await supabase
           .from('store_visits')
-          .select('*')
+          .select('*, stores(id, name, address, latitude, longitude)')
           .eq('user_id', profile!.id)
-          .eq('store_id', store.id)
-          .gte('check_in_time', `${today}T00:00:00`)
-          .lt('check_in_time', `${today}T23:59:59`)
           .is('check_out_time', null)
+          .order('check_in_time', { ascending: false })
+          .limit(1)
           .maybeSingle();
+
+        // Open somewhere ELSE: never insert, and never show a raw constraint
+        // error. Send them to close the visit they actually have.
+        if (openVisit && openVisit.store_id !== store.id) {
+          blockOnOtherStore(openVisit);
+          return;
+        }
+
+        const existing = openVisit;
 
         if (existing) {
           // Resuming: the server row is the source of truth. The encrypted
@@ -248,7 +296,25 @@ export default function StoreVisitScreen({
             })
             .select()
             .single();
-          if (error) throw error;
+          if (error) {
+            // 23505 = store_visits_one_open_per_user. Between the check above
+            // and this insert, another device checked this rep in somewhere.
+            // The index is the guarantee; the pre-check is only the UX.
+            if ((error as any).code === '23505') {
+              const { data: raced } = await supabase
+                .from('store_visits')
+                .select('*, stores(id, name, address, latitude, longitude)')
+                .eq('user_id', profile!.id)
+                .is('check_out_time', null)
+                .limit(1)
+                .maybeSingle();
+              if (raced) {
+                blockOnOtherStore(raced);
+                return;
+              }
+            }
+            throw error;
+          }
           setVisitId(data.id);
           setCheckInTime(now);
           reverseGeocode(lat, lng).then(async (addr) => {
