@@ -16,7 +16,9 @@
  * display automatically. If real motorcycle dashboards defeat the guided crop,
  * phase 2 is a TRODO/YOLO region detector in front of the same interface.
  */
+import * as FileSystem from 'expo-file-system/legacy';
 import { extractOdometerCandidate } from './odometer';
+import { supabase } from './supabase';
 
 export interface OdometerReading {
   /** Best-guess odometer value, or null when nothing plausible was found. */
@@ -71,7 +73,60 @@ class MlKitEngine implements OdometerEngine {
   }
 }
 
-let engine: OdometerEngine = new MlKitEngine();
+/** Beyond this, stop waiting and read on-device instead. */
+const CLOUD_TIMEOUT_MS = 8000;
+
+/**
+ * Cloud implementation — the PRIMARY engine.
+ *
+ * On-device ML Kit was not accurate enough on real dashboards (the phase-2 wall
+ * anticipated when this interface was built). Cloud Vision reads 7-segment and
+ * LCD digits materially better, so it leads and ML Kit becomes the offline
+ * fallback. This is exactly the swap `setOdometerEngine` exists for — no call
+ * site changes.
+ *
+ * Only the CROPPED odometer region goes over the wire, which the guided capture
+ * already produces: cheaper, more accurate, and no incidental photography of
+ * the rep or the vehicle interior leaves the device. The credential lives in
+ * the Edge Function; nothing about Google is reachable from this app.
+ */
+class CloudEngine implements OdometerEngine {
+  constructor(private fallback: OdometerEngine) {}
+
+  async readOdometer(imageUri: string): Promise<OdometerReading> {
+    try {
+      const base64 = await FileSystem.readAsStringAsync(imageUri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      // A rep is standing at their bike waiting for this. Rather than let a
+      // slow network hold the field hostage, cap it and read on-device.
+      const timeout = new Promise<null>((resolve) =>
+        setTimeout(() => resolve(null), CLOUD_TIMEOUT_MS),
+      );
+      const call = supabase.functions.invoke('read-odometer', {
+        body: { imageBase64: base64 },
+      });
+      const res = await Promise.race([call, timeout]);
+
+      if (res && !(res as any).error) {
+        const data = (res as any).data as OdometerReading | undefined;
+        // A cloud response that read nothing is still a cloud answer — but an
+        // empty one is worth a second opinion, so fall through to on-device.
+        if (data && data.value != null) return data;
+      }
+    } catch {
+      // Network down, function cold, base64 read failed — all the same to the
+      // rep, and all handled the same way: read it on the phone.
+    }
+    // Offline fallback. `confidence: null` already signals "no score" and the
+    // rep confirms every reading anyway, so a bad fallback read costs a
+    // correction, never a wrong saved number.
+    return this.fallback.readOdometer(imageUri);
+  }
+}
+
+let engine: OdometerEngine = new CloudEngine(new MlKitEngine());
 
 /** Swap the engine (phase-2 YOLO reader, or a fake in a test). */
 export function setOdometerEngine(next: OdometerEngine) {
