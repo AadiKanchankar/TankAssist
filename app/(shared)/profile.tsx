@@ -4,6 +4,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, Type, Space, Radius, Layout } from '../../constants/colors';
 import Button from '../../components/Button';
+import Constants from 'expo-constants';
+import * as Updates from 'expo-updates';
 import BentoTile from '../../components/BentoTile';
 import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
@@ -16,7 +18,26 @@ const TESTER_ROLES: { value: 'rep' | 'sales_manager' | 'management'; label: stri
   { value: 'management', label: 'Management' },
 ];
 
-const APP_VERSION = 'v1.0.0';
+/**
+ * Read from app.json, never typed in.
+ *
+ * This was hardcoded 'v1.0.0' and had silently drifted TWO releases behind the
+ * real 1.2.0 — a hand-maintained version string is wrong the moment someone
+ * forgets it, and nobody notices because it looks plausible.
+ */
+const APP_VERSION = `v${Constants.expoConfig?.version ?? 'unknown'}`;
+
+/**
+ * Which JS bundle is actually running.
+ *
+ * An OTA applies on the launch AFTER it downloads, so "did the update land?"
+ * is otherwise unanswerable from the device — which cost a full round of
+ * debugging when cloud OCR appeared not to work. `embedded` means the bundle
+ * shipped inside the APK; an id means an OTA is live.
+ */
+const BUNDLE_LABEL = Updates.isEmbeddedLaunch
+  ? 'bundle: shipped with the app'
+  : `bundle: ${(Updates.updateId ?? 'unknown').slice(0, 8)}`;
 
 export default function ProfileScreen() {
   const { profile, logout, refreshProfile } = useAuthStore();
@@ -221,6 +242,7 @@ export default function ProfileScreen() {
         <Text style={[Type.label, { color: Colors.accent }]}>Tank No. 90</Text>
         <Text style={[Type.section, { color: Colors.text, marginTop: 2 }]}>TankAssist</Text>
         <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]}>{APP_VERSION}</Text>
+        <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]}>{BUNDLE_LABEL}</Text>
       </BentoTile>
 
       <Button title="Log out" onPress={handleLogout} variant="danger" loading={loggingOut} style={{ marginTop: Space.md }} />

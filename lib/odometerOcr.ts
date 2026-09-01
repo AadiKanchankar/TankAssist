@@ -33,6 +33,17 @@ export interface OdometerReading {
    * the number either way.
    */
   confidence: number | null;
+  /**
+   * Which engine actually produced this reading.
+   *
+   * Exists because a silent fallback is indistinguishable from "the cloud
+   * never worked" — that ambiguity cost a full debugging round. The capture UI
+   * shows this, so the next failure explains itself instead of needing a
+   * diagnosis.
+   */
+  source?: 'cloud' | 'device';
+  /** Why cloud was skipped, when it was. Shown in the capture UI. */
+  cloudError?: string;
   /** Raw recognised text, kept for debugging a bad read on a real dashboard. */
   rawText: string;
 }
@@ -73,8 +84,14 @@ class MlKitEngine implements OdometerEngine {
   }
 }
 
-/** Beyond this, stop waiting and read on-device instead. */
-const CLOUD_TIMEOUT_MS = 8000;
+/**
+ * Beyond this, stop waiting and read on-device instead.
+ *
+ * Measured: 350-920 KB payloads complete in 1.3-2.2 s. 8 s was the original
+ * guess and it was NOT the bottleneck, but a rep on a weak rural signal has a
+ * far worse connection than this bench, and the fallback still catches them.
+ */
+const CLOUD_TIMEOUT_MS = 15000;
 
 /**
  * Cloud implementation — the PRIMARY engine.
@@ -94,6 +111,10 @@ class CloudEngine implements OdometerEngine {
   constructor(private fallback: OdometerEngine) {}
 
   async readOdometer(imageUri: string): Promise<OdometerReading> {
+    // Never thrown away. Every path that reaches the on-device fallback
+    // records WHY, because a fallback that fires silently looks exactly like a
+    // cloud engine that was never wired up.
+    let why = 'unknown';
     try {
       const base64 = await FileSystem.readAsStringAsync(imageUri, {
         encoding: FileSystem.EncodingType.Base64,
@@ -101,28 +122,34 @@ class CloudEngine implements OdometerEngine {
 
       // A rep is standing at their bike waiting for this. Rather than let a
       // slow network hold the field hostage, cap it and read on-device.
-      const timeout = new Promise<null>((resolve) =>
-        setTimeout(() => resolve(null), CLOUD_TIMEOUT_MS),
+      const timeout = new Promise<'timeout'>((resolve) =>
+        setTimeout(() => resolve('timeout'), CLOUD_TIMEOUT_MS),
       );
       const call = supabase.functions.invoke('read-odometer', {
         body: { imageBase64: base64 },
       });
       const res = await Promise.race([call, timeout]);
 
-      if (res && !(res as any).error) {
-        const data = (res as any).data as OdometerReading | undefined;
+      if (res === 'timeout') {
+        why = `no response in ${CLOUD_TIMEOUT_MS / 1000}s`;
+      } else if ((res as any)?.error) {
+        why = `cloud error: ${(res as any).error?.message ?? 'unknown'}`;
+      } else {
+        const data = (res as any)?.data as OdometerReading | undefined;
+        if (data && data.value != null) {
+          return { ...data, source: 'cloud' };
+        }
         // A cloud response that read nothing is still a cloud answer — but an
         // empty one is worth a second opinion, so fall through to on-device.
-        if (data && data.value != null) return data;
+        why = 'cloud read no digits';
       }
-    } catch {
-      // Network down, function cold, base64 read failed — all the same to the
-      // rep, and all handled the same way: read it on the phone.
+    } catch (e: any) {
+      why = `cloud unreachable: ${e?.message ?? e}`;
     }
-    // Offline fallback. `confidence: null` already signals "no score" and the
-    // rep confirms every reading anyway, so a bad fallback read costs a
-    // correction, never a wrong saved number.
-    return this.fallback.readOdometer(imageUri);
+    // Offline fallback. The rep confirms every reading anyway, so a bad
+    // fallback read costs a correction, never a wrong saved number.
+    const local = await this.fallback.readOdometer(imageUri);
+    return { ...local, source: 'device', cloudError: why };
   }
 }
 
