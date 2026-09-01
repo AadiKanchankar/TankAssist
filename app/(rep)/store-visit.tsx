@@ -9,7 +9,6 @@ import {
   Pressable,
   ActivityIndicator,
   Image,
-  Modal,
 } from 'react-native';
 import { MotiView } from 'moti';
 import { useReducedMotion } from 'react-native-reanimated';
@@ -189,8 +188,14 @@ export default function StoreVisitScreen({
   const [orderBusy, setOrderBusy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
-  /** The "are you still in the store?" interstitial, shown before any exit. */
-  const [showStillHere, setShowStillHere] = useState(false);
+  /**
+   * "Still in the store?" — answered ON the final page, not in a popup.
+   *
+   * null until the rep chooses, and the finish button stays disabled until
+   * then: this decides whether the visit CLOSES, so it must not have a silent
+   * default that quietly picks for them.
+   */
+  const [stillInStore, setStillInStore] = useState<boolean | null>(null);
 
   /**
    * The rep is already checked in somewhere else.
@@ -767,7 +772,9 @@ export default function StoreVisitScreen({
       setStepStack((s) => [...s, 'stockphoto']);
       return;
     }
-    setShowStillHere(true);
+    // Routed by the answer given on the page above.
+    if (stillInStore === true) saveAndStay();
+    else finishAndCheckOut();
   };
 
   /**
@@ -778,7 +785,6 @@ export default function StoreVisitScreen({
    * a timestamp and a position.
    */
   const saveAndStay = async () => {
-    setShowStillHere(false);
     setSubmitting(true);
     try {
       const firstPhotoPath = await flushVisitData();
@@ -799,7 +805,6 @@ export default function StoreVisitScreen({
 
   /** "I've left the store": commit, then close the visit for real. */
   const finishAndCheckOut = async () => {
-    setShowStillHere(false);
     // Read the position ONCE and reuse it for both the warning and the stored
     // evidence, so the number the rep was warned about is exactly the number
     // the manager later sees.
@@ -954,15 +959,56 @@ export default function StoreVisitScreen({
           )}
 
           {current === 'notes' && (
-            <BentoTile>
-              <Text style={styles.fieldLabel}>Feedback / notes (optional)</Text>
-              <VoiceInput
-                value={notes}
-                onChangeText={setNotes}
-                placeholder="Anything worth noting about this visit…"
-                inputStyle={styles.textInput}
-              />
-            </BentoTile>
+            <>
+              <BentoTile>
+                <Text style={styles.fieldLabel}>Feedback / notes (optional)</Text>
+                <VoiceInput
+                  value={notes}
+                  onChangeText={setNotes}
+                  placeholder="Anything worth noting about this visit…"
+                  inputStyle={styles.textInput}
+                />
+              </BentoTile>
+
+              {/* Asked ON the page, not behind the button. A question the rep
+                  must answer before finishing has to be VISIBLE while they
+                  decide — hiding it in a modal that only appears after tapping
+                  "Complete check-out" meant nobody knew it existed. */}
+              <BentoTile style={{ marginTop: Space.md }}>
+                <Text style={styles.fieldLabel}>Still in the store?</Text>
+                <Text style={styles.stillHint}>
+                  Everything you’ve entered is saved either way. Staying keeps the visit open so
+                  you can check out from your dashboard when you leave.
+                </Text>
+                <View style={styles.stillChoices}>
+                  {[
+                    { v: true, label: 'Yes — still here' },
+                    { v: false, label: 'No — I’ve left' },
+                  ].map((opt) => {
+                    const active = stillInStore === opt.v;
+                    return (
+                      <Pressable
+                        key={String(opt.v)}
+                        onPress={() => setStillInStore(opt.v)}
+                        style={[styles.stillChoice, active && styles.stillChoiceActive]}
+                        accessibilityRole="radio"
+                        accessibilityState={{ selected: active }}
+                        accessibilityLabel={opt.label}
+                      >
+                        <Ionicons
+                          name={active ? 'radio-button-on' : 'radio-button-off'}
+                          size={18}
+                          color={active ? Colors.accent : Colors.textMuted}
+                        />
+                        <Text style={[styles.stillChoiceText, active && { color: Colors.text }]}>
+                          {opt.label}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </BentoTile>
+            </>
           )}
         </MotiView>
       </ScrollView>
@@ -976,7 +1022,11 @@ export default function StoreVisitScreen({
           <Button
             title={
               current === 'notes'
-                ? 'Complete check-out'
+                ? // The button says what it will DO, so the two exits are never
+                  // confused: staying saves, leaving closes the visit.
+                  stillInStore === true
+                  ? 'Save & back to dashboard'
+                  : 'Complete check-out'
                 : current === 'stockphoto'
                 ? 'Next'
                 : current === 'order'
@@ -987,51 +1037,14 @@ export default function StoreVisitScreen({
             }
             onPress={goNext}
             loading={submitting}
-            disabled={current === 'stockphoto' && !stockPhotoUri}
+            disabled={
+              (current === 'stockphoto' && !stockPhotoUri) ||
+              // Answering is required — this decides whether the visit closes.
+              (current === 'notes' && stillInStore === null)
+            }
           />
         </View>
       )}
-
-      {/* Are you still in the store? Asked before ANY exit, so a rep standing
-          in the shop can finish data entry without being pushed out of it. */}
-      <Modal
-        visible={showStillHere}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowStillHere(false)}
-      >
-        <View style={styles.stillWrap}>
-          <View style={styles.stillCard}>
-            <Ionicons name="storefront-outline" size={28} color={Colors.accent} />
-            <Text style={styles.stillTitle}>Are you still in the store?</Text>
-            <Text style={styles.stillBody}>
-              Everything you’ve entered is saved either way. If you’re still here, the visit stays
-              open and you can check out from your dashboard when you leave.
-            </Text>
-            <Button
-              title="I’m still in the store"
-              onPress={saveAndStay}
-              loading={submitting}
-              style={{ marginTop: Space.lg }}
-            />
-            <Button
-              title="I’ve left — check out"
-              variant="secondary"
-              onPress={finishAndCheckOut}
-              style={{ marginTop: Space.sm }}
-            />
-            <Pressable
-              onPress={() => setShowStillHere(false)}
-              hitSlop={8}
-              accessibilityRole="button"
-              accessibilityLabel="Go back to the visit"
-              style={{ marginTop: Space.md, minHeight: Layout.tap, justifyContent: 'center' }}
-            >
-              <Text style={styles.stillCancel}>Back to the visit</Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
 
       {showSuccess && <SuccessOverlay label="Checked out" />}
     </View>
@@ -1403,27 +1416,21 @@ function QtyField({
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: Colors.background },
-  stillWrap: {
-    flex: 1,
-    backgroundColor: '#0007',
-    justifyContent: 'center',
-    padding: Layout.screenPad,
-  },
-  stillCard: {
-    backgroundColor: Colors.surface,
-    borderRadius: Radius.card,
-    padding: Space.xl,
+  stillHint: { ...Type.caption, color: Colors.textSecondary, marginTop: Space.xs, lineHeight: 17 },
+  stillChoices: { marginTop: Space.md, gap: Space.sm },
+  stillChoice: {
+    flexDirection: 'row',
     alignItems: 'center',
+    gap: Space.sm,
+    minHeight: Layout.tap,
+    paddingHorizontal: Space.md,
+    borderRadius: Radius.sm,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    backgroundColor: Colors.surfaceAlt,
   },
-  stillTitle: { ...Type.title, color: Colors.text, marginTop: Space.md, textAlign: 'center' },
-  stillBody: {
-    ...Type.body,
-    color: Colors.textSecondary,
-    marginTop: Space.sm,
-    textAlign: 'center',
-    lineHeight: 22,
-  },
-  stillCancel: { ...Type.label, color: Colors.textSecondary, textAlign: 'center' },
+  stillChoiceActive: { borderColor: Colors.accent, backgroundColor: Colors.surface },
+  stillChoiceText: { ...Type.body, color: Colors.textSecondary, flex: 1 },
   initText: { ...Type.body, color: Colors.textMuted, marginTop: Space.md },
   // Progress
   progress: {
