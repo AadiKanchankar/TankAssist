@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, Modal, Pressable, TextInput, ActivityIndicator, Alert } from 'react-native';
+import { View, Text, StyleSheet, Modal, Pressable, TextInput, ActivityIndicator, Alert, Image } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, Type, Space, Radius, Layout } from '../constants/colors';
@@ -7,7 +7,16 @@ import Header from './Header';
 import Button from './Button';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { readOdometer } from '../lib/odometerOcr';
-import { checkReading } from '../lib/odometer';
+import { checkReading, resolveOdometerReading } from '../lib/odometer';
+
+/** Guide-frame height in dp — must match styles.frame.height. */
+const FRAME_H = 96;
+/**
+ * Widest image we send to OCR. Only ever a DOWNSCALE, and high enough that the
+ * digits keep their pixels; the previous unconditional 1200 shrank a
+ * full-width strip by 70% and threw away exactly what OCR needed.
+ */
+const OCR_MAX_WIDTH = 1600;
 
 export interface OdometerResult {
   value: number;
@@ -57,11 +66,31 @@ export default function OdometerCapture({
   const [engineNote, setEngineNote] = useState<string | null>(null);
   /** Camera view size, needed to map the guide frame onto the photo. */
   const [camSize, setCamSize] = useState<{ w: number; h: number } | null>(null);
+  /**
+   * The exact image that went to OCR. Shown on the correction screen so the
+   * rep can read the number off it — and so a bad crop is VISIBLE rather than
+   * silently producing a bad reading.
+   */
+  const [cropUri, setCropUri] = useState<string | null>(null);
+  const [cropFailed, setCropFailed] = useState(false);
+  /** OCR runs after the correction screen is already up; never blocks it. */
+  const [ocrBusy, setOcrBusy] = useState(false);
+  /**
+   * Set when the reading was corrected (tenths wheel dropped) or looks
+   * implausible. Shown prominently — a silently adjusted number is worse than
+   * a wrong one, because nobody checks it.
+   */
+  const [readingNote, setReadingNote] = useState<string | null>(null);
 
   const reset = () => {
     setPhotoUri(null);
+    setCropUri(null);
+    setCropFailed(false);
     setReading('');
     setOcrMissed(false);
+    setOcrBusy(false);
+    setEngineNote(null);
+    setReadingNote(null);
   };
 
   /**
@@ -81,37 +110,87 @@ export default function OdometerCapture({
    * Falls back to the uncropped photo on any failure: a bad crop must never
    * cost the rep their capture.
    */
-  const cropToFrame = async (uri: string, w: number, h: number): Promise<string> => {
+  const cropToFrame = async (
+    uri: string,
+    w: number,
+    h: number,
+  ): Promise<{ uri: string; cropped: boolean }> => {
     try {
-      if (!camSize || !w || !h) return uri;
-      // Crop GENEROUSLY AROUND the guide, not exactly to it. Measured: a tight
-      // centre band fixed one image (a dropped leading digit) but destroyed
-      // another by clipping the digits, turning a near-miss into garbage.
-      // Clipping is far more damaging than including some surrounding dial, so
-      // the crop is padded well beyond the drawn box.
-      const PAD = 1.8;
-      const fw = Math.min(1, 0.78 * PAD); // frame width, matching styles.frame
-      const fh = Math.min(1, (96 * PAD) / camSize.h); // frame height as a fraction
-      const result = await ImageManipulator.manipulateAsync(
-        uri,
-        [
-          {
-            crop: {
-              originX: Math.round(((1 - fw) / 2) * w),
-              originY: Math.round(((1 - fh) / 2) * h),
-              width: Math.round(fw * w),
-              height: Math.round(fh * h),
-            },
+      if (!camSize || !w || !h) return { uri, cropped: false };
+
+      // Pad the MARGIN around the guide, never multiply the frame itself.
+      // The previous version did `0.78 * 1.8`, which overflowed past 1.0 and
+      // clamped — leaving ZERO horizontal crop, so the whole dashboard
+      // (speedo dials, brand text) reached Vision. Expanding into the leftover
+      // space instead means padding can never erase the crop.
+      const baseW = 0.78; // matches styles.frame width
+      const baseH = Math.min(1, FRAME_H / camSize.h);
+      const fw = Math.min(0.94, baseW + (1 - baseW) * 0.45);
+      // The frame is a thin band, so it is the one most at risk of clipping a
+      // digit — pad it harder than the width, but keep it a real crop.
+      const fh = Math.min(0.55, baseH * 2.6);
+
+      const cropW = Math.round(fw * w);
+      const actions: ImageManipulator.Action[] = [
+        {
+          crop: {
+            originX: Math.round(((1 - fw) / 2) * w),
+            originY: Math.round(((1 - fh) / 2) * h),
+            width: cropW,
+            height: Math.round(fh * h),
           },
-          // A tight crop needs far fewer pixels; this keeps the upload in the
-          // tens of KB so a weak rural signal is not the bottleneck.
-          { resize: { width: 1200 } },
-        ],
-        { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG },
-      );
-      return result.uri || uri;
+        },
+      ];
+      // Only ever DOWNSCALE, and not below a width that keeps the digits
+      // legible. Unconditionally resizing to 1200 previously shrank a
+      // full-width strip by 70%, throwing away the very pixels OCR needs.
+      if (cropW > OCR_MAX_WIDTH) actions.push({ resize: { width: OCR_MAX_WIDTH } });
+
+      const result = await ImageManipulator.manipulateAsync(uri, actions, {
+        compress: 0.85,
+        format: ImageManipulator.SaveFormat.JPEG,
+      });
+      return result?.uri ? { uri: result.uri, cropped: true } : { uri, cropped: false };
     } catch {
-      return uri;
+      // Falling back to the full photo is survivable, but the rep MUST be able
+      // to see it happened — the correction screen shows whatever went to OCR.
+      return { uri, cropped: false };
+    }
+  };
+
+  /**
+   * OCR, run AFTER the correction screen is already showing.
+   *
+   * The rep must never wait on a network round-trip: they land on the
+   * correction screen instantly with the crop in front of them, and the field
+   * fills itself when the read returns (usually 1-2s). If it never returns,
+   * they simply type the number they can already see.
+   */
+  const runOcr = async (uri: string) => {
+    setOcrBusy(true);
+    try {
+      const r = await readOdometer(uri);
+      setEngineNote(
+        r.source === 'cloud'
+          ? `Read by cloud OCR${r.confidence != null ? ` (${Math.round(r.confidence * 100)}% confident)` : ''}.`
+          : `Read on this phone — cloud OCR unavailable (${r.cloudError ?? 'reason unknown'}).`,
+      );
+      // Guard the tenths wheel BEFORE the number reaches the field: a reading
+      // 10x too big would wreck travel allowance, and the rep is unlikely to
+      // spot a plausible-looking extra digit.
+      const resolved = resolveOdometerReading(r.value, startOfDay ?? null);
+      if (resolved.reason) setReadingNote(resolved.reason);
+      if (resolved.value != null) {
+        // Never clobber a number the rep has already typed while waiting.
+        setReading((prev) => (prev ? prev : String(resolved.value)));
+        setOcrMissed(false);
+      } else {
+        setOcrMissed(true);
+      }
+    } catch {
+      setOcrMissed(true);
+    } finally {
+      setOcrBusy(false);
     }
   };
 
@@ -120,23 +199,18 @@ export default function OdometerCapture({
     setBusy(true);
     try {
       const photo = await cameraRef.takePictureAsync({ quality: 0.7 });
-      if (!photo?.uri) return;
-      setPhotoUri(photo.uri);
-      // OCR reads the CROP; the rep still reviews the full photo above it.
-      const cropped = await cropToFrame(photo.uri, photo.width, photo.height);
-      const r = await readOdometer(cropped);
-      setEngineNote(
-        r.source === 'cloud'
-          ? `Read by cloud OCR${r.confidence != null ? ` (${Math.round(r.confidence * 100)}% confident)` : ''}.`
-          : `Read on this phone — cloud OCR unavailable (${r.cloudError ?? 'reason unknown'}).`,
-      );
-      if (r.value != null) {
-        setReading(String(r.value));
-        setOcrMissed(false);
-      } else {
-        setReading('');
-        setOcrMissed(true);
+      if (!photo?.uri) {
+        setBusy(false);
+        return;
       }
+      const crop = await cropToFrame(photo.uri, photo.width, photo.height);
+      setPhotoUri(photo.uri);
+      setCropUri(crop.uri);
+      setCropFailed(!crop.cropped);
+      // Correction screen NOW. OCR is deliberately not awaited.
+      setBusy(false);
+      void runOcr(crop.uri);
+      return;
     } catch {
       Alert.alert('Camera', 'Could not take the photo. Try again.');
     }
@@ -201,21 +275,37 @@ export default function OdometerCapture({
           </View>
         ) : (
           <View style={styles.reviewWrap}>
+            {/* The exact image OCR was given. Doubles as a crop check: if the
+                box missed the odometer the rep sees it here and retakes,
+                instead of the bad crop silently becoming a bad reading. */}
+            {cropUri ? (
+              <Image source={{ uri: cropUri }} style={styles.cropPreview} resizeMode="contain" />
+            ) : null}
+            {cropFailed ? (
+              <Text style={styles.cropWarn}>
+                Couldn’t crop to the box — this is the whole photo, so the reading may be less
+                accurate. Retake if the digits are small.
+              </Text>
+            ) : null}
+
             <Text style={styles.label}>Odometer reading</Text>
             <TextInput
               style={styles.readingInput}
               value={reading}
               onChangeText={(v) => setReading(v.replace(/[^0-9]/g, ''))}
               keyboardType="number-pad"
-              placeholder="e.g. 45120"
+              placeholder={ocrBusy ? 'Reading…' : 'Type the number above'}
               placeholderTextColor={Colors.textMuted}
               autoFocus
             />
             <Text style={styles.help}>
-              {ocrMissed
-                ? 'Couldn’t read the dial automatically — type the number from the photo.'
-                : 'Read from your photo. Check it matches the dial and correct it if not.'}
+              {ocrBusy
+                ? 'Reading the photo… you can type it yourself without waiting.'
+                : ocrMissed
+                ? 'Couldn’t read it automatically — type the number from the image above.'
+                : 'Check it matches the image above and correct it if not.'}
             </Text>
+            {readingNote ? <Text style={styles.cropWarn}>{readingNote}</Text> : null}
             {engineNote ? <Text style={styles.help}>{engineNote}</Text> : null}
             {startOfDay != null ? (
               <Text style={styles.help}>This morning’s reading was {startOfDay}.</Text>
@@ -264,6 +354,14 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   shootBar: { padding: Space.md, backgroundColor: Colors.background },
+  cropPreview: {
+    width: '100%',
+    height: 130,
+    borderRadius: Radius.md,
+    backgroundColor: Colors.surfaceAlt,
+    marginBottom: Space.md,
+  },
+  cropWarn: { ...Type.caption, color: Colors.warning, marginBottom: Space.sm, lineHeight: 17 },
   reviewWrap: { padding: Space.lg },
   label: { ...Type.label, color: Colors.textMuted, marginBottom: Space.sm },
   readingInput: {

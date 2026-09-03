@@ -178,3 +178,67 @@ export function mismatchFlag(
       `journey recorded. Worth asking about the extra travel.`,
   };
 }
+
+// ── The tenths-drum trap (§3d) ────────────────────────────────────────────
+
+/**
+ * A day's driving never multiplies the odometer. Beyond this ratio the reading
+ * is not "a big day", it is a misread — almost always the tenths wheel.
+ *
+ * This only decides WHEN to suspect the tenths wheel. Whether the corrected
+ * number is believable is judged by MAX_DAILY_KM, the distance bound this file
+ * already uses — a ratio is the wrong tool for that, as it happily accepted a
+ * 66,000 km "day" when the odometer was large.
+ */
+export const TENTHS_JUMP_FACTOR = 5;
+
+export interface ResolvedReading {
+  value: number | null;
+  /** True when the trailing tenths digit was dropped. */
+  adjusted: boolean;
+  /** Shown to the rep when something was changed or looks wrong. */
+  reason?: string;
+}
+
+/**
+ * Drop the tenths wheel when a mechanical odometer's last drum was read as a
+ * whole kilometre.
+ *
+ * Many mechanical odometers put the 0.1 km wheel on a distinct-coloured drum.
+ * Including it makes the reading exactly 10x too big — 33780 becomes 337807 —
+ * which would wreck travel allowance. The drum's colour is not reliably
+ * recoverable from OCR text, so the DECIDING signal here is the rep's previous
+ * reading: an odometer that appears to have multiplied is not a big day out.
+ *
+ * ⚠️ Needs `previous` to work. With no prior reading (a rep's very first
+ * capture, or the morning reading of the day) there is nothing to compare
+ * against and the raw value is returned unchanged — an honest limit, not a
+ * silent guess. The visible crop on the correction screen is the backstop
+ * there: the rep can see what the number should be.
+ */
+export function resolveOdometerReading(
+  raw: number | null,
+  previous: number | null,
+): ResolvedReading {
+  if (raw == null || !Number.isFinite(raw)) return { value: null, adjusted: false };
+  if (previous == null || previous <= 0) return { value: raw, adjusted: false };
+  if (raw < previous * TENTHS_JUMP_FACTOR) return { value: raw, adjusted: false };
+
+  const dropped = Math.floor(raw / 10);
+  // Only drop when doing so lands somewhere an odometer could actually be:
+  // at or above the last reading, and within a day's driving of it.
+  if (dropped >= previous && dropped - previous <= MAX_DAILY_KM) {
+    return {
+      value: dropped,
+      adjusted: true,
+      reason: 'Last digit looked like the tenths wheel, so it was dropped. Check it.',
+    };
+  }
+  // Dropping does not help either — leave the number alone but say it is odd,
+  // rather than silently inventing a plausible-looking one.
+  return {
+    value: raw,
+    adjusted: false,
+    reason: 'This is far higher than your last reading. Check it before saving.',
+  };
+}

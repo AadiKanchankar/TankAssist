@@ -14,6 +14,7 @@ import {
   mismatchFlag,
   MISMATCH_FLOOR_KM,
   MAX_DAILY_KM,
+  resolveOdometerReading,
 } from './odometer.ts';
 
 // ── picking the odometer out of a dashboard ───────────────────────────────
@@ -108,3 +109,39 @@ import {
 }
 
 console.log('odometer.test.ts: all assertions passed');
+
+// ── tenths-drum trap (§3d) ────────────────────────────────────────────────
+{
+  // The motivating real case: a 5-digit odometer whose tenths wheel was read
+  // as a sixth digit, making the reading exactly 10x too big.
+  const r = resolveOdometerReading(337807, 33780);
+  assert.equal(r.value, 33780, 'tenths wheel dropped');
+  assert.equal(r.adjusted, true);
+  assert.ok(r.reason, 'the rep is told it was changed');
+
+  // A normal day must never be "corrected".
+  const normal = resolveOdometerReading(33845, 33780);
+  assert.equal(normal.value, 33845, 'a 65 km day is left alone');
+  assert.equal(normal.adjusted, false);
+
+  // Same odometer, no movement at all.
+  assert.equal(resolveOdometerReading(33780, 33780).value, 33780);
+
+  // Dropping must never take the reading BELOW the last one — an odometer
+  // cannot run backwards, so if the drop does not land plausibly we keep the
+  // raw value and flag it rather than inventing a tidy number.
+  const nonsense = resolveOdometerReading(999999, 33780);
+  assert.equal(nonsense.value, 999999, 'kept as-is');
+  assert.equal(nonsense.adjusted, false);
+  assert.ok(nonsense.reason, 'but flagged as implausible');
+
+  // No previous reading: nothing to compare against, so no guessing.
+  const first = resolveOdometerReading(337807, null);
+  assert.equal(first.value, 337807, 'unchanged without a baseline');
+  assert.equal(first.adjusted, false);
+
+  // Null in, null out.
+  assert.equal(resolveOdometerReading(null, 33780).value, null);
+}
+
+console.log('odometer.test.ts: tenths-drum assertions passed');
