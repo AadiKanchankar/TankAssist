@@ -2,7 +2,7 @@
 
 Session-state snapshot for the next Claude Code session. **Temporal** — records what is live, pending, and out of scope as of the date below. Durable architecture facts live in `CLAUDE.md`; plain-language status for the user is `PROJECT_STATUS.md`.
 
-- **Snapshot date:** 2026-08-19 (reconciled against the live DB via MCP and git)
+- **Snapshot date:** 2026-09-03 (reconciled against the live DB via MCP and git)
 - **Supabase project:** `ldgunrxceogfrohjrlxz` (live MCP access; verify before assuming)
 - **Repo:** `master`, pushed to `github.com/AadiKanchankar/TankAssist`.
 - **Type state:** `npx tsc --noEmit` clean. `*.test.ts` files pass (`npx tsx <file>`). `expo-doctor` **18/18** after `npx expo install --fix` cleared patch drift on `expo`, `expo-file-system`, `expo-location`, `expo-sharing`, `expo-updates`.
@@ -11,6 +11,14 @@ Session-state snapshot for the next Claude Code session. **Temporal** — record
 ---
 
 ## What is actually live right now
+
+### 2026-09-03 batch — add-store, queue triage, odometer crop, push PROVEN
+
+- **§6 PUSH IS WORKING — and was never broken.** Live test: inserting a plan for a rep assigned to a token-holding manager produced `net._http_response` **200 `{"status":"ok"}`** from Expo (a real delivery ticket, not `DeviceNotRegistered`). The root cause of "push never fired" was that **all 5 plans were submitted by Aadi**, and the trigger excludes the submitter — at each submission no *other* active manager held a token. Pranoy's token predates his promotion to `management`; Aadi's registered 2 Sep. The build did fix it, but by making tokens register, not by fixing any bug. **Remaining acceptance: a real notification on a real closed phone.**
+- **§3 odometer.** The crop was broken twice: decorative for two builds, then a padding fix multiplied the frame past 1.0 and clamped (zero horizontal crop) before downscaling 70%. Fixed; OCR is now non-blocking with the crop shown to the rep. Tenths-wheel guard added (`resolveOdometerReading`). ⚠️ **Accuracy is NOT solved** — 2/4 on the test images either way, and alignment is now the dominant variable.
+- **§2 queue triage.** `flag_resolutions` + `rep_warnings`, 8/8 impersonation. Buttons not swipe (gesture-handler absent).
+- **§1 add-store button** on the rep store list. **§4 version** reads `expo-constants` + shows the running bundle id.
+- ⚠️ **`E:\TANK90\Odometer-Reading` holds ~180 real rep odometer photos** — the calibration set for a future YOLO/OpenCV region detector in front of the same `readOdometer()` interface. Not started.
 
 ### 2026-08-19 batch — time-in-store, challans, review queue, push (NOT YET BUILT)
 All DB work is **applied to live** and impersonation-tested. The client code is written and `tsc`-clean but **no EAS build has been cut**, so none of it is on a device yet.

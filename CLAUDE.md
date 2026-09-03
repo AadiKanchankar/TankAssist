@@ -173,6 +173,17 @@ Rebuilt 2026-08-19 as a virtualized **`SectionList`** with sticky headers and co
 - **Bucket `challan-photos`** (private, 5 MB, JPEG/PNG). Read is **own-upload + manager/management** — the one difference from `ODOMETER_BUCKET`, and deliberate: an odometer photo is evidence *about* the rep so they must not read it back, while a challan is a document the rep is transcribing *for us* and they need to see it while typing. Pass `CHALLAN_BUCKET` explicitly when signing.
 - *No manager-facing read surface yet* — reps write, RLS permits managers to read, but no screen displays them.
 
+### Review-queue triage (flag resolutions + rep warnings)
+`flag_resolutions` (`visit_id` XOR `attendance_id`, `flag_kind`, `action ('dismissed'|'warned')`, `note`, `resolved_by`) + `rep_warnings` (`rep_id`, `message`, `sent_by`, provenance ids, `acknowledged_at`). Hooks in `hooks/useFlagResolutions.ts`; the rep-facing banner is `components/WarningBanner.tsx` on the rep dashboard.
+
+**A resolution is keyed to the subject PLUS the flag_kind.** Every flag but `is_mock_location` is derived and recomputed on each queue load, so without storing the decision a dismissal simply reappears. Per-REASON, not per-row: dismissing "far from store" leaves any other flag on that visit showing, and the row clears only when every reason on it is dealt with. Two partial unique indexes (not `NULLS NOT DISTINCT`) enforce one resolution per reason without depending on the server's Postgres version.
+
+**The warning row is written BEFORE the resolution.** The other order would hide the flag from the queue while the rep never heard anything — failing silently in the direction that loses the signal. A `23505` on the resolution is treated as success: someone got there first and the flag is gone either way.
+
+**Warnings are IN-APP only, deliberately** — a manager tapping "warn" is closing a flag, not sounding an alarm on someone's phone at dinner. RLS: managers resolve only for reps they manage (`manages_rep`), a rep reads only warnings addressed to them and is the only one who can acknowledge (`rep_id = auth.uid()`). No DELETE on either table: both are audit records. Verified 8/8 by impersonation.
+
+⚠️ **Buttons, not swipe.** The brief asked for swipe-to-dismiss with buttons as the accessible fallback; `react-native-gesture-handler` is not installed and adding it means another native module plus a root-view wrapper. Buttons are the mandatory half (swipe alone is neither discoverable nor accessible). Upgrade path is noted in `TriageActions`.
+
 ### Push notifications (Expo push → FCM)
 A manager gets a notification-bar alert **with the app closed** when a plan is submitted; Realtime still updates any open screen. `push_tokens` (`user_id`, `token` **UNIQUE**, `platform`, `last_seen_at`) + `register_push_token(p_token, p_platform)`; client in `lib/push.ts`, wired into `useAuthStore` (register on login **and** on app start, unregister **before** sign-out).
 
