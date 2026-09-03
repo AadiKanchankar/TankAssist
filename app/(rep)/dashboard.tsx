@@ -51,6 +51,7 @@ import {
   closeVisit,
 } from '../../lib/visitCheckout';
 import AddStoreModal from '../../components/AddStoreModal';
+import WarningBanner from '../../components/WarningBanner';
 import OdometerCapture, { OdometerResult } from '../../components/OdometerCapture';
 import { uploadOdometerPhoto } from '../../lib/storage';
 import {
@@ -552,6 +553,9 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
             </BentoTile>
           </MotiView>
         ) : null}
+
+        {/* A manager's warning outranks the day's work — first thing seen. */}
+        <WarningBanner repId={profile?.id} />
 
         {/* Delivery challan. Store and visit are prefilled from the open visit
             when there is one; with no visit open the screen asks which store,

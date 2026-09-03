@@ -11,6 +11,7 @@ import SearchField from '../../components/SearchField';
 import { ListSkeleton } from '../../components/skeleton/ListSkeleton';
 import { useAuthStore } from '../../store/useAuthStore';
 import { useRepStores, Store } from '../../hooks/useStores';
+import AddStoreModal from '../../components/AddStoreModal';
 
 type ViewMode = 'assigned' | 'all';
 type StoreStatus = 'visited' | 'in-progress' | 'pending';
@@ -44,6 +45,13 @@ export default function RepStoresScreen({ navigation }: { navigation: any }) {
   const inProgress = data?.inProgress ?? new Set<string>();
 
   const [viewMode, setViewMode] = useState<ViewMode>('assigned');
+  /**
+   * Add-store was previously reachable ONLY from the search-empty state, so a
+   * rep had to search for a shop that did not exist to discover they could
+   * create it. This is the same modal — same dedup guard, same GPS capture —
+   * just given a door.
+   */
+  const [showAddStore, setShowAddStore] = useState(false);
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -81,10 +89,23 @@ export default function RepStoresScreen({ navigation }: { navigation: any }) {
   return (
     <View style={styles.container}>
       <View style={[styles.headerPad, { paddingTop: insets.top + Space.md }]}>
-        <Text style={[Type.title, { color: Colors.text }]}>Your stores</Text>
-        <Text style={[Type.body, { color: Colors.textSecondary, marginTop: 2 }]}>
-          {assignments.length} assigned · {visited.size} visited
-        </Text>
+        <View style={styles.titleRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={[Type.title, { color: Colors.text }]}>Your stores</Text>
+            <Text style={[Type.body, { color: Colors.textSecondary, marginTop: 2 }]}>
+              {assignments.length} assigned · {visited.size} visited
+            </Text>
+          </View>
+          <Pressable
+            onPress={() => setShowAddStore(true)}
+            style={styles.addBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Add a new store"
+          >
+            <Ionicons name="add" size={18} color={Colors.white} />
+            <Text style={styles.addBtnText}>Add store</Text>
+          </Pressable>
+        </View>
 
         <View style={styles.toggleRow}>
           {(['assigned', 'all'] as ViewMode[]).map((m) => (
@@ -189,6 +210,17 @@ export default function RepStoresScreen({ navigation }: { navigation: any }) {
           }
         />
       )}
+      <AddStoreModal
+        visible={showAddStore}
+        createdByUserId={profile!.id}
+        onClose={() => setShowAddStore(false)}
+        onResolved={() => {
+          // The new store belongs in this list, so refresh rather than
+          // navigating away — the rep came here to browse, not to check in.
+          setShowAddStore(false);
+          refetch();
+        }}
+      />
     </View>
   );
 }
@@ -196,6 +228,17 @@ export default function RepStoresScreen({ navigation }: { navigation: any }) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
   headerPad: { paddingHorizontal: Layout.screenPad, paddingBottom: Space.sm },
+  titleRow: { flexDirection: 'row', alignItems: 'flex-start', gap: Space.md },
+  addBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Space.xs,
+    minHeight: Layout.tap,
+    paddingHorizontal: Space.md,
+    borderRadius: Radius.pill,
+    backgroundColor: Colors.accent,
+  },
+  addBtnText: { ...Type.label, color: Colors.white },
   toggleRow: {
     flexDirection: 'row',
     marginTop: Space.md,

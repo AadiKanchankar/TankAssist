@@ -31,6 +31,12 @@ import {
   type PendingPlan,
 } from '../../hooks/useJourneyPlans';
 import { PLAN_ACTIONABLE_DAYS } from '../../lib/journeyPlan';
+import {
+  useFlagResolutions,
+  useResolveFlag,
+  resolutionKey,
+  type FlagAction,
+} from '../../hooks/useFlagResolutions';
 
 const fmtWhen = (iso: string | null) =>
   iso
@@ -66,6 +72,41 @@ interface QueueSection {
   data: Row[];
 }
 
+/**
+ * Dismiss / Warn, per reason.
+ *
+ * ponytail: BUTTONS, not swipe. The brief asked for swipe with buttons as the
+ * accessible fallback, but react-native-gesture-handler is not installed and
+ * adding it means another native module plus a root-view wrapper. Buttons are
+ * the half that is mandatory (swipe alone is neither discoverable nor
+ * accessible) and they deliver the whole capability. Upgrade path: wrap this
+ * row in a Swipeable once gesture-handler lands.
+ */
+function TriageActions({ onDismiss, onWarn }: { onDismiss: () => void; onWarn: () => void }) {
+  return (
+    <View style={styles.triageRow}>
+      <Pressable
+        onPress={onDismiss}
+        style={styles.triageBtn}
+        accessibilityRole="button"
+        accessibilityLabel="Dismiss this flag"
+      >
+        <Ionicons name="checkmark-circle-outline" size={16} color={Colors.textSecondary} />
+        <Text style={styles.triageText}>Dismiss</Text>
+      </Pressable>
+      <Pressable
+        onPress={onWarn}
+        style={[styles.triageBtn, styles.triageWarn]}
+        accessibilityRole="button"
+        accessibilityLabel="Warn the rep about this flag"
+      >
+        <Ionicons name="alert-circle-outline" size={16} color={Colors.alert} />
+        <Text style={[styles.triageText, { color: Colors.alert }]}>Warn rep</Text>
+      </Pressable>
+    </View>
+  );
+}
+
 const TYPE_ORDER = ['odometer', 'visit', 'plan'] as const;
 const TYPE_TITLE: Record<(typeof TYPE_ORDER)[number], string> = {
   odometer: 'Odometer flags',
@@ -98,6 +139,19 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
   const flagged = useFlaggedVisits();
   const odoFlags = useOdometerFlags();
   const review = useReviewPlan(profile?.id);
+  const { data: resolved } = useFlagResolutions();
+  const resolve = useResolveFlag(profile?.id);
+  /** The item being dismissed/warned, held while the note sheet is open. */
+  const [resolving, setResolving] = useState<{
+    subject: 'visit' | 'attendance';
+    subjectId: string;
+    flagKind: string;
+    action: FlagAction;
+    repId: string;
+    repName: string;
+    reason: string;
+  } | null>(null);
+  const [resolveNote, setResolveNote] = useState('');
 
   // Live: a rep submitting a plan refreshes this list without a pull.
   usePlanSubmissions(true);
@@ -164,10 +218,55 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
       return next;
     });
 
+  /**
+   * Open the note sheet for a triage action.
+   *
+   * Both actions share one sheet: the note is optional on a dismissal (why it
+   * was fine) and becomes the message on a warning, so a manager never has to
+   * learn two flows for what is one decision.
+   */
+  const startResolve = (
+    subject: 'visit' | 'attendance',
+    subjectId: string,
+    flagKind: string,
+    action: FlagAction,
+    repId: string,
+    repName: string,
+    reason: string,
+  ) => {
+    setResolving({ subject, subjectId, flagKind, action, repId, repName, reason });
+    setResolveNote('');
+  };
+
+  const submitResolve = async () => {
+    if (!resolving) return;
+    try {
+      await resolve.mutateAsync({
+        subject: resolving.subject,
+        subjectId: resolving.subjectId,
+        flagKind: resolving.flagKind,
+        action: resolving.action,
+        note: resolveNote,
+        repId: resolving.repId,
+        // The flag's own wording is the default message, so a warning always
+        // says what it is about even when the manager adds nothing.
+        message: resolveNote.trim() || resolving.reason,
+      });
+      setResolving(null);
+      setResolveNote('');
+    } catch (e: any) {
+      Alert.alert('Couldn’t save', e?.message ?? 'Try again.');
+    }
+  };
+
   /** Every actionable row, newest first, in one flat list. */
   const allRows: Row[] = useMemo(() => {
     const rows: Row[] = [
-      ...days.map((d) => ({
+      // A resolved reason must STAY resolved: these flags are derived and would
+      // otherwise reappear on the next load as if nothing had been decided.
+      ...days
+        .filter((d) => !resolved?.has(resolutionKey('attendance', d.attendance_id, 'odometer_mismatch')))
+        .map((d) => ({
         kind: 'odometer' as const,
         key: `odo-${d.attendance_id}`,
         // A day flag has only a date; pin it to end-of-day so it sorts against
@@ -177,14 +276,25 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
         repName: d.rep_name,
         day: d,
       })),
-      ...visits.map((v) => ({
-        kind: 'visit' as const,
-        key: `visit-${v.visit_id}`,
-        sortKey: v.check_in_time ?? '',
-        repId: v.rep_id,
-        repName: v.rep_name,
-        visit: v,
-      })),
+      // Per-REASON, not per-row: dismissing "far from store" leaves any other
+      // flag on the same visit still showing, and the row only disappears once
+      // every reason on it has been dealt with.
+      ...visits
+        .map((v) => ({
+          ...v,
+          flags: v.flags.filter(
+            (f) => !resolved?.has(resolutionKey('visit', v.visit_id, f.kind)),
+          ),
+        }))
+        .filter((v) => v.flags.length > 0)
+        .map((v) => ({
+          kind: 'visit' as const,
+          key: `visit-${v.visit_id}`,
+          sortKey: v.check_in_time ?? '',
+          repId: v.rep_id,
+          repName: v.rep_name,
+          visit: v,
+        })),
       ...pending.map((p) => ({
         kind: 'plan' as const,
         key: `plan-${p.id}`,
@@ -195,7 +305,7 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
       })),
     ];
     return rows.sort((a, b) => (b as any).sortKey.localeCompare((a as any).sortKey));
-  }, [days, visits, pending]);
+  }, [days, visits, pending, resolved]);
 
   const totalActionable = allRows.length;
 
@@ -328,6 +438,14 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
             <Ionicons name="speedometer-outline" size={16} color={Colors.alert} />
             <Text style={styles.flagText}>{d.reason}</Text>
           </View>
+          <TriageActions
+            onDismiss={() =>
+              startResolve('attendance', d.attendance_id, 'odometer_mismatch', 'dismissed', d.rep_id, d.rep_name, d.reason)
+            }
+            onWarn={() =>
+              startResolve('attendance', d.attendance_id, 'odometer_mismatch', 'warned', d.rep_id, d.rep_name, d.reason)
+            }
+          />
         </BentoTile>
       );
     }
@@ -348,13 +466,24 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
             </View>
           </View>
           {v.flags.map((f, i) => (
-            <View key={i} style={[styles.flagRow, f.soft ? styles.flagSoft : styles.flagHard]}>
-              <Ionicons
-                name={f.soft ? 'help-circle-outline' : 'alert-circle-outline'}
-                size={16}
-                color={f.soft ? Colors.textSecondary : Colors.alert}
+            <View key={i}>
+              <View style={[styles.flagRow, f.soft ? styles.flagSoft : styles.flagHard]}>
+                <Ionicons
+                  name={f.soft ? 'help-circle-outline' : 'alert-circle-outline'}
+                  size={16}
+                  color={f.soft ? Colors.textSecondary : Colors.alert}
+                />
+                <Text style={styles.flagText}>{f.reason}</Text>
+              </View>
+              {/* Per REASON, because that is the unit a manager judges. */}
+              <TriageActions
+                onDismiss={() =>
+                  startResolve('visit', v.visit_id, f.kind, 'dismissed', v.rep_id, v.rep_name, f.reason)
+                }
+                onWarn={() =>
+                  startResolve('visit', v.visit_id, f.kind, 'warned', v.rep_id, v.rep_name, f.reason)
+                }
               />
-              <Text style={styles.flagText}>{f.reason}</Text>
             </View>
           ))}
         </BentoTile>
@@ -503,6 +632,53 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
         }
       />
 
+      {/* One sheet for both actions: the note is optional context on a
+          dismissal and becomes the message on a warning. */}
+      <Modal
+        visible={!!resolving}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setResolving(null)}
+      >
+        <View style={styles.modalWrap}>
+          <View style={styles.modal}>
+            <Text style={[Type.bodyMed, { color: Colors.text }]}>
+              {resolving?.action === 'warned'
+                ? `Warn ${resolving?.repName}`
+                : 'Dismiss this flag'}
+            </Text>
+            <Text style={styles.meta}>{resolving?.reason}</Text>
+            <TextInput
+              style={styles.input}
+              placeholder={
+                resolving?.action === 'warned'
+                  ? 'What should they do differently? (optional)'
+                  : 'Why was this fine? (optional)'
+              }
+              placeholderTextColor={Colors.textMuted}
+              value={resolveNote}
+              onChangeText={setResolveNote}
+              multiline
+              accessibilityLabel="Note"
+            />
+            <Text style={styles.meta}>
+              {resolving?.action === 'warned'
+                ? 'The rep sees this in the app. It is not a push notification.'
+                : 'Kept as an audit trail — dismissing hides the flag, it does not erase it.'}
+            </Text>
+            <View style={styles.actions}>
+              <Button
+                title={resolving?.action === 'warned' ? 'Send warning' : 'Dismiss'}
+                variant={resolving?.action === 'warned' ? 'danger' : 'primary'}
+                onPress={submitResolve}
+                loading={resolve.isPending}
+              />
+              <Button title="Cancel" variant="secondary" onPress={() => setResolving(null)} />
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <Modal
         visible={!!rejecting}
         transparent
@@ -596,6 +772,21 @@ const styles = StyleSheet.create({
   },
   countText: { ...Type.caption, color: Colors.textSecondary, textAlign: 'center' },
 
+  triageRow: { flexDirection: 'row', gap: Space.sm, marginTop: Space.sm },
+  triageBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Space.xs,
+    flex: 1,
+    minHeight: Layout.tap,
+    borderRadius: Radius.sm,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    backgroundColor: Colors.surface,
+  },
+  triageWarn: { borderColor: Colors.alert },
+  triageText: { ...Type.label, color: Colors.textSecondary },
   tile: { marginBottom: Space.sm },
   rowTop: { flexDirection: 'row', alignItems: 'flex-start' },
   meta: { ...Type.caption, color: Colors.textMuted, marginTop: 2 },
