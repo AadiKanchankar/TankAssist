@@ -125,10 +125,25 @@ class CloudEngine implements OdometerEngine {
       const timeout = new Promise<'timeout'>((resolve) =>
         setTimeout(() => resolve('timeout'), CLOUD_TIMEOUT_MS),
       );
-      const call = supabase.functions.invoke('read-odometer', {
-        body: { imageBase64: base64 },
-      });
-      const res = await Promise.race([call, timeout]);
+      /**
+       * One retry, not three.
+       *
+       * The diagnosis found NO availability problem — all 18 live calls
+       * returned HTTP 200 in 0.5-1.9s, so retry is insurance against a real
+       * field signal drop, not a fix for anything observed. A second attempt
+       * catches a dropped packet; a third would just make a rep on a dead
+       * network wait twice as long for the same nothing.
+       */
+      const invoke = () =>
+        supabase.functions.invoke('read-odometer', { body: { imageBase64: base64 } });
+
+      let res = await Promise.race([invoke(), timeout]);
+      const transient =
+        res !== 'timeout' && !!(res as any)?.error;
+      if (transient) {
+        await new Promise((r) => setTimeout(r, 600));
+        res = await Promise.race([invoke(), timeout]);
+      }
 
       if (res === 'timeout') {
         why = `no response in ${CLOUD_TIMEOUT_MS / 1000}s`;

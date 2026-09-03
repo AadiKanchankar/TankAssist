@@ -50,21 +50,71 @@ export interface ReadingCheck {
  * TRODO/YOLO model that locates the odometer region before OCR runs — the
  * engine is already behind an interface so that swap touches one module.
  */
+const SPLIT_LINES = new RegExp('[\r\n]+');
+
 export function extractOdometerCandidate(rawText: string): number | null {
   if (!rawText) return null;
-  const tokens = rawText.split(/[^0-9.,]+/).filter(Boolean);
-  const whole: string[] = [];
-  for (const t of tokens) {
-    // A number carrying a decimal separator is almost always the trip meter.
-    if (/[.,]/.test(t)) continue;
-    const digits = t.replace(/\D/g, '');
-    if (digits.length >= MIN_ODO_DIGITS && digits.length <= MAX_ODO_DIGITS) whole.push(digits);
+
+  // Work line by line: digits that belong to one display sit on one line, and
+  // this stops a dial number above being merged with the odometer below.
+  const candidates: string[] = [];
+
+  for (const line of rawText.split(SPLIT_LINES)) {
+    // 1. Thousands separators are NOT decimals. "89,314" is one number, but the
+    //    old blanket "reject anything with . or ," discarded it entirely — a
+    //    real cause of "cloud read no digits" on a perfectly clear display.
+    const cleaned = line.replace(/(\d)[,](\d{3})(?!\d)/g, '$1$2');
+
+    const tokens = cleaned.split(/[^0-9.,]+/).filter(Boolean);
+    const singles: string[] = [];
+
+    for (const raw of tokens) {
+      // Trailing punctuation is noise, not a decimal point.
+      const t = raw.replace(/[.,]+$/, '');
+      // ANY separator still sitting between digits at this point is either the
+      // trip meter (67.8) or two dial markings Vision merged ("200.120") — and
+      // the merged case is the dangerous one, because it is the right LENGTH
+      // to look like an odometer and can outrank the real reading. Thousands
+      // commas were already normalised away above, so nothing legitimate is
+      // lost by rejecting the whole token here.
+      if (/\d[.,]\d/.test(t)) {
+        singles.length = 0; // a decimal breaks any digit run around it
+        continue;
+      }
+      const digits = t.replace(/\D/g, '');
+      if (!digits) continue;
+
+      if (digits.length >= MIN_ODO_DIGITS && digits.length <= MAX_ODO_DIGITS) {
+        candidates.push(digits);
+        singles.length = 0;
+        continue;
+      }
+
+      // 2. Segmented LCDs are read digit-by-digit when the gaps are wide, so
+      //    "89314" arrives as "8 9 3 1 4". Rebuild a run of SINGLE digits.
+      //    Deliberately single digits only, and at least MIN_ODO_DIGITS of
+      //    them: merging looser fragments would happily turn the dial numbers
+      //    "80 100" into a plausible-looking 80100, which is far worse than
+      //    failing and letting the rep type it.
+      if (digits.length === 1) {
+        singles.push(digits);
+        if (singles.length >= MIN_ODO_DIGITS && singles.length <= MAX_ODO_DIGITS) {
+          candidates.push(singles.join(''));
+        }
+      } else {
+        singles.length = 0;
+      }
+    }
   }
-  if (!whole.length) return null;
-  whole.sort((a, b) => b.length - a.length || Number(b) - Number(a));
-  const n = Number(whole[0]);
+
+  if (!candidates.length) return null;
+  // Longest run wins, then largest — a 6-digit odometer beats a 4-digit
+  // fragment of the same cluster.
+  candidates.sort((a, b) => b.length - a.length || Number(b) - Number(a));
+  const n = Number(candidates[0]);
   return Number.isFinite(n) ? n : null;
 }
+
 
 /**
  * Is this reading usable? `startOfDay` is the punch-in reading when validating

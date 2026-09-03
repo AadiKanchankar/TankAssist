@@ -142,23 +142,57 @@ async function getAccessToken(sa: ServiceAccount): Promise<string> {
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
+const MIN_ODO_DIGITS = 4;
+const MAX_ODO_DIGITS = 7;
+
 /**
  * Pick the odometer number out of Vision's text. Mirrors
- * extractOdometerCandidate on the client: digits only, 4-7 digits, and
- * anything carrying a decimal separator is DISCARDED — that is how the trip
- * meter (67.8) is told apart from the odometer (12345).
+ * extractOdometerCandidate in lib/odometer.ts — this copy is the one that
+ * decides for CLOUD reads; the client's copy only serves the ML Kit fallback.
+ * Both are covered by lib/odometer.test.ts, so keep them in step.
  */
 function extractOdometer(raw: string): number | null {
-  const tokens = raw.match(/[0-9][0-9.,]*/g) ?? [];
-  const candidates = tokens
-    .filter((t) => !/[.,]/.test(t))
-    .map((t) => t.replace(/\D/g, ''))
-    .filter((t) => t.length >= 4 && t.length <= 7);
+  if (!raw) return null;
+  const candidates: string[] = [];
+
+  for (const line of raw.split(/[\r\n]+/)) {
+    // A thousands separator is not a decimal point.
+    const cleaned = line.replace(/(\d)[,](\d{3})(?!\d)/g, '$1$2');
+    const tokens = cleaned.split(/[^0-9.,]+/).filter(Boolean);
+    const singles: string[] = [];
+
+    for (const rawTok of tokens) {
+      const t = rawTok.replace(/[.,]+$/, '');
+      // ANY separator still between digits is either the trip meter (67.8) or
+      // two dial markings Vision merged ("200.120"). The merged case is the
+      // dangerous one: it is the right LENGTH to look like an odometer and can
+      // outrank the real reading.
+      if (/\d[.,]\d/.test(t)) { singles.length = 0; continue; }
+      const digits = t.replace(/\D/g, '');
+      if (!digits) continue;
+
+      if (digits.length >= MIN_ODO_DIGITS && digits.length <= MAX_ODO_DIGITS) {
+        candidates.push(digits); singles.length = 0; continue;
+      }
+      // Rebuild a run of SINGLE digits only — looser merging would turn the
+      // dial markings "80 100" into a plausible-looking 80100.
+      if (digits.length === 1) {
+        singles.push(digits);
+        if (singles.length >= MIN_ODO_DIGITS && singles.length <= MAX_ODO_DIGITS) {
+          candidates.push(singles.join(''));
+        }
+      } else {
+        singles.length = 0;
+      }
+    }
+  }
+
   if (!candidates.length) return null;
   candidates.sort((a, b) => b.length - a.length || Number(b) - Number(a));
   const n = Number(candidates[0]);
   return Number.isFinite(n) ? n : null;
 }
+
 
 Deno.serve(async (req) => {
   const secret = resolveSecret();
@@ -279,5 +313,13 @@ Deno.serve(async (req) => {
       ? first.fullTextAnnotation.pages[0].confidence
       : null;
 
-  return json({ value: extractOdometer(rawText), confidence, rawText });
+  const value = extractOdometer(rawText);
+  // Logged so a future "no digits" is diagnosable from the server rather than
+  // being a black box. Only the OCR text of a cropped odometer — no image, no
+  // identifiers.
+  if (value === null) {
+    console.warn('[read-odometer] no digits extracted from: ' + JSON.stringify(rawText.slice(0, 200)));
+  }
+
+  return json({ value, confidence, rawText });
 });

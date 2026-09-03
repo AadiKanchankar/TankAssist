@@ -145,3 +145,46 @@ console.log('odometer.test.ts: all assertions passed');
 }
 
 console.log('odometer.test.ts: tenths-drum assertions passed');
+
+// ── how OCR actually renders a display (the "cloud read no digits" bug) ───
+// Every case below returned NULL before, and each was a real reason a crisp,
+// well-cropped LCD reported "cloud read no digits". Availability was never the
+// problem: all 18 live Vision calls returned HTTP 200.
+{
+  assert.equal(extractOdometerCandidate('89314 km'), 89314, 'the plain case');
+  assert.equal(extractOdometerCandidate('89,314 km'), 89314, 'a thousands comma is not a decimal');
+  assert.equal(extractOdometerCandidate('89314.'), 89314, 'trailing punctuation is noise');
+  // The important one: Vision tokenises segmented LCD digits separately when
+  // the gaps are wide — so a BETTER crop made this failure MORE likely.
+  assert.equal(extractOdometerCandidate('8 9 3 1 4'), 89314, 'per-digit split is rebuilt');
+  assert.equal(extractOdometerCandidate('ODO 89314 km'), 89314);
+  assert.equal(extractOdometerCandidate('089314'), 89314, 'a leading zero is kept');
+
+  // Rebuilding digit runs must not invent numbers out of dial markings.
+  assert.equal(extractOdometerCandidate('80 100'), null, 'two dial numbers never merge');
+  assert.equal(extractOdometerCandidate('120 140 100 160'), null, 'a row of dial numbers');
+  assert.equal(extractOdometerCandidate('1 2 3'), null, 'too few digits for an odometer');
+  // The trip meter is still rejected — that is what the decimal rule is FOR.
+  assert.equal(extractOdometerCandidate('67.8'), null, 'trip meter alone');
+  assert.equal(extractOdometerCandidate('67.8\n12345'), 12345, 'trip meter above, odometer below');
+}
+
+console.log('odometer.test.ts: OCR-shape assertions passed');
+
+// ── merged dial markings must never outrank the real reading ──────────────
+// Regression: relaxing the decimal rule let "200.120" through as a 6-digit
+// candidate that beat the true 123456. Vision produces this by merging two
+// dial numbers, and it is the RIGHT LENGTH to look like an odometer, which is
+// exactly what makes it dangerous.
+{
+  assert.equal(extractOdometerCandidate('200.120'), null, 'merged dial markings rejected');
+  assert.equal(
+    extractOdometerCandidate('-20\n40\n20\n5\nODO\nMPH\n180-\n200.120\n123456'),
+    123456,
+    'the real odometer wins over merged markings',
+  );
+  assert.equal(extractOdometerCandidate('89,314'), 89314, 'thousands comma still reads');
+  assert.equal(extractOdometerCandidate('8 9 3 1 4'), 89314, 'digit-split still rebuilds');
+}
+
+console.log('odometer.test.ts: merged-marking assertions passed');

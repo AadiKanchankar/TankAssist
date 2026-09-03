@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, Alert, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, Alert, ActivityIndicator, ScrollView } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, Type, Space, Radius, Layout, tabularNums } from '../../constants/colors';
@@ -132,7 +132,20 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
     <View style={styles.container}>
       <Header title="Check in" onBack={() => navigation.goBack()} />
 
-      <View style={[styles.content, { paddingBottom: Layout.tabBar + insets.bottom + Space.md }]}>
+      {/* Scrollable: the odometer section sits below the fold on a small
+          screen, and in a plain View it was simply unreachable — a rep would
+          never fill it and would reasonably think the page was broken.
+          contentContainerStyle carries the padding; `flexGrow` (not `flex`)
+          lets short content still fill the screen without capping the scroll. */}
+      <ScrollView
+        style={styles.content}
+        contentContainerStyle={[
+          styles.contentInner,
+          { paddingBottom: Layout.tabBar + insets.bottom + Space.md },
+        ]}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
         {/* GPS */}
         <BentoTile>
           <Text style={styles.label}>Your location</Text>
@@ -216,7 +229,7 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
           disabled={!location || !photoUri}
           style={styles.submitBtn}
         />
-      </View>
+      </ScrollView>
 
       <OdometerCapture
         visible={showOdo}
@@ -236,7 +249,8 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: Layout.screenPad },
-  content: { flex: 1, padding: Layout.screenPad },
+  content: { flex: 1 },
+  contentInner: { padding: Layout.screenPad, flexGrow: 1 },
   label: { ...Type.label, color: Colors.textMuted, marginBottom: Space.sm },
   cameraWrapper: { borderRadius: Radius.md, overflow: 'hidden', backgroundColor: Colors.surfaceAlt },
   camera: { width: '100%', height: 300 },

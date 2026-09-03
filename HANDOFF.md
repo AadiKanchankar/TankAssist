@@ -12,6 +12,16 @@ Session-state snapshot for the next Claude Code session. **Temporal** — record
 
 ## What is actually live right now
 
+### 2026-09-03b — odometer "unavailable" was EXTRACTION, not availability
+
+Diagnosed before changing anything: **all 18 live Edge Function calls returned HTTP 200 in 0.5-1.9 s.** No key/billing/quota problem, no cold start, no timeout, and the client was reaching the function — so the brief's premise (the Vision call is not landing) was wrong. `"cloud read no digits"` was literally true; the bug was the digit extractor.
+
+Fixed in BOTH copies (`lib/odometer.ts` and the Edge Function, now **v5**). A first attempt over-relaxed the decimal rule and regressed `123456` → `200120` from merged dial markings — caught by re-running the test images, tightened, re-verified. Now 2/4 exact with both remaining misses being **Vision's own digit errors** (`235911`, `44395`), not extraction.
+
+⚠️ **Deliberately NOT built: the warm-up ping.** The latency data shows no cold-start problem, so it would burn Vision quota for no measured benefit. One retry was added for genuine field signal drops — insurance, not a fix for anything observed.
+
+**Check-in page had no ScrollView at all**, so the odometer section below the fold was unreachable. Now scrollable.
+
 ### 2026-09-03 batch — add-store, queue triage, odometer crop, push PROVEN
 
 - **§6 PUSH IS WORKING — and was never broken.** Live test: inserting a plan for a rep assigned to a token-holding manager produced `net._http_response` **200 `{"status":"ok"}`** from Expo (a real delivery ticket, not `DeviceNotRegistered`). The root cause of "push never fired" was that **all 5 plans were submitted by Aadi**, and the trigger excludes the submitter — at each submission no *other* active manager held a token. Pranoy's token predates his promotion to `management`; Aadi's registered 2 Sep. The build did fix it, but by making tokens register, not by fixing any bug. **Remaining acceptance: a real notification on a real closed phone.**
