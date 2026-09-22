@@ -184,6 +184,16 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
               <StatTile label="Market time" {...market} wide />
             </View>
 
+            {/* Downloads sit right under the tiles: below the visit list,
+                managers who never scrolled that far never found them. */}
+            <Text style={[Type.label, { color: Colors.textMuted, marginBottom: Space.sm }]}>
+              Download {monthName(downloadMonthAnchor)}
+            </Text>
+            <View style={[styles.downloadRow, styles.section]}>
+              <Button title="CSV (raw)" onPress={handleExportCsv} loading={exportKind === 'csv'} variant="secondary" style={styles.downloadHalf} />
+              <Button title="PDF (formatted)" onPress={handleExportPdf} loading={exportKind === 'pdf'} style={styles.downloadHalf} />
+            </View>
+
             {visits.length > 0 && (
               <View style={styles.section}>
                 <Text style={styles.sectionLabel}>Store visits</Text>
@@ -234,14 +244,6 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
           </>
         )}
 
-        {/* CSV / PDF choice — always exports the full calendar month in view */}
-        <Text style={[Type.label, { color: Colors.textMuted, marginTop: Space.lg, marginBottom: Space.sm }]}>
-          Download {monthName(downloadMonthAnchor)}
-        </Text>
-        <View style={styles.downloadRow}>
-          <Button title="CSV (raw)" onPress={handleExportCsv} loading={exportKind === 'csv'} variant="secondary" style={styles.downloadHalf} />
-          <Button title="PDF (formatted)" onPress={handleExportPdf} loading={exportKind === 'pdf'} style={styles.downloadHalf} />
-        </View>
       </ScrollView>
     </View>
   );
