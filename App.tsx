@@ -44,6 +44,7 @@ import LocationResponder from './components/LocationResponder';
 import JourneyPlanScreen from './app/(rep)/journey-plan';
 import ChallanScreen from './app/(rep)/challan';
 import ExceptionsScreen from './app/(admin)/exceptions';
+import ReportDrilldownScreen from './app/(admin)/report-drilldown';
 import ErrorBoundary from './components/ErrorBoundary';
 
 const Stack = createNativeStackNavigator();
@@ -107,6 +108,8 @@ function AdminRepsStack() {
       <RepsStack.Screen name="RepDetail" component={RepDetailScreen} />
       {/* Reached from Team, not its own tab — same posture as the excise screens. */}
       <RepsStack.Screen name="Exceptions" component={ExceptionsScreen} />
+      {/* Report tile → its detail (odometer / cases / route / visits). */}
+      <RepsStack.Screen name="ReportDrilldown" component={ReportDrilldownScreen} />
     </RepsStack.Navigator>
   );
 }

@@ -12,12 +12,13 @@ import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
 import { repCasesSold } from '../../lib/reportSemantics';
+import { displayFigure, fmtKmShort, AttendanceFigures } from '../../lib/reportFigures';
 
 export default function ReportScreen() {
   const { profile } = useAuthStore();
   const insets = useSafeAreaInsets();
-  const [totalMarketTime, setTotalMarketTime] = useState<number | null>(null);
-  const [totalDistance, setTotalDistance] = useState<number | null>(null);
+  // Today's attendance row, or null before punch-in.
+  const [day, setDay] = useState<AttendanceFigures | null>(null);
   const [totalCases, setTotalCases] = useState(0);
   const [storesVisited, setStoresVisited] = useState(0);
   const [notes, setNotes] = useState('');
@@ -33,13 +34,12 @@ export default function ReportScreen() {
     // Attendance data
     const { data: att } = await supabase
       .from('attendance')
-      .select('total_market_time_minutes, total_distance_km')
+      .select('check_out_time, auto_closed, total_market_time_minutes, total_distance_km, odo_start, odo_end')
       .eq('user_id', profile.id)
       .gte('check_in_time', `${today}T00:00:00`)
       .lt('check_in_time', `${today}T23:59:59`)
       .maybeSingle();
-    setTotalMarketTime(att?.total_market_time_minutes ?? null);
-    setTotalDistance(att?.total_distance_km ?? null);
+    setDay(att ?? null);
 
     // Stores visited today.
     const { data: visits } = await supabase
@@ -94,10 +94,12 @@ export default function ReportScreen() {
     setSubmitting(false);
   };
 
-  const formatTime = (minutes: number | null) => {
-    if (minutes === null) return '—';
-    return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-  };
+  // Route, odometer and market time are all written at punch-out, so until
+  // then they read "Calculated at punch-out" rather than a misleading 0.
+  const days = day ? [day] : [];
+  const route = displayFigure(days, 'route', (km) => `${km.toFixed(1)} km`);
+  const odo = displayFigure(days, 'odometer', fmtKmShort);
+  const market = displayFigure(days, 'market', (m) => `${Math.floor(m / 60)}h ${m % 60}m`);
 
   const dateLabel = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
 
@@ -110,6 +112,7 @@ export default function ReportScreen() {
           {[0, 1, 2, 3].map((i) => (
             <SkelBlock key={i} w="48%" h={84} r={Radius.card} />
           ))}
+          <SkelBlock w="100%" h={84} r={Radius.card} />
         </View>
         <SkelBlock h={120} r={Radius.card} style={{ marginTop: Space.md }} />
         <SkelBlock h={120} r={Radius.card} style={{ marginTop: Space.md }} />
@@ -131,13 +134,24 @@ export default function ReportScreen() {
         {dateLabel}
       </Text>
 
+      {/* Both distances side by side, never merged: the odometer is what your
+          travel allowance is checked against. */}
       <View style={styles.statsGrid}>
-        <BentoTile style={styles.statCard}><Metric label="Market time" value={formatTime(totalMarketTime)} /></BentoTile>
-        <BentoTile style={styles.statCard}>
-          <Metric label="Distance" value={totalDistance !== null ? `${totalDistance.toFixed(1)} km` : '—'} />
-        </BentoTile>
-        <BentoTile style={styles.statCard}><Metric label="Cases sold" value={totalCases} /></BentoTile>
-        <BentoTile style={styles.statCard}><Metric label="Stores visited" value={storesVisited} /></BentoTile>
+        <View style={styles.cell}>
+          <BentoTile style={styles.tile}><Metric label="Route (GPS)" {...route} /></BentoTile>
+        </View>
+        <View style={styles.cell}>
+          <BentoTile style={styles.tile}><Metric label="Odometer" {...odo} /></BentoTile>
+        </View>
+        <View style={styles.cell}>
+          <BentoTile style={styles.tile}><Metric label="Cases sold" value={totalCases} /></BentoTile>
+        </View>
+        <View style={styles.cell}>
+          <BentoTile style={styles.tile}><Metric label="Stores visited" value={storesVisited} /></BentoTile>
+        </View>
+        <View style={styles.cellWide}>
+          <BentoTile style={styles.tile}><Metric label="Market time" {...market} /></BentoTile>
+        </View>
       </View>
 
       <BentoTile style={styles.field}>
@@ -178,7 +192,11 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
   content: { padding: Layout.screenPad },
   statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: Layout.gridGap, marginBottom: Space.md },
-  statCard: { width: '48%' },
+  // Cells stretch to the tallest tile in the row; tiles grow to fill, so a
+  // tile with a note doesn't leave its neighbour short.
+  cell: { width: '48%' },
+  cellWide: { width: '100%' },
+  tile: { flexGrow: 1 },
   field: { marginTop: Space.md },
   fieldLabel: { ...Type.label, color: Colors.textMuted, marginBottom: Space.sm },
   textInput: {

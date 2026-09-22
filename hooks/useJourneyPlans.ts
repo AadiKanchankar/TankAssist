@@ -15,7 +15,7 @@ import {
 import { mismatchFlag } from '../lib/odometer';
 
 const SELECT =
-  'id, rep_id, plan_date, status, submitted_at, reviewed_by, reviewed_at, reject_reason, journey_plan_stores(store_id, position)';
+  'id, rep_id, plan_date, status, submitted_at, reviewed_by, reviewed_at, reject_reason, journey_plan_stores(store_id, position, stores(name))';
 
 const shape = (row: any): JourneyPlan => ({
   id: row.id,
@@ -30,6 +30,9 @@ const shape = (row: any): JourneyPlan => ({
     .slice()
     .sort((a: any, b: any) => a.position - b.position)
     .map((s: any) => s.store_id),
+  store_names: Object.fromEntries(
+    (row.journey_plan_stores ?? []).map((s: any) => [s.store_id, s.stores?.name ?? 'Store']),
+  ),
 });
 
 // ── Rep side ──────────────────────────────────────────────────────────────

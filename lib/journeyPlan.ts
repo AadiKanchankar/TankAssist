@@ -27,6 +27,12 @@ export interface JourneyPlan {
   reviewed_at: string | null;
   reject_reason: string | null;
   store_ids: string[];
+  /**
+   * store_id → name, embedded in the plan query. Planned stores are usually
+   * NOT the rep's assigned stores (live: every planned store, on every plan),
+   * so resolving names from assignments printed "Store" for all of them.
+   */
+  store_names: Record<string, string>;
 }
 
 export const PLAN_STATUS_LABEL: Record<PlanStatus, string> = {

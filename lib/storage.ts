@@ -211,14 +211,16 @@ export async function getSignedUrl(
 /**
  * Batch version: signs many paths in one round-trip.
  * Returns a map of path → signed URL (paths that failed are omitted).
+ * Same bucket rule as getSignedUrl: locked buckets are passed explicitly.
  */
 export async function getSignedUrls(
   filePaths: string[],
-  expiresInSeconds: number = 3600
+  expiresInSeconds: number = 3600,
+  bucket: string = BUCKET
 ): Promise<Record<string, string>> {
   if (filePaths.length === 0) return {};
   const { data, error } = await supabase.storage
-    .from(BUCKET)
+    .from(bucket)
     .createSignedUrls(filePaths, expiresInSeconds);
 
   if (error || !data) return {};

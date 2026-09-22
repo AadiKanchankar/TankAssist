@@ -38,8 +38,10 @@ export default function JourneyPlanScreen({ navigation }: { navigation: any }) {
   // vanishes from the list when the scope changes underneath it.
   const [extras, setExtras] = useState<PlanStore[]>([]);
   const [showAddStore, setShowAddStore] = useState(false);
+  // Owner decision: nearby by default, with an explicit way to see everything.
+  const [showAll, setShowAll] = useState(false);
 
-  const { data: scoped, isFetching } = usePlanStores(profile?.id, debounced);
+  const { data: scoped, isFetching } = usePlanStores(profile?.id, debounced, showAll);
 
   useFocusEffect(useCallback(() => { refetch(); }, [refetch]));
 
@@ -50,7 +52,21 @@ export default function JourneyPlanScreen({ navigation }: { navigation: any }) {
   }, [search]);
 
   useEffect(() => {
-    if (plan) setSelected(plan.store_ids);
+    if (!plan) return;
+    setSelected(plan.store_ids);
+    // Pin the planned stores so they stay visible (and un-tickable) even when
+    // the scoped list doesn't cover them — otherwise a planned store outside
+    // the scope is counted but can't be seen.
+    setExtras(
+      plan.store_ids.map((id) => ({
+        id,
+        name: plan.store_names[id] ?? 'Store',
+        address: null,
+        latitude: null,
+        longitude: null,
+        state: null,
+      })),
+    );
   }, [plan?.id, plan?.status]);
 
   const locked = plan?.status === 'approved';
@@ -146,6 +162,21 @@ export default function JourneyPlanScreen({ navigation }: { navigation: any }) {
             />
             {isFetching ? <ActivityIndicator size="small" color={Colors.accent} /> : null}
           </View>
+          <View style={styles.segRow}>
+            {([false, true] as const).map((all) => (
+              <Pressable
+                key={String(all)}
+                onPress={() => setShowAll(all)}
+                style={[styles.segBtn, showAll === all && styles.segBtnActive]}
+                accessibilityRole="button"
+                accessibilityState={{ selected: showAll === all }}
+              >
+                <Text style={[styles.segText, showAll === all && styles.segTextActive]}>
+                  {all ? 'All stores' : 'Nearby'}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
           {/* Says WHY these stores, so a short list doesn't look like a bug. */}
           <Text style={styles.scopeNote}>{scoped?.scopeLabel ?? 'Loading stores…'}</Text>
         </>
@@ -196,7 +227,7 @@ export default function JourneyPlanScreen({ navigation }: { navigation: any }) {
               <View style={[styles.row, index > 0 && styles.divider]}>
                 <Text style={styles.seq}>{index + 1}</Text>
                 <Text style={[Type.bodyMed, { color: Colors.text, flex: 1 }]} numberOfLines={1}>
-                  {s?.name ?? 'Store'}
+                  {s?.name ?? plan!.store_names[item] ?? 'Store'}
                 </Text>
               </View>
             );
@@ -296,7 +327,20 @@ const styles = StyleSheet.create({
     minHeight: Layout.tap,
   },
   search: { ...Type.body, color: Colors.text, flex: 1, paddingVertical: Space.sm },
-  scopeNote: { ...Type.caption, color: Colors.textMuted, marginTop: Space.xs, marginBottom: Space.sm },
+  scopeNote: { ...Type.caption, color: Colors.textSecondary, marginTop: Space.xs, marginBottom: Space.sm },
+  segRow: {
+    flexDirection: 'row',
+    marginTop: Space.sm,
+    backgroundColor: Colors.surface,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: Radius.md,
+    overflow: 'hidden',
+  },
+  segBtn: { flex: 1, alignItems: 'center', justifyContent: 'center', minHeight: Layout.tap },
+  segBtnActive: { backgroundColor: Colors.accent },
+  segText: { ...Type.label, color: Colors.text },
+  segTextActive: { color: Colors.white },
   row: {
     flexDirection: 'row',
     alignItems: 'center',

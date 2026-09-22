@@ -24,19 +24,28 @@ export interface LatLng {
   longitude: number;
 }
 
+export interface DirectionsRoute {
+  /** Total driving distance, km (2 dp). */
+  km: number;
+  /** One entry per leg: waypoints[i] -> waypoints[i+1], km (2 dp). */
+  legsKm: number[];
+}
+
+const toKm = (meters: number) => Math.round((meters / 1000) * 100) / 100;
+
 /**
- * Returns the total driving distance in kilometres along the ordered
- * list of points: waypoints[0] is the origin, the last element is the
- * destination, and everything in between is passed as intermediate
- * waypoints in the given order (optimize:false).
+ * Driving distance along the ordered list of points: waypoints[0] is the
+ * origin, the last element is the destination, and everything in between is
+ * passed as intermediate waypoints in the given order (optimize:false).
+ *
+ * Returns the per-leg distances too — they used to be summed and thrown away,
+ * which left the manager's route drill-down nothing but straight lines.
  *
  * Returns `null` on any failure (network error, API error status, or
  * fewer than 2 points) so the caller can fall back to Haversine.
  * This function never throws.
  */
-export async function directionsRouteKm(
-  waypoints: LatLng[]
-): Promise<number | null> {
+export async function directionsRoute(waypoints: LatLng[]): Promise<DirectionsRoute | null> {
   // Need at least an origin and a destination to form a route.
   if (!waypoints || waypoints.length < 2) return null;
 
@@ -63,12 +72,10 @@ export async function directionsRouteKm(
     const data = await response.json();
 
     if (data.status === 'OK' && data.routes && data.routes.length > 0) {
-      // Sum the distance of every leg (meters), convert to km.
-      const meters = data.routes[0].legs.reduce(
-        (sum: number, leg: any) => sum + (leg.distance?.value || 0),
-        0
-      );
-      return Math.round((meters / 1000) * 100) / 100;
+      const legMeters: number[] = data.routes[0].legs.map((leg: any) => leg.distance?.value || 0);
+      // Total from raw meters, not from the rounded legs, so it matches what
+      // was stored before legs were kept.
+      return { km: toKm(legMeters.reduce((s, m) => s + m, 0)), legsKm: legMeters.map(toKm) };
     }
 
     console.warn(

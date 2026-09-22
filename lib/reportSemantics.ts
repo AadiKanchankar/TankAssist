@@ -41,6 +41,20 @@ export interface CasesResult {
    * is exact and leaves this false.
    */
   legacyExcluded: boolean;
+  /**
+   * Cases per VISIT, by the same hybrid: orders linked by `visit_id` on/after
+   * the cutover, the legacy per-visit counter before. Reading
+   * `store_visits.cases_sold` directly is the bug this exists for — the
+   * stepper stopped writing it at the cutover, so every visit since read 0
+   * while the header (orders) read 300.
+   */
+  byVisit: Record<string, number>;
+  /**
+   * Post-cutover only: store → product → cases. Legacy days have no product
+   * dimension, so they appear in `byStore` but never here — a caller showing
+   * a product split must label the difference, not invent a split.
+   */
+  byStoreProduct: Record<string, Record<string, number>>;
 }
 export interface CasesFilter {
   userId?: string; // scope to one rep (placed_by / visit user)
@@ -61,9 +75,12 @@ export async function casesSold(
 ): Promise<CasesResult> {
   const byDay: Record<string, number> = {};
   const byStore: Record<string, number> = {};
-  const add = (day: string, storeId: string | null, n: number) => {
+  const byVisit: Record<string, number> = {};
+  const byStoreProduct: Record<string, Record<string, number>> = {};
+  const add = (day: string, storeId: string | null, visitId: string | null, n: number) => {
     byDay[day] = (byDay[day] || 0) + n;
     if (storeId) byStore[storeId] = (byStore[storeId] || 0) + n;
+    if (visitId) byVisit[visitId] = (byVisit[visitId] || 0) + n;
   };
 
   // A product filter cannot reach the legacy figures at all: cases_sold is one
@@ -76,7 +93,7 @@ export async function casesSold(
   if (startYmd < ORDERS_CUTOVER_DATE && !filter.productId) {
     let q = supabase
       .from('store_visits')
-      .select('check_in_time, cases_sold, store_id')
+      .select('id, check_in_time, cases_sold, store_id')
       .gte('check_in_time', `${startYmd}T00:00:00`)
       .lt('check_in_time', `${endExclusiveYmd}T00:00:00`);
     if (filter.userId) q = q.eq('user_id', filter.userId);
@@ -84,7 +101,7 @@ export async function casesSold(
     const { data } = await q;
     for (const v of (data as any[]) || []) {
       const d = toDateStr(new Date(v.check_in_time));
-      if (d < ORDERS_CUTOVER_DATE) add(d, v.store_id, v.cases_sold || 0);
+      if (d < ORDERS_CUTOVER_DATE) add(d, v.store_id, v.id, v.cases_sold || 0);
     }
   }
 
@@ -95,7 +112,7 @@ export async function casesSold(
       // product_id comes along so a product filter can be applied per LINE.
       // Filtering the join server-side would drop whole orders that merely
       // contain other products too, which is a different question.
-      .select('created_at, store_id, order_items(cases, product_id)')
+      .select('created_at, store_id, visit_id, order_items(cases, product_id)')
       .neq('status', 'cancelled')
       .gte('created_at', `${startYmd}T00:00:00`)
       .lt('created_at', `${endExclusiveYmd}T00:00:00`);
@@ -105,16 +122,22 @@ export async function casesSold(
     for (const o of (data as any[]) || []) {
       const d = toDateStr(new Date(o.created_at));
       if (d >= ORDERS_CUTOVER_DATE) {
-        const cases = (o.order_items || [])
-          .filter((it: any) => !filter.productId || it.product_id === filter.productId)
-          .reduce((s: number, it: any) => s + (it.cases || 0), 0);
-        add(d, o.store_id, cases);
+        const lines = (o.order_items || []).filter(
+          (it: any) => !filter.productId || it.product_id === filter.productId
+        );
+        add(d, o.store_id, o.visit_id, lines.reduce((s: number, it: any) => s + (it.cases || 0), 0));
+        if (o.store_id) {
+          const perProduct = byStoreProduct[o.store_id] || (byStoreProduct[o.store_id] = {});
+          for (const it of lines) {
+            perProduct[it.product_id] = (perProduct[it.product_id] || 0) + (it.cases || 0);
+          }
+        }
       }
     }
   }
 
   const total = Object.values(byDay).reduce((s, n) => s + n, 0);
-  return { byDay, byStore, total, legacyExcluded };
+  return { byDay, byStore, total, legacyExcluded, byVisit, byStoreProduct };
 }
 
 /** Per-day cases for one rep over [startYmd, endExclusiveYmd). */

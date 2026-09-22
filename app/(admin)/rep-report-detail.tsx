@@ -1,27 +1,29 @@
-import React, { useEffect, useState, useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView, Pressable, Image, Alert } from 'react-native';
+import React, { useCallback, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, Pressable, Alert } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, Type, Space, Radius, Layout } from '../../constants/colors';
 import Button from '../../components/Button';
 import BentoTile from '../../components/BentoTile';
 import Metric from '../../components/Metric';
+import ErrorState from '../../components/ErrorState';
+import { PhotoStrip } from '../../components/PhotoViewer';
 import { SkelBlock } from '../../components/skeleton/Skeleton';
-import { supabase } from '../../lib/supabase';
-import { getSignedUrls } from '../../lib/storage';
 import {
   toDateStr,
   fmtDDMMYYYY,
   addDays,
   monthStart,
   nextMonthStart,
-  monthLabel,
   monthName,
   fmtMinutes,
   exportMonthlyReport,
 } from '../../lib/reportExport';
-import { repCasesSold } from '../../lib/reportSemantics';
 import { exportRepPdf } from '../../lib/reportPdf';
+import { displayFigure, fmtKmShort } from '../../lib/reportFigures';
+import { useRepReport } from '../../hooks/useRepReport';
+import type { DrilldownKind, DrilldownParams } from './report-drilldown';
 
 type Period = 'daily' | 'weekly' | 'monthly';
 
@@ -29,26 +31,6 @@ interface RepParam {
   id: string;
   name: string;
 }
-interface VisitDetail {
-  id: string;
-  storeName: string;
-  cases_sold: number | null;
-  check_in_time: string;
-  photoUrls: string[];
-}
-interface DayReport {
-  report_date: string;
-  notes: string | null;
-  challenges: string | null;
-}
-interface Stats {
-  marketTimeMinutes: number | null;
-  distanceKm: number | null;
-  casesSold: number | null;
-  storesVisited: number | null;
-}
-
-const EMPTY_STATS: Stats = { marketTimeMinutes: null, distanceKm: null, casesSold: null, storesVisited: null };
 
 function startOfToday(): Date {
   const d = new Date();
@@ -61,18 +43,18 @@ function addMonths(d: Date, n: number): Date {
 
 /**
  * Rep Report section — Daily / Weekly / Monthly views over one rep's activity.
- * Period semantics + export logic unchanged; presentation only. The generated
- * CSV/PDF documents (lib/reportExport, lib/reportPdf) are intentionally untouched.
+ *
+ * Every figure comes from useRepReport, the same cached query the drill-downs
+ * read, so a tile and the page it opens always agree. Market time and both
+ * distances are written only at punch-out: a day that never punched out shows
+ * "Not recorded", not 0 (see lib/reportFigures).
  */
 export default function RepReportSection({ rep }: { rep: RepParam }) {
   const insets = useSafeAreaInsets();
+  const navigation = useNavigation<any>();
   const [period, setPeriod] = useState<Period>('daily');
   const [selectedDate, setSelectedDate] = useState<Date>(startOfToday);
   const [monthCursor, setMonthCursor] = useState<Date>(() => monthStart(new Date()));
-  const [stats, setStats] = useState<Stats>(EMPTY_STATS);
-  const [visits, setVisits] = useState<VisitDetail[]>([]);
-  const [dayReports, setDayReports] = useState<DayReport[]>([]);
-  const [loading, setLoading] = useState(true);
   const [exportKind, setExportKind] = useState<'csv' | 'pdf' | null>(null);
 
   const downloadMonthAnchor = period === 'monthly' ? monthCursor : selectedDate;
@@ -80,6 +62,8 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
   const rangeStart =
     period === 'daily' ? selectedDate : period === 'weekly' ? addDays(selectedDate, -6) : monthStart(monthCursor);
   const rangeEnd = period === 'monthly' ? addDays(nextMonthStart(monthCursor), -1) : selectedDate;
+  const start = toDateStr(rangeStart);
+  const endExclusive = toDateStr(addDays(rangeEnd, 1));
 
   const rangeLabel =
     period === 'daily'
@@ -99,98 +83,13 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
     else setSelectedDate((d) => addDays(d, dir));
   };
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
-    try {
-      const startStr = toDateStr(rangeStart);
-      const endExclusiveStr = toDateStr(addDays(rangeEnd, 1));
+  const { data, isPending, isError, refetch } = useRepReport(rep.id, start, endExclusive);
+  useFocusEffect(useCallback(() => { refetch(); }, [refetch]));
 
-      const { data: visitRows } = await supabase
-        .from('store_visits')
-        .select('id, cases_sold, check_in_time, check_out_time, photo_url, stores(name)')
-        .eq('user_id', rep.id)
-        .gte('check_in_time', `${startStr}T00:00:00`)
-        .lt('check_in_time', `${endExclusiveStr}T00:00:00`)
-        .order('check_in_time', { ascending: true });
-      const vRows = (visitRows as any[]) || [];
-
-      const visitIds = vRows.map((v) => v.id);
-      const pathsByVisit: Record<string, string[]> = {};
-      if (visitIds.length > 0) {
-        const { data: photoRows } = await supabase
-          .from('store_visit_photos')
-          .select('visit_id, storage_path, position')
-          .in('visit_id', visitIds)
-          .order('position', { ascending: true });
-        for (const row of (photoRows as any[]) || []) {
-          if (!pathsByVisit[row.visit_id]) pathsByVisit[row.visit_id] = [];
-          pathsByVisit[row.visit_id].push(row.storage_path);
-        }
-      }
-      for (const v of vRows) {
-        if (!pathsByVisit[v.id] && v.photo_url) pathsByVisit[v.id] = [v.photo_url];
-      }
-      const allPaths = Object.values(pathsByVisit).flat();
-      const signed = await getSignedUrls(allPaths);
-      setVisits(
-        vRows.map((v) => ({
-          id: v.id,
-          storeName: v.stores?.name || 'Store',
-          cases_sold: v.cases_sold,
-          check_in_time: v.check_in_time,
-          photoUrls: (pathsByVisit[v.id] || []).map((p) => signed[p]).filter((u): u is string => !!u),
-        }))
-      );
-
-      const { data: reportRows } = await supabase
-        .from('daily_reports')
-        .select('report_date, notes, challenges')
-        .eq('user_id', rep.id)
-        .gte('report_date', startStr)
-        .lt('report_date', endExclusiveStr)
-        .order('report_date', { ascending: false });
-      setDayReports((reportRows as DayReport[]) || []);
-
-      const casesSold = await repCasesSold(rep.id, startStr, endExclusiveStr);
-
-      if (period === 'monthly') {
-        const { data: summary } = await supabase
-          .from('monthly_ta_summary')
-          .select('*')
-          .eq('user_id', rep.id)
-          .eq('month_label', monthLabel(monthCursor))
-          .maybeSingle();
-        setStats({
-          marketTimeMinutes: summary?.total_market_time_minutes ?? 0,
-          distanceKm: summary?.total_distance_km ?? 0,
-          casesSold,
-          storesVisited: summary?.stores_visited ?? 0,
-        });
-      } else {
-        const { data: attRows } = await supabase
-          .from('attendance')
-          .select('total_market_time_minutes, total_distance_km')
-          .eq('user_id', rep.id)
-          .gte('check_in_time', `${startStr}T00:00:00`)
-          .lt('check_in_time', `${endExclusiveStr}T00:00:00`);
-        const aRows = (attRows as any[]) || [];
-        setStats({
-          marketTimeMinutes: aRows.reduce((s, a) => s + (a.total_market_time_minutes || 0), 0),
-          distanceKm: aRows.reduce((s, a) => s + (a.total_distance_km || 0), 0),
-          casesSold,
-          storesVisited: vRows.filter((v) => v.check_out_time).length,
-        });
-      }
-    } catch {
-      setStats(EMPTY_STATS);
-    }
-    setLoading(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rep.id, period, toDateStr(selectedDate), toDateStr(monthCursor)]);
-
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
+  const open = (kind: DrilldownKind) => {
+    const params: DrilldownParams = { kind, rep, start, endExclusive, rangeLabel };
+    navigation.navigate('ReportDrilldown', params);
+  };
 
   const handleExportCsv = async () => {
     setExportKind('csv');
@@ -212,6 +111,13 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
     setExportKind(null);
   };
 
+  const days = data?.days ?? [];
+  const visits = data?.visits ?? [];
+  const dayReports = data?.dayReports ?? [];
+  const route = displayFigure(days, 'route', (km) => `${km.toFixed(1)} km`);
+  const odo = displayFigure(days, 'odometer', fmtKmShort);
+  const market = displayFigure(days, 'market', fmtMinutes);
+
   return (
     <View style={styles.container}>
       <ScrollView
@@ -225,6 +131,8 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
               key={p}
               style={[styles.segBtn, period === p && styles.segBtnActive]}
               onPress={() => setPeriod(p)}
+              accessibilityRole="button"
+              accessibilityState={{ selected: period === p }}
             >
               <Text style={[styles.segText, period === p && styles.segTextActive]}>
                 {p.charAt(0).toUpperCase() + p.slice(1)}
@@ -249,30 +157,31 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
           </Pressable>
         </View>
 
-        {loading ? (
+        {isPending ? (
           <View style={styles.statsGrid}>
             {[0, 1, 2, 3].map((i) => (
               <SkelBlock key={i} w="48%" h={84} r={Radius.card} />
             ))}
+            <SkelBlock w="100%" h={84} r={Radius.card} />
           </View>
+        ) : isError || !data ? (
+          <BentoTile>
+            <ErrorState onRetry={refetch} />
+          </BentoTile>
         ) : (
           <>
+            {/* Two distance methods side by side and never merged: odometer is
+                what makes TA auditable, the route is the tracked cross-check. */}
             <View style={styles.statsGrid}>
-              <BentoTile style={styles.statCard}>
-                <Metric
-                  label="Market time"
-                  value={stats.marketTimeMinutes !== null ? fmtMinutes(stats.marketTimeMinutes) || '0h 0m' : '—'}
-                />
-              </BentoTile>
-              <BentoTile style={styles.statCard}>
-                <Metric label="Distance" value={stats.distanceKm !== null ? `${Number(stats.distanceKm).toFixed(1)} km` : '—'} />
-              </BentoTile>
-              <BentoTile style={styles.statCard}>
-                <Metric label="Cases sold" value={stats.casesSold ?? '—'} />
-              </BentoTile>
-              <BentoTile style={styles.statCard}>
-                <Metric label="Stores visited" value={stats.storesVisited ?? '—'} />
-              </BentoTile>
+              <StatTile label="Route (GPS)" {...route} onPress={() => open('route')} />
+              <StatTile label="Odometer" {...odo} onPress={() => open('odometer')} />
+              <StatTile label="Cases sold" value={String(data.cases.total)} onPress={() => open('cases')} />
+              <StatTile
+                label="Stores visited"
+                value={String(visits.filter((v) => v.check_out_time).length)}
+                onPress={() => open('visits')}
+              />
+              <StatTile label="Market time" {...market} wide />
             </View>
 
             {visits.length > 0 && (
@@ -281,17 +190,16 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
                 {visits.map((v) => (
                   <BentoTile key={v.id} style={styles.card}>
                     <Text style={[Type.bodyMed, { color: Colors.text }]}>{v.storeName}</Text>
-                    <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]}>
+                    <Text style={[Type.caption, { color: Colors.textSecondary, marginTop: 2 }]}>
                       {fmtDDMMYYYY(new Date(v.check_in_time))} ·{' '}
                       {new Date(v.check_in_time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })} ·{' '}
-                      {v.cases_sold ?? 0} cases · {v.photoUrls.length} {v.photoUrls.length === 1 ? 'photo' : 'photos'}
+                      {v.cases} {v.cases === 1 ? 'case' : 'cases'} · {v.photoUrls.length}{' '}
+                      {v.photoUrls.length === 1 ? 'photo' : 'photos'}
                     </Text>
                     {v.photoUrls.length > 0 ? (
-                      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.galleryRow}>
-                        {v.photoUrls.map((url, i) => (
-                          <Image key={`${v.id}-${i}`} source={{ uri: url }} style={styles.galleryPhoto} />
-                        ))}
-                      </ScrollView>
+                      <PhotoStrip
+                        photos={v.photoUrls.map((uri) => ({ uri, caption: v.storeName }))}
+                      />
                     ) : (
                       <View style={[styles.galleryPhoto, styles.photoEmpty]}>
                         <Text style={[Type.caption, { color: Colors.textMuted }]}>No photo</Text>
@@ -339,6 +247,40 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
   );
 }
 
+/** Report tile; a chevron marks the ones that open a drill-down. */
+function StatTile({
+  label,
+  value,
+  note,
+  onPress,
+  wide,
+}: {
+  label: string;
+  value: string;
+  note?: string | null;
+  onPress?: () => void;
+  wide?: boolean;
+}) {
+  const tile = (
+    <BentoTile style={styles.tile}>
+      <Metric label={label} value={value} note={note} />
+      {onPress ? <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} style={styles.tileChevron} /> : null}
+    </BentoTile>
+  );
+  const cell = wide ? styles.cellWide : styles.cell;
+  if (!onPress) return <View style={cell}>{tile}</View>;
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [cell, pressed && styles.pressed]}
+      accessibilityRole="button"
+      accessibilityLabel={`${label}: ${value}${note ? `, ${note}` : ''}. Show details`}
+    >
+      {tile}
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
   scroll: { flex: 1 },
@@ -370,12 +312,19 @@ const styles = StyleSheet.create({
   dateArrow: { padding: Space.md, minWidth: Layout.tap, alignItems: 'center' },
   dateArrowDisabled: { opacity: 0.4 },
   statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: Layout.gridGap, marginBottom: Space.lg },
-  statCard: { width: '48%' },
+  // The CELL is the pressable, not the tile: row cells stretch to the tallest
+  // tile, and the tile grows to fill, so a tile with a note doesn't leave its
+  // neighbour short. (BentoTile's own onPress wraps it in a Pressable that
+  // can't be stretched from outside.)
+  cell: { width: '48%' },
+  cellWide: { width: '100%' },
+  tile: { flexGrow: 1 },
+  pressed: { opacity: 0.85 },
+  tileChevron: { position: 'absolute', top: Layout.cardPad, right: Layout.cardPad },
   section: { marginBottom: Space.lg },
   sectionLabel: { ...Type.label, color: Colors.textMuted, marginBottom: Space.sm },
   card: { marginBottom: Space.md },
-  galleryRow: { marginTop: Space.sm },
-  galleryPhoto: { width: 96, height: 96, borderRadius: Radius.md, backgroundColor: Colors.surfaceAlt, marginRight: Space.sm },
+  galleryPhoto: { width: 96, height: 96, borderRadius: Radius.md, backgroundColor: Colors.surfaceAlt, marginTop: Space.sm },
   photoEmpty: { alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: Colors.border },
   downloadRow: { flexDirection: 'row', gap: Space.md },
   downloadHalf: { flex: 1 },

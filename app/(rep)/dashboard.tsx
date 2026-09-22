@@ -38,7 +38,8 @@ import { RepDashboardSkeleton } from '../../components/skeleton/RepDashboardSkel
 import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
 import { totalRouteKm } from '../../lib/haversine';
-import { directionsRouteKm } from '../../lib/directions';
+import { directionsRoute } from '../../lib/directions';
+import { legsKm, RoutePoint, StoredRoute } from '../../lib/reportFigures';
 import * as Location from 'expo-location';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
 import { useRepDashboard } from '../../hooks/useRepDashboard';
@@ -168,17 +169,16 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
                 (new Date(checkOutTime).getTime() - checkInTime.getTime()) / 60000
               );
 
-              const waypoints: Array<{ latitude: number; longitude: number }> = [];
+              // The stops in the order they happened. Kept (as attendance.route)
+              // so the manager's route drill-down can show the real legs.
+              const points: RoutePoint[] = [];
               if (attendance!.latitude && attendance!.longitude) {
-                waypoints.push({
-                  latitude: attendance!.latitude,
-                  longitude: attendance!.longitude,
-                });
+                points.push({ kind: 'punch_in', lat: attendance!.latitude, lng: attendance!.longitude });
               }
 
               const { data: visitCoords } = await supabase
                 .from('store_visits')
-                .select('latitude, longitude, check_in_time')
+                .select('id, latitude, longitude, check_in_time')
                 .eq('user_id', profile!.id)
                 .gte('check_in_time', `${today}T00:00:00`)
                 .lt('check_in_time', `${today}T23:59:59`)
@@ -187,22 +187,28 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
               if (visitCoords) {
                 for (const vc of visitCoords) {
                   if (vc.latitude != null && vc.longitude != null) {
-                    waypoints.push({ latitude: vc.latitude, longitude: vc.longitude });
+                    points.push({ kind: 'store', lat: vc.latitude, lng: vc.longitude, visit_id: vc.id });
                   }
                 }
               }
 
-              waypoints.push({
-                latitude: loc.coords.latitude,
-                longitude: loc.coords.longitude,
-              });
+              points.push({ kind: 'punch_out', lat: loc.coords.latitude, lng: loc.coords.longitude });
+              const waypoints = points.map((p) => ({ latitude: p.lat, longitude: p.lng }));
 
               // Real road-network route via Google Directions; straight-line
               // Haversine fallback — never block punch-out on this call.
-              let distance = await directionsRouteKm(waypoints);
-              if (distance == null) {
-                distance = totalRouteKm(waypoints);
-              }
+              const road = await directionsRoute(waypoints);
+              const distance = road ? road.km : totalRouteKm(waypoints);
+              // Legs are only trusted when they line up one-to-one with the stops.
+              const route: StoredRoute =
+                road && road.legsKm.length === points.length - 1
+                ? { v: 1, source: 'directions', points, legs_km: road.legsKm }
+                : {
+                    v: 1,
+                    source: 'straight_line',
+                    points,
+                    legs_km: legsKm(points).map((km) => Math.round((km ?? 0) * 100) / 100),
+                  };
 
               let odoEndPath: string | null = null;
               if (odoEnd) {
@@ -219,6 +225,7 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
                   check_out_time: checkOutTime,
                   total_market_time_minutes: totalMinutes,
                   total_distance_km: distance,
+                  route,
                   ...(odoEnd
                     ? {
                         odo_end: odoEnd.value,
@@ -669,8 +676,7 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
               ) : null}
 
               {plan.store_ids.slice(0, 4).map((id, i) => {
-                const a = assignments.find((x: any) => x.store_id === id) as any;
-                const name = a?.stores?.name ?? storeResults.find((s) => s.id === id)?.name ?? 'Store';
+                const name = plan.store_names[id] ?? 'Store';
                 const status = getStoreStatus(id);
                 return (
                   <View key={id} style={[styles.storeRow, i > 0 && styles.storeRowDivider]}>

@@ -2,15 +2,28 @@
 
 Session-state snapshot for the next Claude Code session. **Temporal** — records what is live, pending, and out of scope as of the date below. Durable architecture facts live in `CLAUDE.md`; plain-language status for the user is `PROJECT_STATUS.md`.
 
-- **Snapshot date:** 2026-09-03 (reconciled against the live DB via MCP and git)
+- **Snapshot date:** 2026-09-23 (builds/OTAs reconciled against `eas build:list` / `eas update:list`, data against the live DB via MCP — not against the previous copy of this file)
 - **Supabase project:** `ldgunrxceogfrohjrlxz` (live MCP access; verify before assuming)
-- **Repo:** `master`, pushed to `github.com/AadiKanchankar/TankAssist`.
+- **Repo:** `github.com/AadiKanchankar/TankAssist`. ⚠️ **Until 2026-09-23 `master` was 17 commits stale** (stuck at `9964b90`, the 1.1.0 build) while all work since 19 Aug lived on `feat/timeinstore-challan-review-push`. Both were fast-forwarded to `7d2085a` that day. **Before trusting any branch, check it against the newest EAS build's commit** — a stale branch plus a stale HANDOFF is how a whole session once got built on the wrong base.
 - **Type state:** `npx tsc --noEmit` clean. `*.test.ts` files pass (`npx tsx <file>`). `expo-doctor` **18/18** after `npx expo install --fix` cleared patch drift on `expo`, `expo-file-system`, `expo-location`, `expo-sharing`, `expo-updates`.
-- **`supabase-schema.sql` is CURRENT** — regenerated from live 2026-08-19 and verified object-by-object (22 tables, 14 functions, 4 triggers, 69 policies, every non-implicit index) rather than assumed.
+- ⚠️ **`supabase-schema.sql` is STALE** (last regenerated 2026-08-19). Missing, verified 2026-09-23: `flag_resolutions`, `rep_warnings`, `store_visits.checkout_latitude/longitude/checkout_distance_meters`, `store_visits.closed_on_next_checkin`, the one-open-visit constraint, and `attendance.route`. **Query live via MCP; regenerate the file before relying on it.**
 
 ---
 
 ## What is actually live right now
+
+### 2026-09-23 — report data bug, plan fixes, report drill-downs (JS-only → OTA on runtime 1.3.0)
+
+**§1 root cause (diagnosed live before any fix) — TWO causes, neither the cutover date nor Directions.** Rep report for Bhagwan Singh, 21-09: header *300 cases*, every visit row *0 cases*, *0h 0m*, *0.0 km*.
+- **Cases:** the header used `repCasesSold()` (orders: 150+100 at Firewater L1, 50 at SCOATCHTAP office). The visit rows printed `store_visits.cases_sold` **raw** — the legacy counter the stepper stopped writing at the cutover, so it was 0 on every visit for every rep since July. `casesSold` now returns `byVisit` (+ `byStoreProduct`) and the rows read that. The CSV/PDF exports already did this correctly (`ordersByVisit`).
+- **Time + distance:** he checked out of all 6 stores himself but **never punched out**; `auto_close_stale` closed the attendance day at 22:30 with the figures NULL (by design), and the screen summed NULL as 0. **6 of the last 10 attendance days were auto-closed**, so "not recorded" is the common case. Directions is fine: every punched-out day in 6 weeks has a stored distance.
+- **`ORDERS_CUTOVER_DATE` is still the `2026-07-18` placeholder but is empirically harmless**: last legacy `cases_sold > 0` visit 11 Jul, first order 21 Jul, zero rows on the wrong side. Not changed.
+
+**Built:** `lib/reportFigures.ts` (measured / pending / not-recorded, never a default 0; tested) · `hooks/useRepReport.ts` (one query the report AND its drill-downs share, so a drill-down always sums to its tile) · odometer distance tile beside "Route (GPS)" on both the manager and rep reports · `ReportDrilldown` screen (odometer readings + dial photos with the GPS mismatch flag, cases ranked by store with product lines, route stops, visits) · `PhotoViewer`/`PhotoStrip` tap-to-expand · plan store names embedded in the plan query · Plan-my-day nearby default from the **phone's own position** + an explicit All toggle.
+- **§2/§3 had one data cause:** reps plan stores that are NOT assigned to them (live: 100% of planned stores), and plan BEFORE punching in. So names resolved from assignments always fell back to "Store", and the scoping rule (punch-in GPS, else assigned area) had no input for anyone → "All stores".
+- **Route legs are now stored — STOP-POINT approved and applied** (migration `attendance_route_legs`): nullable `attendance.route jsonb` (`{v, source, points[], legs_km[]}`) + `attendance_route_is_object` check. Punch-out used to sum the Directions legs and discard them, and kept the punch-out position only with an end odometer; it now stores the whole route. Table-level grants + the existing "update own" policy cover it — **verified by impersonation**: rep writes own row (1), another user's (0), manager reads the legs back, a non-object is refused (23514). **Days punched out before this OTA have `route = NULL`** and show straight-line legs, labelled; days after show road legs. Auto-closed days never have one.
+- **Monthly on screen no longer reads `monthly_ta_summary`** — that view `COALESCE`s NULL distance/time to 0 inside SQL. The view is untouched (the exports still use it).
+- Not done: pinch-zoom (needs `react-native-gesture-handler` = native = build). CSV/PDF still print 0 for not-recorded days (exports untouched this batch).
 
 ### 2026-09-03b — odometer "unavailable" was EXTRACTION, not availability
 
@@ -30,8 +43,8 @@ Fixed in BOTH copies (`lib/odometer.ts` and the Edge Function, now **v5**). A fi
 - **§1 add-store button** on the rep store list. **§4 version** reads `expo-constants` + shows the running bundle id.
 - ⚠️ **`E:\TANK90\Odometer-Reading` holds ~180 real rep odometer photos** — the calibration set for a future YOLO/OpenCV region detector in front of the same `readOdometer()` interface. Not started.
 
-### 2026-08-19 batch — time-in-store, challans, review queue, push (NOT YET BUILT)
-All DB work is **applied to live** and impersonation-tested. The client code is written and `tsc`-clean but **no EAS build has been cut**, so none of it is on a device yet.
+### 2026-08-19 batch — time-in-store, challans, review queue, push (BUILT in 1.2.0)
+All DB work is **applied to live** and impersonation-tested. Shipped in the 1.2.0 builds (19 + 25 Aug); push proven working 2026-09-03.
 
 - **§1 time-in-store** — derived `no_work_recorded` flag only. The artifact-**span** design was rejected against live data (spans 0.00–0.54 min vs tap gaps up to 14 min) because the stepper flushes every artifact at check-out; see CLAUDE.md. 10 of 24 rep-closed visits would flag all-time, **1** inside the 7-day queue window.
 - **§2 challans** — `challans` + `challan_items` + `challan-photos` bucket, 9/9 RLS checks passed. **No manager-facing screen yet.** Auto-OCR deliberately out of scope. No `updated_at`, so corrections leave no audit trail.
@@ -40,31 +53,25 @@ All DB work is **applied to live** and impersonation-tested. The client code is 
 
 ⚠️ **VERIFY ON LOAD — review-queue redesign is unvalidated at scale.** The 2026-08-25 redesign (newest-first, 3-day window, by-type/by-rep toggle, collapsible sections) is `tsc`-clean and logically sound, but live data at the time held **0 actionable plans, 2 visits in the flag window, 0 odometer days** across 5 reps. The by-rep grouping and collapse behaviour exist for the 20-rep case and have **never been seen under that load**. Treat "fast and scannable at 20 reps" as an open claim to check on a real device with real volume, not as done.
 
-**Blocking the build:** the FCM service-account key must be uploaded via `eas credentials` → Android → *Push Notifications: FCM V1*. Then `eas build --profile preview --platform android`.
-
 ⚠️ **Never put the service-account key in the repo, the database, or Supabase Vault.** Vault holds zero secrets and the trigger reads none, by design.
 
-### Installed build
-⚠️ **Runtime moved to 1.1.0.** ML Kit made this batch build-gated; `app.json` version 1.0.0 → 1.1.0 so `runtimeVersion` changes with it and no OTA can land ML Kit-dependent JS on the old binary.
+### Builds and OTAs (from `eas build:list` / `eas update:list`, 2026-09-23)
+| Build | Runtime | Commit | Notes |
+|---|---|---|---|
+| `e0051cb2` | 1.3.0 | `7d2085a` | 2026-09-19. Display name **TankAssist** + brand icon (native resources, hence a build). Same keystore → in-place upgrade. **Newest.** |
+| `5ce7d335` | 1.3.0 | `f7696e3` | 2026-09-01. Cloud odometer OCR, dependency drift cleared. |
+| `b519bfe3` / `6b19271e` | 1.2.0 | `3ae92d8` / `c57850c` | 25 / 19 Aug. `expo-notifications`/`expo-device` → runtime bump. |
+| `865de176` / `9759e0f6` | 1.1.0 | `9964b90` / `c65f922` | 8 / 6 Aug. ML Kit → runtime bump. Superseded. |
 
-Build `9759e0f6` (runtime 1.1.0, commit `c65f922`) FINISHED but is **superseded** — it predates the price/shelf/auto-checkout work. Do not install it; use the newest build.
-
-The last build the reps actually ran is `ef195f8` (2026-07-28, runtime 1.0.0) plus OTAs on top.
+Newest OTA on `preview` (runtime 1.3.0): *"Odometer extraction fix (LCD digit-split, thousands comma), check-in scroll"* = `31dc279`. The 2026-09-23 batch ships as the next OTA on 1.3.0 — no native change.
 
 Build history worth remembering: `048bd05` **ERRORED** (the redesign — missing `babel-preset-expo`, invalid `newArchEnabled`, duplicate `react`), fixed in `49584bf`, which built clean.
-
-### Shipped OTA on top of that build (branch `preview`, runtime `1.0.0`)
-Newest first — all JS-only:
-1. `40ba5978…` — Excise fixes: permit URLs, duplicate guard, multi-line allocation, expiry-aware facility matching (**= HEAD `e8264e6`**)
-2. `0b902736…` — Excise parser calibrated to the real Haryana L-32
-3. `4bd6f59c…` — Excise permits: schema + facilities admin screen
-4. `4eef8f50…` — Tester role-switch + ops updates (OOS, product wizard, dashboard date, cases trend, live location)
 
 ### Edge Function
 `parse-excise-permit` is deployed at **version 4**, `verify_jwt: true`, files `index.ts` + `parsers.ts` + `classify.ts`. It runs on the caller's JWT — **no service-role key exists anywhere in this project.**
 
 ### Migrations applied (live, in order)
-`…phase1_roles_softban_lockdown` · `phase3_products` · `phase4_orders_stock` · `add_users_is_tester` · `create_switch_tester_role` · `products_ops_columns_and_oos` · `create_location_requests` · `excise_company_facilities` · `excise_permits_table` · `excise_allocations_and_ledger` · `excise_approve_reject_rpcs` · `excise_permits_storage_bucket` · `guard_facility_license_change` · `excise_dup_guard_validity_multiline` · `approve_excise_permit_multiline_guards` · `stock_snapshot_categories` · `journey_plans_and_mock_location_flag` · `journey_plans_realtime` · **`attendance_odometer_readings`** · **`odometer_photos_bucket`** · **`order_item_server_side_pricing`** · **`stock_shelf_bucket_merge`** · **`auto_close_stale_visits`** · **`auto_close_stale_per_visit_day`**.
+`…phase1_roles_softban_lockdown` · `phase3_products` · `phase4_orders_stock` · `add_users_is_tester` · `create_switch_tester_role` · `products_ops_columns_and_oos` · `create_location_requests` · `excise_company_facilities` · `excise_permits_table` · `excise_allocations_and_ledger` · `excise_approve_reject_rpcs` · `excise_permits_storage_bucket` · `guard_facility_license_change` · `excise_dup_guard_validity_multiline` · `approve_excise_permit_multiline_guards` · `stock_snapshot_categories` · `journey_plans_and_mock_location_flag` · `journey_plans_realtime` · **`attendance_odometer_readings`** · **`odometer_photos_bucket`** · **`order_item_server_side_pricing`** · **`stock_shelf_bucket_merge`** · **`auto_close_stale_visits`** · **`auto_close_stale_per_visit_day`** · … (19 Aug – 3 Sep: see `list_migrations`) … · **`attendance_route_legs`** (2026-09-23).
 
 ### 2026-08-08 batch — price hiding, shelf merge, auto-checkout (same build)
 
@@ -218,7 +225,7 @@ Everything below is installed and OTA-current on the `ef195f8` build; none of it
 
 ## Orders go-live checklist (coordinated cutover)
 - **Same-day build install for ALL reps** (a staggered rollout splits one rep's day across legacy `cases_sold` and orders).
-- **Set `ORDERS_CUTOVER_DATE`** (`lib/reportSemantics.ts`) to that install date — currently a **`2026-07-18` placeholder**. Days `>= cutover` count order cases (excl. cancelled); days `<` count legacy visit `cases_sold`; never both.
+- **`ORDERS_CUTOVER_DATE`** (`lib/reportSemantics.ts`) is still the **`2026-07-18` placeholder** — verified harmless 2026-09-23 (last legacy `cases_sold > 0` = 11 Jul, first order = 21 Jul; any date 12–21 Jul gives identical figures). Only revisit if legacy rows are ever back-filled. Days `>= cutover` count order cases (excl. cancelled); days `<` count legacy visit `cases_sold`; never both.
 
 ## Deferred / out of scope (do not start without a go-ahead)
 - **Instant-kill deactivation via a service-role Edge Function** — deliberately not built; keeps the anon-key-only architecture. Soft-ban + short JWT TTL is the mechanism. New-secret STOP POINT.
@@ -238,6 +245,8 @@ Everything below is installed and OTA-current on the `ef195f8` build; none of it
 The previously-flagged stuck-open rows were closed by the approved `auto_close_stale()` path: **3 store_visits + 10 attendance days**, each at 22:30 IST of its own day. Open sets are now 0 and 0, and the nightly cron prevents recurrence. They are marked `auto_closed` and appear as soft flags in the exception queue.
 
 ## Next actionable step
+**On-device pass for the 2026-09-23 OTA** (manager login + a rep login): (1) Team → Bhagwan Singh → Report, 21-09: header **300** = Cases drill-down total (250 Firewater L1 + 50 SCOATCHTAP), visit rows 250/50/0; Route, Odometer and Market time read **"—  Not recorded"**, not 0. (2) Odometer drill-down on a day with readings: numbers beside dial photos, tap → full screen, swipe start↔end. (3) Route drill-down on 21-09 says auto-closed, not an empty page; **punch out once after installing the OTA** and that day's route shows legs "by road". (4) Visit photos expand on tap; Android back closes. (5) Rep dashboard plan shows real store names. (6) Plan my day **before punching in** defaults to *Nearby* (location granted), All toggle works, search still reaches everything.
+
 Fill the two data blockers (facility rows; `unit_of_measure` on *Tank 90 z*), then walk the excise happy path on device — that is the only part of the pipeline never exercised end-to-end with real data. Adding the facility rows also unblocks the inventory-movement backfill noted above.
 
 Then walk PJP end-to-end on hardware (items 11–14). Only the mock-location flag strictly needs a second device with a mock-location app; everything else is exercisable on one phone plus a manager login.

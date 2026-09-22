@@ -47,6 +47,7 @@ export const Colors = {
   bgSuccess: '#E4EFEA',
   warning: '#B5852A', // "needs attention" amber (accessible on cream)
   bgWarning: '#F6EBD3',
+  scrim: 'rgba(19,18,18,0.72)', // ink at 72% — caption bar legible over any photo
 } as const;
 
 // Spotlight rule: lime appears AT MOST once per visible screen — the single
