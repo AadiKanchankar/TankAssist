@@ -12,7 +12,7 @@ Session-state snapshot for the next Claude Code session. **Temporal** — record
 
 ## What is actually live right now
 
-### 2026-09-23 — report data bug, plan fixes, report drill-downs (JS-only → OTA on runtime 1.3.0)
+### 2026-09-23 — report data bug, plan fixes, report drill-downs — SHIPPED as OTA `4017d12b` (runtime 1.3.0, commit `6c44578`)
 
 **§1 root cause (diagnosed live before any fix) — TWO causes, neither the cutover date nor Directions.** Rep report for Bhagwan Singh, 21-09: header *300 cases*, every visit row *0 cases*, *0h 0m*, *0.0 km*.
 - **Cases:** the header used `repCasesSold()` (orders: 150+100 at Firewater L1, 50 at SCOATCHTAP office). The visit rows printed `store_visits.cases_sold` **raw** — the legacy counter the stepper stopped writing at the cutover, so it was 0 on every visit for every rep since July. `casesSold` now returns `byVisit` (+ `byStoreProduct`) and the rows read that. The CSV/PDF exports already did this correctly (`ordersByVisit`).
@@ -63,7 +63,7 @@ All DB work is **applied to live** and impersonation-tested. Shipped in the 1.2.
 | `b519bfe3` / `6b19271e` | 1.2.0 | `3ae92d8` / `c57850c` | 25 / 19 Aug. `expo-notifications`/`expo-device` → runtime bump. |
 | `865de176` / `9759e0f6` | 1.1.0 | `9964b90` / `c65f922` | 8 / 6 Aug. ML Kit → runtime bump. Superseded. |
 
-Newest OTA on `preview` (runtime 1.3.0): *"Odometer extraction fix (LCD digit-split, thousands comma), check-in scroll"* = `31dc279`. The 2026-09-23 batch ships as the next OTA on 1.3.0 — no native change.
+Newest OTA on `preview` (runtime 1.3.0): **`4017d12b`** = `6c44578`, the 2026-09-23 report batch (JS-only). Before it: *"Odometer extraction fix…"* = `31dc279`. Reaches every install on a 1.3.0 build (`5ce7d335`, `e0051cb2`); anything older needs the newest APK.
 
 Build history worth remembering: `048bd05` **ERRORED** (the redesign — missing `babel-preset-expo`, invalid `newArchEnabled`, duplicate `react`), fixed in `49584bf`, which built clean.
 

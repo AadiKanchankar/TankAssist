@@ -311,6 +311,8 @@ Android APKs via EAS (`eas.json` `preview` → internal APK; `channel: preview`)
 
 **Two `keyboardShouldPersistTaps` lessons, both shipped as bugs once:** RN's default is `"never"`, so while the keyboard is up the dismiss gesture eats the first tap outside the input. Any `ScrollView`/`FlatList` containing a tappable result list needs `keyboardShouldPersistTaps="handled"` — its absence on the rep dashboard is why tapping a searched store did nothing.
 
+**If `eas update` is killed (exit 137 = out of memory):** Metro starts ~one worker per core, and a 22-core machine exhausted 15 GB. Bundle first with `npx expo export --platform android --output-dir dist --max-workers 2`, then publish that bundle with `eas update --branch preview --environment preview --platform android --skip-bundler --input-dir dist --message "…"`. `dist/` is gitignored.
+
 Build gotchas already hit, worth not re-learning: `babel-preset-expo` must be an **explicit** dependency (transitive isn't enough); `newArchEnabled` is **not** valid in the SDK 56 `app.json` schema; duplicate `react` versions (moti pulled its own) need an `overrides` entry + `npm dedupe`; the worklets babel plugin must be **last**.
 
 ## Standing hooks & session conventions
