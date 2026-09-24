@@ -223,7 +223,8 @@ export default function StoreLocationPicker({ value, onChange }: Props) {
       )}
 
       {staleFix && !isMoving ? (
-        <Text style={[styles.coordText, { color: Colors.warning }]}>
+        <Text style={[styles.coordText, { color: Colors.text }]}>
+          {'⚠ '}
           Couldn’t get a fresh GPS fix — this may be where you were earlier. Tap the locate button
           again, or step outside for a clearer signal.
         </Text>

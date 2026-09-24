@@ -896,7 +896,8 @@ export default function StoreVisitScreen({
                   {metres != null ? ` · ${metres.toLocaleString('en-IN')} m from the store` : ''}
                 </Text>
                 {pendingFix && !pendingFix.fresh ? (
-                  <Text style={[Type.caption, { color: Colors.warning, marginTop: Space.sm }]}>
+                  <Text style={[Type.caption, { color: Colors.text, marginTop: Space.sm }]}>
+                    {'⚠ '}
                     Couldn’t get a fresh fix — this may be where you were earlier. Refresh, or step
                     outside for a clearer signal.
                   </Text>
