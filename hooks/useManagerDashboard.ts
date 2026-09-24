@@ -20,36 +20,33 @@ export interface ManagerDashboardData {
 
 const FILTER_KEYS = Object.keys(ORDER_FILTER_STATUSES) as OrderFilter[];
 
-// Wraps the sales-manager (legacy) Dashboard's original loadData verbatim.
+// Independent reads, one parallel wave (was 5 sequential hops ≈ 3 s on a
+// field connection — see useRepDashboard).
 async function fetchManagerDashboard(today: string): Promise<ManagerDashboardData> {
-  const { data: allReps } = await supabase
-    .from('users')
-    .select('id, name')
-    .eq('role', 'rep');
+  const [{ data: allReps }, { data: attendanceRows }, { data: assignments }, { data: visits }, { data: ords }] =
+    await Promise.all([
+      supabase.from('users').select('id, name').eq('role', 'rep'),
+      supabase
+        .from('attendance')
+        .select('user_id, check_out_time')
+        .gte('check_in_time', `${today}T00:00:00`)
+        .lt('check_in_time', `${today}T23:59:59`),
+      supabase.from('store_assignments').select('store_id').eq('assigned_date', today),
+      supabase
+        .from('store_visits')
+        .select('store_id, user_id, check_out_time')
+        .gte('check_in_time', `${today}T00:00:00`)
+        .lt('check_in_time', `${today}T23:59:59`),
+      supabase.from('orders').select('status'),
+    ]);
   const totalReps = allReps?.length || 0;
-
-  const { data: attendanceRows } = await supabase
-    .from('attendance')
-    .select('user_id, check_out_time')
-    .gte('check_in_time', `${today}T00:00:00`)
-    .lt('check_in_time', `${today}T23:59:59`);
 
   const checkedInIds = new Set((attendanceRows || []).map((a) => a.user_id));
   const punchedOutIds = new Set(
     (attendanceRows || []).filter((a) => a.check_out_time).map((a) => a.user_id)
   );
 
-  const { data: assignments } = await supabase
-    .from('store_assignments')
-    .select('store_id')
-    .eq('assigned_date', today);
   const assignedStoreIds = new Set((assignments || []).map((a) => a.store_id));
-
-  const { data: visits } = await supabase
-    .from('store_visits')
-    .select('store_id, user_id, check_out_time')
-    .gte('check_in_time', `${today}T00:00:00`)
-    .lt('check_in_time', `${today}T23:59:59`);
 
   const visitedStoreIds = new Set(
     (visits || []).filter((v) => v.check_out_time).map((v) => v.store_id)
@@ -69,7 +66,6 @@ async function fetchManagerDashboard(today: string): Promise<ManagerDashboardDat
   });
 
   // Open-orders glance (same bucket logic as the management dashboard).
-  const { data: ords } = await supabase.from('orders').select('status');
   const pipeline: Record<OrderFilter, number> = {
     to_process: 0,
     dispatched: 0,

@@ -51,9 +51,44 @@ async function fetchManagementDashboard(productId?: string): Promise<ManagementD
   const staleCutoff = toDateStr(addDays(now, -STALE_VISIT_DAYS));
 
   const scope = productId ? { productId } : {};
-  const [thisM, lastM] = await Promise.all([
+  // Everything below is independent, so it goes out as ONE parallel wave. It
+  // used to be five sequential hops (≈650 ms each on a field connection).
+  // The pipeline is five row-free COUNTs rather than every order's status —
+  // that list grows forever, the counts don't.
+  const countFor = (key: OrderFilter) =>
+    supabase.from('orders').select('id', { count: 'exact', head: true }).in('status', ORDER_FILTER_STATUSES[key]);
+  const [
+    thisM,
+    lastM,
+    counts,
+    { data: attToday },
+    { data: visToday },
+    { data: stores },
+    { data: recentVisits },
+    { data: snaps },
+  ] = await Promise.all([
     casesSold(mStartStr, nextMStr, scope),
     casesSold(lastMStartStr, mStartStr, scope),
+    Promise.all(FILTER_KEYS.map(countFor)),
+    supabase
+      .from('attendance')
+      .select('user_id')
+      .gte('check_in_time', `${today}T00:00:00`)
+      .lt('check_in_time', `${today}T23:59:59`),
+    supabase
+      .from('store_visits')
+      .select('id')
+      .gte('check_in_time', `${today}T00:00:00`)
+      .lt('check_in_time', `${today}T23:59:59`),
+    supabase.from('stores').select('id, name'),
+    supabase.from('store_visits').select('store_id').gte('check_in_time', `${staleCutoff}T00:00:00`),
+    // ponytail: every snapshot ever, newest first, to find the latest per
+    // (store, product). Tens of rows today; when it reaches thousands, move
+    // "latest per pair" into a DISTINCT ON view/RPC (schema STOP-POINT).
+    supabase
+      .from('store_stock_snapshots')
+      .select('store_id, product_id, cases, bottles, recorded_at')
+      .order('recorded_at', { ascending: false }),
   ]);
 
   const daysInMonth = addDays(nextMonthStart(now), -1).getDate();
@@ -63,46 +98,11 @@ async function fetchManagementDashboard(productId?: string): Promise<ManagementD
     trend.push(thisM.byDay[key] || 0);
   }
 
-  const { data: ords } = await supabase.from('orders').select('status');
-  const pipeline: Record<OrderFilter, number> = {
-    to_process: 0,
-    dispatched: 0,
-    in_transit: 0,
-    delivered: 0,
-    cancelled: 0,
-  };
-  for (const o of (ords as any[]) || []) {
-    for (const key of FILTER_KEYS) {
-      if (ORDER_FILTER_STATUSES[key].includes(o.status)) pipeline[key]++;
-    }
-  }
-
-  const { data: attToday } = await supabase
-    .from('attendance')
-    .select('user_id')
-    .gte('check_in_time', `${today}T00:00:00`)
-    .lt('check_in_time', `${today}T23:59:59`);
+  const pipeline = Object.fromEntries(
+    FILTER_KEYS.map((key, i) => [key, counts[i].count ?? 0]),
+  ) as Record<OrderFilter, number>;
   const repsCheckedIn = new Set((attToday || []).map((a) => a.user_id)).size;
-
-  const { data: visToday } = await supabase
-    .from('store_visits')
-    .select('id')
-    .gte('check_in_time', `${today}T00:00:00`)
-    .lt('check_in_time', `${today}T23:59:59`);
   const visitsToday = (visToday || []).length;
-
-  const [{ data: stores }, { data: recentVisits }, { data: snaps }] =
-    await Promise.all([
-      supabase.from('stores').select('id, name'),
-      supabase
-        .from('store_visits')
-        .select('store_id')
-        .gte('check_in_time', `${staleCutoff}T00:00:00`),
-      supabase
-        .from('store_stock_snapshots')
-        .select('store_id, product_id, cases, bottles, recorded_at')
-        .order('recorded_at', { ascending: false }),
-    ]);
 
   const visitedRecently = new Set((recentVisits || []).map((v) => v.store_id));
   const seen = new Set<string>();

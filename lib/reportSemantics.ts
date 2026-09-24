@@ -89,8 +89,12 @@ export async function casesSold(
   // would silently overstate it.
   const legacyExcluded = !!filter.productId && startYmd < ORDERS_CUTOVER_DATE;
 
-  // Legacy visit cases for days strictly before the cutover.
-  if (startYmd < ORDERS_CUTOVER_DATE && !filter.productId) {
+  // The two sides are independent, so both requests go out together (a range
+  // spanning the cutover used to pay two sequential round trips).
+  const wantLegacy = startYmd < ORDERS_CUTOVER_DATE && !filter.productId;
+  const wantOrders = endExclusiveYmd > ORDERS_CUTOVER_DATE;
+  let legacyQ: any = null;
+  if (wantLegacy) {
     let q = supabase
       .from('store_visits')
       .select('id, check_in_time, cases_sold, store_id')
@@ -98,15 +102,10 @@ export async function casesSold(
       .lt('check_in_time', `${endExclusiveYmd}T00:00:00`);
     if (filter.userId) q = q.eq('user_id', filter.userId);
     if (filter.storeId) q = q.eq('store_id', filter.storeId);
-    const { data } = await q;
-    for (const v of (data as any[]) || []) {
-      const d = toDateStr(new Date(v.check_in_time));
-      if (d < ORDERS_CUTOVER_DATE) add(d, v.store_id, v.id, v.cases_sold || 0);
-    }
+    legacyQ = q;
   }
-
-  // Order cases (excl. cancelled) for days on/after the cutover.
-  if (endExclusiveYmd > ORDERS_CUTOVER_DATE) {
+  let ordersQ: any = null;
+  if (wantOrders) {
     let q = supabase
       .from('orders')
       // product_id comes along so a product filter can be applied per LINE.
@@ -118,8 +117,21 @@ export async function casesSold(
       .lt('created_at', `${endExclusiveYmd}T00:00:00`);
     if (filter.userId) q = q.eq('placed_by', filter.userId);
     if (filter.storeId) q = q.eq('store_id', filter.storeId);
-    const { data } = await q;
-    for (const o of (data as any[]) || []) {
+    ordersQ = q;
+  }
+  const [legacyRes, ordersRes] = await Promise.all([legacyQ, ordersQ]);
+
+  // Legacy visit cases for days strictly before the cutover.
+  if (legacyRes) {
+    for (const v of (legacyRes.data as any[]) || []) {
+      const d = toDateStr(new Date(v.check_in_time));
+      if (d < ORDERS_CUTOVER_DATE) add(d, v.store_id, v.id, v.cases_sold || 0);
+    }
+  }
+
+  // Order cases (excl. cancelled) for days on/after the cutover.
+  if (ordersRes) {
+    for (const o of (ordersRes.data as any[]) || []) {
       const d = toDateStr(new Date(o.created_at));
       if (d >= ORDERS_CUTOVER_DATE) {
         const lines = (o.order_items || []).filter(

@@ -95,14 +95,27 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
 
       // Listen for auth state changes
-      supabase.auth.onAuthStateChange(async (_event, session) => {
+      supabase.auth.onAuthStateChange(async (event, session) => {
         if (session) {
+          // INITIAL_SESSION fires the moment this listener is registered, for
+          // the session initialize() just loaded AND profiled above — a second
+          // fetch of the same row was a wasted round trip on every launch.
+          // Every other event (sign-in, TOKEN_REFRESHED on each foreground)
+          // still re-reads the profile: that is how deactivation lands.
+          if (event === 'INITIAL_SESSION' && get().profile?.id === session.user.id) {
+            set({ session, user: session.user });
+            return;
+          }
           const profile = await get().fetchProfile(session.user.id);
           if (profile && !profile.is_active) {
             await get().signOutDeactivated();
             return;
           }
-          set({ session, user: session.user, profile });
+          // Keep the same profile object when nothing changed, so a routine
+          // token refresh doesn't re-render every screen reading it.
+          const prev = get().profile;
+          const same = !!prev && !!profile && JSON.stringify(prev) === JSON.stringify(profile);
+          set({ session, user: session.user, profile: same ? prev : profile });
         } else {
           // Session cleared. If we previously had one and the user did not
           // tap "log out", this is a server-side revocation (logged in

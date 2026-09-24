@@ -7,7 +7,24 @@ const SUPABASE_URL = 'https://ldgunrxceogfrohjrlxz.supabase.co';
 const SUPABASE_ANON_KEY =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxkZ3VucnhjZW9nZnJvaGpybHh6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA5MDg5NzgsImV4cCI6MjA5NjQ4NDk3OH0.A16lbHx701b6sT_-to4Y2CrcyghNgD4eDQxGvJ7gRpk';
 
+/**
+ * supabase-js sets no timeout, so on a dead mobile connection a read can hang
+ * indefinitely — a screen that "never finishes" rather than one that fails
+ * and offers Retry. READS (GET/HEAD) abort after READ_TIMEOUT_MS and surface
+ * as an error React Query retries once. WRITES are never timed out: aborting
+ * an insert or an upload mid-flight could leave it half-done or re-sent.
+ */
+const READ_TIMEOUT_MS = 20_000;
+const fetchWithReadTimeout: typeof fetch = (input, init) => {
+  const method = (init?.method ?? 'GET').toUpperCase();
+  if ((method !== 'GET' && method !== 'HEAD') || init?.signal) return fetch(input, init);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), READ_TIMEOUT_MS);
+  return fetch(input, { ...init, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+};
+
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  global: { fetch: fetchWithReadTimeout },
   auth: {
     // Session is stored encrypted (Android Keystore / iOS Keychain) via a
     // chunked expo-secure-store adapter — not plaintext AsyncStorage.

@@ -208,26 +208,54 @@ export async function getSignedUrl(
   return (await signedUrlResult(filePath, expiresInSeconds, bucket)).url;
 }
 
+/** In-app display lifetime for batch-signed URLs. */
+const DISPLAY_TTL_S = 6 * 3600;
+/** A cached URL is reused only while it has at least this long left. */
+const REUSE_MIN_REMAINING_MS = 60 * 60_000;
+/** `${bucket}|${path}` → signed URL, its lifetime, and when it dies. */
+const signedCache = new Map<string, { url: string; ttlS: number; expiresAt: number }>();
+
 /**
  * Batch version: signs many paths in one round-trip.
  * Returns a map of path → signed URL (paths that failed are omitted).
  * Same bucket rule as getSignedUrl: locked buckets are passed explicitly.
+ *
+ * URLs are REUSED while they have life left. Every sign mints a new token, so
+ * a new URL, so the image cache misses and the full photo downloads again: in
+ * one day 21 visit photos were downloaded 220 times (avg 758 KB — ~163 MB of
+ * mobile data) because each report load re-signed them. A cached URL is only
+ * handed out if it was signed for at least as long as the caller asked (the
+ * 90-day CSV links never get a 6-hour one).
  */
 export async function getSignedUrls(
   filePaths: string[],
-  expiresInSeconds: number = 3600,
+  expiresInSeconds: number = DISPLAY_TTL_S,
   bucket: string = BUCKET
 ): Promise<Record<string, string>> {
   if (filePaths.length === 0) return {};
+  const now = Date.now();
+  const map: Record<string, string> = {};
+  const toSign: string[] = [];
+  for (const p of new Set(filePaths)) {
+    const hit = signedCache.get(`${bucket}|${p}`);
+    if (hit && hit.ttlS >= expiresInSeconds && hit.expiresAt - now > REUSE_MIN_REMAINING_MS) map[p] = hit.url;
+    else toSign.push(p);
+  }
+  if (!toSign.length) return map;
+
   const { data, error } = await supabase.storage
     .from(bucket)
-    .createSignedUrls(filePaths, expiresInSeconds);
+    .createSignedUrls(toSign, expiresInSeconds);
 
-  if (error || !data) return {};
-  const map: Record<string, string> = {};
+  if (error || !data) return map;
   for (const item of data) {
     if (item.path && item.signedUrl) {
       map[item.path] = item.signedUrl;
+      signedCache.set(`${bucket}|${item.path}`, {
+        url: item.signedUrl,
+        ttlS: expiresInSeconds,
+        expiresAt: now + expiresInSeconds * 1000,
+      });
     }
   }
   return map;

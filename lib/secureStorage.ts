@@ -20,6 +20,15 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // stays comfortably under the 2048-byte SecureStore limit (600 * 3 = 1800).
 const CHUNK_SIZE = 600;
 
+// supabase-js reads the session from storage on EVERY request (auth-js
+// __loadSession), and a Keystore read here is 1 + N sequential decrypts (a
+// ~3 KB session is ~6 chunks). So every query paid several Keystore round
+// trips before leaving the phone. This process is the only writer, so a
+// write-through memory copy is exact; the Keystore stays the at-rest store.
+// (The session is already held in JS memory by supabase-js itself — caching
+// it here exposes nothing new.)
+const memory = new Map<string, string | null>();
+
 // SecureStore keys allow only [A-Za-z0-9._-]. Supabase keys already comply;
 // sanitize defensively for anything else.
 function baseKey(key: string): string {
@@ -51,6 +60,7 @@ async function getChunkCount(bk: string): Promise<number> {
 }
 
 async function setItem(key: string, value: string): Promise<void> {
+  memory.set(key, value);
   const bk = baseKey(key);
   const prevCount = await getChunkCount(bk);
   const chunks = splitChunks(value);
@@ -66,6 +76,13 @@ async function setItem(key: string, value: string): Promise<void> {
 }
 
 async function getItem(key: string): Promise<string | null> {
+  if (memory.has(key)) return memory.get(key)!;
+  const value = await readFromKeystore(key);
+  memory.set(key, value);
+  return value;
+}
+
+async function readFromKeystore(key: string): Promise<string | null> {
   const bk = baseKey(key);
   const count = await getChunkCount(bk);
 
@@ -91,6 +108,7 @@ async function getItem(key: string): Promise<string | null> {
 }
 
 async function removeItem(key: string): Promise<void> {
+  memory.set(key, null);
   const bk = baseKey(key);
   const count = await getChunkCount(bk);
   for (let i = 0; i < count; i++) {
