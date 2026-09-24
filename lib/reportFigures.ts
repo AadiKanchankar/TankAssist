@@ -35,6 +35,10 @@ export interface PeriodFigure {
   recorded: number;
   pending: number;
   missing: number;
+  /** Recorded days whose figure the 22:30 sweep COMPUTED (auto-closed): market
+   *  time to the last store, straight-line distance — an estimate, not a
+   *  measured punch-out, and the tile says so. */
+  estimated: number;
 }
 
 export const toNum = (v: number | string | null | undefined): number | null => {
@@ -68,10 +72,11 @@ export function dayFigure(d: AttendanceFigures, kind: FigureKind): { state: DayS
 }
 
 export function periodFigure(days: AttendanceFigures[], kind: FigureKind): PeriodFigure {
-  const f: PeriodFigure = { value: null, recorded: 0, pending: 0, missing: 0 };
+  const f: PeriodFigure = { value: null, recorded: 0, pending: 0, missing: 0, estimated: 0 };
   for (const d of days) {
     const { state, value } = dayFigure(d, kind);
     f[state] += 1;
+    if (state === 'recorded' && d.auto_closed && kind !== 'odometer') f.estimated += 1;
     if (value != null) f.value = (f.value ?? 0) + value;
   }
   return f;
@@ -79,10 +84,11 @@ export function periodFigure(days: AttendanceFigures[], kind: FigureKind): Perio
 
 /** Caption under a period figure; null when the figure covers every day. */
 export function coverageNote(f: PeriodFigure): string | null {
-  const { recorded, pending, missing } = f;
-  if (!pending && !missing) return null;
+  const { recorded, pending, missing, estimated } = f;
+  if (!pending && !missing && !estimated) return null;
   if (!recorded) return missing ? 'Not recorded' : 'Calculated at punch-out';
   const parts: string[] = [];
+  if (estimated) parts.push(`${estimated} ${estimated === 1 ? 'day' : 'days'} estimated (auto-closed)`);
   if (missing) parts.push(`${missing} ${missing === 1 ? 'day' : 'days'} not recorded`);
   if (pending) parts.push('punch-out pending');
   return parts.join(' · ');

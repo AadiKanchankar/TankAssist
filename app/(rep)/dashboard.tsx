@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -39,6 +39,7 @@ import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
 import { totalRouteKm } from '../../lib/haversine';
 import { directionsRoute } from '../../lib/directions';
+import { warmLocation } from '../../lib/freshLocation';
 import { legsKm, RoutePoint, StoredRoute } from '../../lib/reportFigures';
 import * as Location from 'expo-location';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
@@ -101,8 +102,17 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
   };
 
   // Cache-backed focus refresh (Phase B): paint from cache, refetch in background.
+  // Read inside the focus effect without making it a dependency — a dependency
+  // would re-run the effect (and refetch) every time attendance changed.
+  const workingRef = useRef(false);
+  workingRef.current = !!attendance?.check_in_time && !attendance?.check_out_time;
+
   useFocusEffect(
     useCallback(() => {
+      // Warm the GPS while the rep is working, so the next store check-in gets
+      // a fresh fix in seconds rather than waiting on a cold start. One
+      // request, discarded — not tracking.
+      if (workingRef.current) warmLocation();
       refetch();
       refetchPlan();
       // Re-checked on every focus, so returning from a killed app (or from the
@@ -580,9 +590,15 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
                 </Text>
               </View>
             </View>
+            {!isCheckedIn ? (
+              <Text style={[Type.caption, { color: Colors.textSecondary, marginTop: Space.sm }]}>
+                Check in for the day to log a challan.
+              </Text>
+            ) : null}
             <Button
               title="Log a challan"
               variant="secondary"
+              disabled={!isCheckedIn}
               onPress={() =>
                 navigation.navigate('Challan', {
                   store: openVisit
@@ -701,7 +717,7 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
         <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
           <View style={styles.sectionHeader}>
             <Text style={[Type.section, { color: Colors.text }]}>Your stores</Text>
-            {assignments.length > 0 && (
+            {assignments.length > 0 && isCheckedIn && (
               <Pressable
                 onPress={() => navigation.navigate('MyStores')}
                 hitSlop={8}

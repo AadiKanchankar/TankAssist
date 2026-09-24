@@ -19,7 +19,10 @@ const FRAME_H = 96;
 const OCR_MAX_WIDTH = 1600;
 
 export interface OdometerResult {
-  value: number;
+  /** Null when the rep saved the photo without a reading (OCR failed and they
+   *  couldn't read it either). The photo is the evidence; the number can be
+   *  read off it later. Reports show a null reading as "not recorded". */
+  value: number | null;
   photoUri: string;
 }
 
@@ -232,6 +235,14 @@ export default function OdometerCapture({
     reset();
   };
 
+  // The PHOTO is what check-in requires; the reading stays skippable, so a
+  // flaky OCR read or an unreadable dial never strands a rep from starting work.
+  const confirmPhotoOnly = () => {
+    if (!photoUri) return;
+    onConfirm({ value: null, photoUri });
+    reset();
+  };
+
   const title = which === 'start' ? 'Odometer — start of day' : 'Odometer — end of day';
 
   return (
@@ -313,6 +324,12 @@ export default function OdometerCapture({
 
             <View style={styles.reviewActions}>
               <Button title="Save reading" onPress={confirm} />
+              <Button
+                title="Save photo without a reading"
+                variant="secondary"
+                onPress={confirmPhotoOnly}
+                style={{ marginTop: Space.sm }}
+              />
               <Button
                 title="Retake photo"
                 variant="secondary"

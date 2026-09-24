@@ -30,6 +30,29 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
 
   useEffect(() => {
     (async () => {
+      // One open day at a time. A rep who logged in again mid-afternoon was
+      // shown a fresh check-in and started a SECOND day while the morning one
+      // was still open (live, 23-09): punch-out then closed the new row and
+      // the real day was lost to the 22:30 sweep. attendance_one_open_per_user
+      // is the guarantee; this is the friendly version of it.
+      const { data: open } = await supabase
+        .from('attendance')
+        .select('id, check_in_time')
+        .eq('user_id', profile!.id)
+        .is('check_out_time', null)
+        .limit(1)
+        .maybeSingle();
+      if (open) {
+        Alert.alert(
+          'You’re already checked in',
+          `Your day started at ${new Date(open.check_in_time).toLocaleTimeString('en-IN', {
+            hour: 'numeric',
+            minute: '2-digit',
+          })}. Carry on from the dashboard.`,
+        );
+        navigation.goBack();
+        return;
+      }
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
         Alert.alert('Location needed', 'Location permission is required for check-in.');
@@ -47,7 +70,8 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
     })();
   }, []);
 
-  // Odometer at punch-in. Optional by design — see handleSubmit.
+  // Odometer at punch-in: the PHOTO is required, the reading is not (see
+  // OdometerCapture's "save photo without a reading").
   const [odo, setOdo] = useState<OdometerResult | null>(null);
   const [showOdo, setShowOdo] = useState(false);
 
@@ -66,12 +90,15 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
       Alert.alert('Selfie needed', 'Take a selfie first.');
       return;
     }
+    if (!odo) {
+      Alert.alert('Odometer photo needed', 'Photograph your odometer before checking in.');
+      return;
+    }
     setSubmitting(true);
     try {
       const selfieUrl = await uploadSelfie(photoUri, profile!.id);
-      // Odometer is optional at punch-in: a rep without their bike, or one on
-      // a build that predates the feature, must never be blocked from starting
-      // the day. Attendance is the record of record for pay.
+      // The photo is required (checked above) but its upload must not block
+      // the day: a failed upload keeps the rep-attested reading.
       let odoPath: string | null = null;
       if (odo) {
         try {
@@ -94,7 +121,16 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
         odo_start_lat: odo ? location.coords.latitude : null,
         odo_start_lng: odo ? location.coords.longitude : null,
       });
-      if (error) throw error;
+      if (error) {
+        // 23505 = attendance_one_open_per_user: another device (or a double
+        // tap) already started today.
+        if ((error as any).code === '23505') {
+          Alert.alert('You’re already checked in', 'Your day is already running. Carry on from the dashboard.');
+          navigation.goBack();
+          return;
+        }
+        throw error;
+      }
       // Peak-end: success overlay + haptic, then return.
       setSubmitting(false);
       setShowSuccess(true);
@@ -190,14 +226,17 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
           )}
         </BentoTile>
 
-        {/* Odometer — optional. Never gates check-in: a rep on foot today, or
-            on a build without the camera module, still has to be able to
-            start their day. */}
+        {/* Odometer — the photo is required to check in; the reading can be
+            skipped if it can't be read, so OCR never strands a rep. */}
         <BentoTile style={{ marginTop: Space.md }}>
           <Text style={styles.label}>Odometer (for travel allowance)</Text>
           {odo ? (
             <>
-              <Text style={styles.odoValue}>{odo.value}</Text>
+              {odo.value != null ? (
+                <Text style={styles.odoValue}>{odo.value}</Text>
+              ) : (
+                <Text style={[Type.bodyMed, { color: Colors.text }]}>Photo saved · no reading entered</Text>
+              )}
               <Button
                 title="Retake reading"
                 variant="secondary"
@@ -208,8 +247,8 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
           ) : (
             <>
               <Text style={styles.odoHint}>
-                Photograph your odometer so your travel allowance is calculated from the real
-                distance. You can skip it and check in without one.
+                Photograph your odometer to check in — your travel allowance is calculated from
+                it. If the number can’t be read, you can save the photo without it.
               </Text>
               <Button
                 title="Capture odometer"
@@ -226,7 +265,7 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
           spotlight
           onPress={handleSubmit}
           loading={submitting}
-          disabled={!location || !photoUri}
+          disabled={!location || !photoUri || !odo}
           style={styles.submitBtn}
         />
       </ScrollView>

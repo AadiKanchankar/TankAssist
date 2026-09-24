@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, View, StyleSheet, AppState } from 'react-native';
+import { ActivityIndicator, View, StyleSheet, AppState, Alert } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -46,6 +46,7 @@ import ChallanScreen from './app/(rep)/challan';
 import ExceptionsScreen from './app/(admin)/exceptions';
 import ReportDrilldownScreen from './app/(admin)/report-drilldown';
 import ErrorBoundary from './components/ErrorBoundary';
+import { useRepDashboard } from './hooks/useRepDashboard';
 
 const Stack = createNativeStackNavigator();
 const RepTab = createBottomTabNavigator();
@@ -149,6 +150,26 @@ const getTabScreenOptions = (bottomInset: number) => ({
 // Rep bottom tabs
 function RepTabs() {
   const insets = useSafeAreaInsets();
+  const { profile } = useAuthStore();
+  // Same cached query the dashboard shows — no extra request. Stores and
+  // Report stay shut until today's check-in exists; Report reopens-and-stays
+  // after punch-out, which is when reps submit it. Nothing is locked while the
+  // first load is still in flight: a wrongful lockout is worse than a moment
+  // of access. ponytail: this greying is UX, NOT security — the database
+  // refuses a store visit without an open day (trg_store_visit_requires_checkin).
+  const { data: dash } = useRepDashboard(profile?.id);
+  const locked = dash !== undefined && !dash.attendance?.check_in_time;
+  const lockedTab = {
+    tabBarItemStyle: locked ? { opacity: 0.35 } : undefined,
+    tabBarAccessibilityLabel: locked ? 'Locked until you check in' : undefined,
+  };
+  const lockedListeners = {
+    tabPress: (e: { preventDefault: () => void }) => {
+      if (!locked) return;
+      e.preventDefault();
+      Alert.alert('Check in first', 'Start your day from the dashboard to open your stores and report.');
+    },
+  };
   return (
     <>
       {/* Rep-side live-location responder (active only while checked in). */}
@@ -167,7 +188,9 @@ function RepTabs() {
       <RepTab.Screen
         name="MyStores"
         component={RepStoresStack}
+        listeners={lockedListeners}
         options={{
+          ...lockedTab,
           tabBarLabel: 'My stores',
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="storefront" size={size} color={color} />
@@ -177,7 +200,9 @@ function RepTabs() {
       <RepTab.Screen
         name="Report"
         component={ReportScreen}
+        listeners={lockedListeners}
         options={{
+          ...lockedTab,
           tabBarLabel: 'Report',
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="document-text" size={size} color={color} />

@@ -40,6 +40,7 @@ import {
 } from '../../lib/storage';
 import { reverseGeocode } from '../../lib/geocoding';
 import { haversineKm } from '../../lib/haversine';
+import { freshPosition, Fix } from '../../lib/freshLocation';
 import {
   readCheckoutPosition,
   isFarCheckout,
@@ -148,6 +149,34 @@ export default function StoreVisitScreen({
   const [checkInAddress, setCheckInAddress] = useState<string | null>(null);
   const [initializing, setInitializing] = useState(true);
 
+  // Check-in position, confirmed by the rep BEFORE the visit row is written.
+  // The mount flow waits on confirmResolver; the panel resolves it with the
+  // fix the rep accepted (or null for Back).
+  const [awaitingConfirm, setAwaitingConfirm] = useState(false);
+  const [pendingFix, setPendingFix] = useState<Fix | null>(null);
+  const [locating, setLocating] = useState(false);
+  const confirmResolver = useRef<((fix: Fix | null) => void) | null>(null);
+  const locate = async () => {
+    setLocating(true);
+    try {
+      setPendingFix(await freshPosition());
+    } catch {
+      // Keep whatever fix is on screen; the rep can retry.
+    }
+    setLocating(false);
+  };
+  const awaitConfirmedFix = () =>
+    new Promise<Fix | null>((resolve) => {
+      confirmResolver.current = resolve;
+      setAwaitingConfirm(true);
+      locate();
+    });
+  const answerConfirm = (fix: Fix | null) => {
+    setAwaitingConfirm(false);
+    confirmResolver.current?.(fix);
+    confirmResolver.current = null;
+  };
+
   // Stepper
   const [stepStack, setStepStack] = useState<Step[]>(['stock']);
   const current = stepStack[stepStack.length - 1];
@@ -234,10 +263,6 @@ export default function StoreVisitScreen({
           navigation.goBack();
           return;
         }
-        const loc = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.BestForNavigation,
-        });
-        const now = new Date().toISOString();
 
         // ── One open visit at a time ──────────────────────────────────────
         // Look for ANY open visit by this rep — not scoped to this store, and
@@ -287,6 +312,15 @@ export default function StoreVisitScreen({
           setCheckInAddress(existing.address ?? null);
           setResumedVisitId(existing.id);
         } else {
+          // A FRESH fix, confirmed on screen. Reusing the phone's remembered
+          // position recorded the PREVIOUS shop's coordinates on check-in.
+          const fix = await awaitConfirmedFix();
+          if (!fix) {
+            navigation.goBack();
+            return;
+          }
+          const loc = fix.loc;
+          const now = new Date().toISOString();
           const lat = loc.coords.latitude;
           const lng = loc.coords.longitude;
           let distanceMeters: number | null = null;
@@ -833,6 +867,62 @@ export default function StoreVisitScreen({
   };
 
   // ─── Render ───
+  if (awaitingConfirm) {
+    const c = pendingFix?.loc.coords;
+    const metres =
+      c && store.latitude != null && store.longitude != null
+        ? Math.round(haversineKm(c.latitude, c.longitude, store.latitude, store.longitude) * 1000)
+        : null;
+    return (
+      <View style={styles.container}>
+        <Header title="Check in" onBack={() => answerConfirm(null)} />
+        <View style={styles.confirmBody}>
+          <BentoTile>
+            <Text style={[Type.label, { color: Colors.textMuted }]}>Checking in at</Text>
+            <Text style={[Type.section, { color: Colors.text, marginTop: 2 }]}>{store.name}</Text>
+            <Text style={[Type.label, { color: Colors.textMuted, marginTop: Space.lg }]}>Your location</Text>
+            {locating || !c ? (
+              <View style={styles.confirmRow}>
+                <ActivityIndicator size="small" color={Colors.accent} />
+                <Text style={[Type.body, { color: Colors.textSecondary }]}>Getting your location…</Text>
+              </View>
+            ) : (
+              <>
+                <Text style={[Type.bodyMed, tabularNums, { color: Colors.text, marginTop: 2 }]}>
+                  {c.latitude.toFixed(6)}, {c.longitude.toFixed(6)}
+                </Text>
+                <Text style={[Type.caption, tabularNums, { color: Colors.textSecondary, marginTop: 2 }]}>
+                  {c.accuracy != null ? `Accurate to about ${Math.round(c.accuracy)} m` : 'Accuracy unknown'}
+                  {metres != null ? ` · ${metres.toLocaleString('en-IN')} m from the store` : ''}
+                </Text>
+                {pendingFix && !pendingFix.fresh ? (
+                  <Text style={[Type.caption, { color: Colors.warning, marginTop: Space.sm }]}>
+                    Couldn’t get a fresh fix — this may be where you were earlier. Refresh, or step
+                    outside for a clearer signal.
+                  </Text>
+                ) : null}
+              </>
+            )}
+          </BentoTile>
+          <Button
+            title="Refresh location"
+            variant="secondary"
+            onPress={locate}
+            disabled={locating}
+            style={{ marginTop: Space.lg }}
+          />
+          <Button
+            title="Check in here"
+            spotlight
+            onPress={() => pendingFix && answerConfirm(pendingFix)}
+            disabled={locating || !pendingFix}
+            style={{ marginTop: Space.sm }}
+          />
+        </View>
+      </View>
+    );
+  }
+
   if (initializing) {
     return (
       <View style={styles.centered}>
@@ -1432,6 +1522,8 @@ const styles = StyleSheet.create({
   stillChoiceActive: { borderColor: Colors.accent, backgroundColor: Colors.surface },
   stillChoiceText: { ...Type.body, color: Colors.textSecondary, flex: 1 },
   initText: { ...Type.body, color: Colors.textMuted, marginTop: Space.md },
+  confirmBody: { padding: Layout.screenPad },
+  confirmRow: { flexDirection: 'row', alignItems: 'center', gap: Space.sm, marginTop: Space.xs },
   // Progress
   progress: {
     paddingHorizontal: Layout.screenPad,

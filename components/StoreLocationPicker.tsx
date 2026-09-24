@@ -1,16 +1,19 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
   TextInput,
   StyleSheet,
   ActivityIndicator,
+  Pressable,
 } from 'react-native';
 import MapView, { PROVIDER_GOOGLE } from 'react-native-maps';
 import type { Region } from 'react-native-maps';
 import * as Location from 'expo-location';
-import { Colors, Typography } from '../constants/colors';
+import { Ionicons } from '@expo/vector-icons';
+import { Colors, Typography, Layout } from '../constants/colors';
 import { reverseGeocodeDetailed } from '../lib/geocoding';
+import { freshPosition } from '../lib/freshLocation';
 
 export interface StoreLocationValue {
   latitude: number | null;
@@ -49,6 +52,10 @@ export default function StoreLocationPicker({ value, onChange }: Props) {
   const [locating, setLocating] = useState(false);
   const [geocoding, setGeocoding] = useState(false);
   const [isMoving, setIsMoving] = useState(false);
+  // True when the phone couldn't produce a fresh fix and we fell back to an
+  // older one — said out loud, because this coordinate is saved for good.
+  const [staleFix, setStaleFix] = useState(false);
+  const mapRef = useRef<MapView>(null);
 
   // Initialise the map region once when the picker mounts.
   useEffect(() => {
@@ -68,14 +75,16 @@ export default function StoreLocationPicker({ value, onChange }: Props) {
       });
       return;
     }
-    // Otherwise center + place the pin on the user's current GPS.
+    // Otherwise center + place the pin on the user's current GPS — a FRESH fix.
+    // This coordinate becomes the store's permanent location and feeds the
+    // proximity de-dup check, so a cached fix (the last shop's, 50 m away)
+    // would corrupt data long after this screen closes.
     setLocating(true);
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status === 'granted') {
-        const loc = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Balanced,
-        });
+        const { loc, fresh } = await freshPosition(Location.Accuracy.High);
+        setStaleFix(!fresh);
         const lat = loc.coords.latitude;
         const lng = loc.coords.longitude;
         setMapRegion({
@@ -93,6 +102,31 @@ export default function StoreLocationPicker({ value, onChange }: Props) {
       setMapRegion(DEFAULT_REGION);
     }
     setLocating(false);
+  };
+
+  // "Locate me": re-capture where the phone is now and move the pin there.
+  const locateMe = async () => {
+    setLocating(true);
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') return;
+      const { loc, fresh } = await freshPosition(Location.Accuracy.High);
+      setStaleFix(!fresh);
+      const region = {
+        latitude: loc.coords.latitude,
+        longitude: loc.coords.longitude,
+        latitudeDelta: 0.003,
+        longitudeDelta: 0.003,
+      };
+      // A programmatic move settles with isGesture false, which the region
+      // handler ignores — so commit explicitly.
+      mapRef.current?.animateToRegion(region, 300);
+      commit(region.latitude, region.longitude);
+    } catch {
+      // Location unavailable: the pin stays where it was.
+    } finally {
+      setLocating(false);
+    }
   };
 
   // Commit a coordinate: save lat/lng immediately (clearing any stale state),
@@ -147,9 +181,12 @@ export default function StoreLocationPicker({ value, onChange }: Props) {
       {mapRegion ? (
         <View style={styles.mapWrapper}>
           <MapView
+            ref={mapRef}
             provider={PROVIDER_GOOGLE}
             style={styles.map}
             initialRegion={mapRegion}
+            showsUserLocation
+            showsMyLocationButton={false}
             onRegionChange={handleRegionChange}
             onRegionChangeComplete={handleRegionChangeComplete}
           />
@@ -162,6 +199,19 @@ export default function StoreLocationPicker({ value, onChange }: Props) {
             </View>
             <View style={styles.centerPinStem} />
           </View>
+          <Pressable
+            onPress={locateMe}
+            style={styles.locateBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Use my current location"
+            hitSlop={6}
+          >
+            {locating ? (
+              <ActivityIndicator size="small" color={Colors.accent} />
+            ) : (
+              <Ionicons name="locate" size={22} color={Colors.text} />
+            )}
+          </Pressable>
         </View>
       ) : (
         <View style={[styles.mapWrapper, styles.mapPlaceholder]}>
@@ -172,6 +222,12 @@ export default function StoreLocationPicker({ value, onChange }: Props) {
         </View>
       )}
 
+      {staleFix && !isMoving ? (
+        <Text style={[styles.coordText, { color: Colors.warning }]}>
+          Couldn’t get a fresh GPS fix — this may be where you were earlier. Tap the locate button
+          again, or step outside for a clearer signal.
+        </Text>
+      ) : null}
       {isMoving ? (
         <Text style={styles.coordText}>Moving…</Text>
       ) : value.latitude != null && value.longitude != null ? (
@@ -231,6 +287,20 @@ const styles = StyleSheet.create({
     borderColor: Colors.border,
   },
   map: { flex: 1 },
+  // The familiar maps "locate me" control, bottom-right over the map.
+  locateBtn: {
+    position: 'absolute',
+    right: 10,
+    bottom: 10,
+    width: Layout.tap,
+    height: Layout.tap,
+    borderRadius: Layout.tap / 2,
+    backgroundColor: Colors.white,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
   // Static center pin overlay (tip points at the map's center point)
   centerPin: {
     position: 'absolute',

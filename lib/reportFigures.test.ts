@@ -70,6 +70,21 @@ const measuredZero = { ...punchedOut, total_distance_km: 0, total_market_time_mi
   assert.equal(coverageNote(f), '1 day not recorded');
 }
 
+// ── an auto-closed day the sweep computed is RECORDED, but labelled estimated ──
+{
+  const computed = { ...autoClosed, total_distance_km: 18.03, total_market_time_minutes: 260 };
+  const route = periodFigure([computed], 'route');
+  assert.equal(route.value, 18.03);
+  assert.equal(route.estimated, 1);
+  assert.equal(coverageNote(route), '1 day estimated (auto-closed)');
+  // A measured-zero no-visit day from the sweep is still an estimate of a day, and says so.
+  assert.equal(coverageNote(periodFigure([{ ...autoClosed, total_distance_km: 0, total_market_time_minutes: 0 }], 'market')), '1 day estimated (auto-closed)');
+  // A punched-out day is never "estimated".
+  assert.equal(periodFigure([punchedOut], 'route').estimated, 0);
+  // Mixed with a missing day, both are said.
+  assert.equal(coverageNote(periodFigure([computed, autoClosed], 'route')), '1 day estimated (auto-closed) · 1 day not recorded');
+}
+
 // ── what a tile shows ─────────────────────────────────────────────────────
 {
   const km = (n: number) => `${n.toFixed(1)} km`;
