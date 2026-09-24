@@ -2,7 +2,7 @@
 
 Session-state snapshot for the next Claude Code session. **Temporal** — records what is live, pending, and out of scope as of the date below. Durable architecture facts live in `CLAUDE.md`; plain-language status for the user is `PROJECT_STATUS.md`.
 
-- **Snapshot date:** 2026-09-23 (builds/OTAs reconciled against `eas build:list` / `eas update:list`, data against the live DB via MCP — not against the previous copy of this file)
+- **Snapshot date:** 2026-09-24 (builds/OTAs reconciled against `eas build:list` / `eas update:list`, data against the live DB via MCP — not against the previous copy of this file)
 - **Supabase project:** `ldgunrxceogfrohjrlxz` (live MCP access; verify before assuming)
 - **Repo:** `github.com/AadiKanchankar/TankAssist`. ⚠️ **Until 2026-09-23 `master` was 17 commits stale** (stuck at `9964b90`, the 1.1.0 build) while all work since 19 Aug lived on `feat/timeinstore-challan-review-push`. Both were fast-forwarded to `7d2085a` that day. **Before trusting any branch, check it against the newest EAS build's commit** — a stale branch plus a stale HANDOFF is how a whole session once got built on the wrong base.
 - **Type state:** `npx tsc --noEmit` clean. `*.test.ts` files pass (`npx tsx <file>`). `expo-doctor` **18/18** after `npx expo install --fix` cleared patch drift on `expo`, `expo-file-system`, `expo-location`, `expo-sharing`, `expo-updates`.
@@ -11,6 +11,33 @@ Session-state snapshot for the next Claude Code session. **Temporal** — record
 ---
 
 ## What is actually live right now
+
+### 2026-09-24 — perf emergency + auto-close/check-in/location batch (two OTAs, runtime 1.3.0)
+
+**Perf — OTA `bb691221` (commit `5850cce`).** Measured from live edge logs first:
+- Rep dashboard = **5 serial hops × ~650 ms ≈ 2.9 s** per load on Jio (the DB answers in ~5 ms; ~170 ms/hop is Mumbai→**Seoul** distance). Sales-manager and management dashboards had the same shape. All three now one `Promise.all` wave. Re-measured over the real network: 5 sequential reads **3783 ms → 1748 ms** (median of 5, from this machine; phones use HTTP/2 and should do better).
+- **220 downloads of 21 photos in 24 h, avg 758 KB (~163 MB)** — re-signing minted new URLs every load. Signed URLs are now reused. *Verify in edge logs:* per-photo `GET /storage/v1/object/sign/...` counts should collapse.
+- Session storage memory cache; 20 s read timeout (writes never); duplicate INITIAL_SESSION profile fetch removed; `casesSold` halves parallel; management pipeline uses row-free counts.
+- The manager tester was on a **US VPN** (1.5–3.7 s/hop) — the network, not the app.
+
+**Auto-close diagnosis:** the sweep ran every night (all `succeeded`) and its cutoff catches a 5 PM check-in. The real cause (Bhagwan, **23-09**, not 22-09): he logged in again ~17:00 and punch-in let him start a **second** day while the morning one was open; punch-out closed the new row (17:01–19:13) and the real day (10:08, Magpai 10:40) was left to the sweep with null figures.
+
+**Migration `auto_close_three_cases_and_checkin_gates` (owner-approved, validated in a rolled-back transaction first):** sweep closes EVERY open row and computes the three cases via `auto_close_figures()` (straight-line distance; case 2 ends at the last *observed* moment, owner decision); `attendance_one_open_per_user`; `trg_store_visit_requires_checkin`. Cron unchanged (`select public.auto_close_stale()` @ `0 17 * * *`).
+
+**Backfill (owner-approved, targeted by id, 2 rows):** `25ad2061…` 21-09 → 260 min, 18.03 km (straight-line route stored). `703423a2…` 23-09 morning → **406 min, distance left NULL** on purpose: that day's afternoon punch-out route (19.14 km, `directions`) already covers every store, so adding 10.75 km would double-count TA. Verified: 0 other auto-closed rows changed, 0 odometer values touched.
+
+**Client — OTA `c0dd15ab` (commit `e7d36c0`):** punch-in refuses while a day is open; Stores/Report tabs greyed until check-in; odometer **photo required**, reading skippable (owner deferred to me); store check-in shows a fresh fix + accuracy + distance with Refresh before the visit is written; add-store has the blue dot + locate-me; stale fixes are said out loud; auto-closed figures labelled "estimated (auto-closed)".
+
+**On-device pass for these two OTAs:**
+1. Cold-start the rep dashboard on mobile data — should settle in roughly one round trip after the profile. Open a manager rep report twice; the second time photos should appear instantly (cached URLs).
+2. Before punching in: Stores + Report tabs greyed, tap explains; challan disabled; Plan my day still works.
+3. Punch in without an odometer photo → blocked; with photo but "Save photo without a reading" → allowed.
+4. Try a second punch-in the same day (log out/in) → "You're already checked in".
+5. Store check-in: the confirm screen shows accuracy + metres from the store; walk 50 m to the next shop → Refresh changes the position.
+6. Add store: locate-me button re-centres the pin; blue dot visible.
+7. Leave a day open overnight → next morning it reads market to the last store and "estimated (auto-closed)", odometer "not recorded".
+
+**Known edge:** a rep who punches in *after* 22:30 has a day the sweep only closes the next night, and the one-open-day index then blocks the next morning's punch-in until 22:30. Rare; if it bites, close that row by hand or move the sweep's cutoff.
 
 ### 2026-09-23 — report data bug, plan fixes, report drill-downs — SHIPPED as OTA `4017d12b` (runtime 1.3.0, commit `6c44578`)
 
@@ -58,6 +85,8 @@ All DB work is **applied to live** and impersonation-tested. Shipped in the 1.2.
 ### Builds and OTAs (from `eas build:list` / `eas update:list`, 2026-09-23)
 | Build | Runtime | Commit | Notes |
 |---|---|---|---|
+| OTA `c0dd15ab` | 1.3.0 | `e7d36c0` | 2026-09-24. Check-in gate, one open day, fresh GPS, odometer photo required. |
+| OTA `bb691221` | 1.3.0 | `5850cce` | 2026-09-24. Perf: parallel dashboards, stable photo URLs, session cache, read timeouts. |
 | `e0051cb2` | 1.3.0 | `7d2085a` | 2026-09-19. Display name **TankAssist** + brand icon (native resources, hence a build). Same keystore → in-place upgrade. **Newest.** |
 | `5ce7d335` | 1.3.0 | `f7696e3` | 2026-09-01. Cloud odometer OCR, dependency drift cleared. |
 | `b519bfe3` / `6b19271e` | 1.2.0 | `3ae92d8` / `c57850c` | 25 / 19 Aug. `expo-notifications`/`expo-device` → runtime bump. |
