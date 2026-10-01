@@ -118,6 +118,37 @@ assert.ok(!html2.includes('Week · 19–19'), 'no one-day week subtotal');
 assert.ok(html.includes('No punch-out'));
 assert.ok(standouts(full).some((s) => s.includes('Data gaps')));
 
+// Auto-closed days: the note says exactly what the sweep produced (code review 2026-10-01).
+{
+  const at = (d: number, h: number) => new Date(2026, 8, d, h).toISOString();
+  const v = (d: number, h: number): PdfVisit => ({ id: `x${d}${h}`, store_id: 's', storeName: 'Magpai', check_in_time: at(d, h),
+    check_out_time: at(d, h + 1), duration_minutes: 60, auto_closed: false, notes: null, cases: 0 });
+  const day = (d: number, h: number, auto: boolean, market: number | null, km: string | null): PdfDay => ({
+    check_in_time: at(d, h), check_out_time: at(d, 22), auto_closed: auto, total_market_time_minutes: market,
+    total_distance_km: km, odo_start: null, odo_end: null });
+  const m = buildMonth({
+    month: new Date(2026, 8, 1),
+    days: [
+      day(1, 10, true, 200, null),                              // visits, no distance
+      day(2, 10, true, 0, '0'),                                 // case 3: no store
+      day(3, 9, true, 300, '10'), day(3, 14, false, 120, '20'), // two punch-ins, one swept
+    ],
+    visits: [v(1, 11), v(3, 10)],
+    dayReports: [], casesByDay: {}, casesTotal: 0, now: new Date(2026, 9, 1),
+  });
+  const h = reportHtml('T', [m], new Date(2026, 9, 1));
+  const [d1, d2, d3] = m.fieldDays;
+  assert.ok(d1.estimated && !d1.estimatedRoute && d1.routeKm == null);
+  assert.ok(h.includes('01 Sep: closed by the 22:30 auto-close. Market time runs to the last store visited') && h.includes('and no distance was recorded.'));
+  assert.ok(d2.autoClosed && !d2.estimated && !d2.estimatedRoute, 'case 3 is measured zeros, not an estimate');
+  assert.ok(h.includes('02 Sep: closed by the 22:30 auto-close with no store visited'));
+  assert.ok(!h.includes('02 Sep: closed by the 22:30 auto-close. Market time'));
+  assert.ok(d3.estimatedRoute && d3.routeKm === 30);
+  assert.ok(h.includes('03 Sep: one of its 2 punch-ins was closed') && h.includes('(the punched-out part is road distance)'));
+  assert.ok(h.includes('>~30.0<'), 'estimated route km carries ~');
+  assert.ok(h.includes('add a straight-line distance instead'));
+}
+
 if (process.env.PREVIEW_DIR) {
   writeFileSync(join(process.env.PREVIEW_DIR, 'full.html'), html);
   writeFileSync(join(process.env.PREVIEW_DIR, 'partial.html'), html2);

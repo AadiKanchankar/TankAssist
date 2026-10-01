@@ -109,7 +109,14 @@ export interface DayRow {
   marketMin: number | null;
   /** Market-time state; route follows the same punch-out rule. */
   market: DayState;
+  /** Closed by the 22:30 sweep (any of the day's punch-ins). */
+  autoClosed: boolean;
+  /** Market time is (partly) the sweep's computation — store visits existed.
+   *  A no-store auto-closed day is measured zeros by rule (case 3), not this. */
   estimated: boolean;
+  /** Some of routeKm is the sweep's straight-line distance, not Directions. */
+  estimatedRoute: boolean;
+  attRows: number;
   routeKm: number | null;
   odoKm: number | null;
   cases: number;
@@ -202,7 +209,11 @@ export function buildMonth(input: PdfMonthInput): MonthModel {
       inStoreMin: vs.reduce((s, v) => s + (v.duration_minutes ?? 0), 0),
       marketMin: mk.value,
       market: mk.state,
-      estimated: mk.state === 'recorded' && att.some((a) => !!a.auto_closed),
+      autoClosed: att.some((a) => !!a.auto_closed),
+      estimated: mk.state === 'recorded' && vs.length > 0 && att.some((a) => !!a.auto_closed),
+      estimatedRoute:
+        rt.state === 'recorded' && vs.length > 0 && att.some((a) => !!a.auto_closed && toNum(a.total_distance_km) != null),
+      attRows: att.length,
       routeKm: rt.value,
       odoKm: odo,
       cases: input.casesByDay[key] ?? 0,
@@ -577,7 +588,7 @@ const tag = (d: DayRow) => {
   if (d.market === 'pending') return '<span class="pill warn">Open</span>';
   if (d.market === 'missing') return '<span class="pill warn">No punch-out</span>';
   if (!d.hasAttendance && d.visits.length) return '<span class="pill warn">No punch-in</span>';
-  if (d.estimated) return '<span class="pill">Auto-closed</span>';
+  if (d.autoClosed) return '<span class="pill">Auto-closed</span>';
   if (d.cases > 0) return '<span class="pill good">Sales</span>';
   return '';
 };
@@ -623,7 +634,7 @@ function dayTable(md: MonthModel): string {
       body += `<tr class="${d.cases > 0 ? 'sale' : ''}"><td>${dayLabel(d.date)}</td><td>${WD[d.date.getDay()]}</td><td class="n">${d.visits.length}</td>
         <td class="n">${d.firstIn ? hhmm(d.firstIn) : '—'}</td><td class="n">${d.lastOut ? hhmm(d.lastOut) : '—'}</td>
         <td class="n">${hm(d.inStoreMin)}</td><td class="n">${d.estimated ? '~' : ''}${hm(d.marketMin)}</td><td class="n">${p == null ? '—' : `${p}%`}</td>
-        <td class="n">${km(d.routeKm)}</td><td class="n">${d.odoKm == null ? '—' : int(Math.round(d.odoKm))}</td>
+        <td class="n">${d.estimatedRoute ? '~' : ''}${km(d.routeKm)}</td><td class="n">${d.odoKm == null ? '—' : int(Math.round(d.odoKm))}</td>
         <td class="n">${d.cases ? int(d.cases) : '–'}</td><td>${tag(d)}</td></tr>`;
     }
     // A one-day week's subtotal would just repeat the row above it.
@@ -641,7 +652,7 @@ function dayTable(md: MonthModel): string {
 function notes(md: MonthModel): string {
   const n: string[] = [
     '<b>In stores</b> = sum of visit durations. <b>Market time</b> = punch-in to punch-out, tracked by the app. <b>In-store %</b> uses only days whose market time was recorded.',
-    `<b>Route (GPS)</b> is the road distance (Google Directions) through punch-in → each store check-in, in visiting order → punch-out. <b>Odometer</b> is the vehicle's end reading minus its start reading. They measure different things and are never merged: the route only joins the points where the rep checked in, so riding between them — wrong turns, fuel, lunch, parking — is invisible to it. <b>The odometer normally reads higher</b>; a day is flagged for review only when it exceeds the route by more than ${Math.round(MISMATCH_PERCENT * 100)}% and ${MISMATCH_FLOOR_KM} km.`,
+    `<b>Route (GPS)</b> is the road distance (Google Directions) through punch-in → each store check-in, in visiting order → punch-out. <b>Odometer</b> is the vehicle's end reading minus its start reading. They measure different things and are never merged: the route only joins the points where the rep checked in, so riding between them — wrong turns, fuel, lunch, parking — is invisible to it. <b>The odometer normally reads higher</b>; a day is flagged for review only when it exceeds the route by more than ${Math.round(MISMATCH_PERCENT * 100)}% and ${MISMATCH_FLOOR_KM} km.${md.fieldDays.some((d) => d.estimatedRoute) ? ' Days closed by the 22:30 auto-close add a straight-line distance instead, marked ~ in the table.' : ''}`,
   ];
   for (const d of md.fieldDays) {
     const lastVisit = d.visits[d.visits.length - 1];
@@ -649,8 +660,19 @@ function notes(md: MonthModel): string {
       n.push(`${dayLabel(d.date)}: no punch-out${lastVisit && !lastVisit.check_out_time ? ` (last check-in ${esc(md.shownName(lastVisit.storeName))}, ${hhmm(lastVisit.check_in_time)}, has no check-out)` : ''}, so market time and distance were not recorded and are excluded from totals and averages.`);
     } else if (d.market === 'pending') {
       n.push(`${dayLabel(d.date)}: the day is still open; its market time and distance are calculated at punch-out.`);
-    } else if (d.estimated) {
-      n.push(`${dayLabel(d.date)}: closed by the 22:30 auto-close, so market time runs to the last store and the distance is straight-line — estimates, not a measured punch-out.`);
+    } else if (d.autoClosed) {
+      // Say exactly what the sweep produced for THIS day — never more.
+      const who = d.attRows > 1 ? `one of its ${d.attRows} punch-ins was closed by the 22:30 auto-close` : 'closed by the 22:30 auto-close';
+      if (!d.visits.length) {
+        n.push(`${dayLabel(d.date)}: ${who} with no store visited, so market time and distance are recorded as 0.`);
+      } else {
+        const dist = d.estimatedRoute
+          ? `its distance is a straight-line estimate${d.attRows > 1 ? ' (the punched-out part is road distance)' : ''}`
+          : d.routeKm != null
+          ? 'its distance is the punched-out part only'
+          : 'no distance was recorded';
+        n.push(`${dayLabel(d.date)}: ${who}. Market time runs to the last store visited — an estimate, not a measured punch-out (marked ~) — and ${dist}.`);
+      }
     }
     if (!d.hasAttendance && d.visits.length) n.push(`${dayLabel(d.date)}: store visits with no punch-in for the day.`);
   }
