@@ -127,8 +127,9 @@ export function userMessage(err: unknown): string {
     return generic(err);
   }
 
-  // Our own `throw new Error('…')`. Runtime errors (TypeError etc.) and library
-  // errors carry another name, and are not ours to show.
+  // Our own `throw new Error('…')` — including our own subclasses, which must
+  // keep name 'Error' (see ChallanLinesError). Runtime errors (TypeError etc.)
+  // and library errors carry another name, and are not ours to show.
   if (e.name === 'Error' && !('details' in e) && safeAuthored(msg)) return msg;
   return generic(err);
 }

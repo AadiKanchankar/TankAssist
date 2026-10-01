@@ -473,11 +473,13 @@ function repeatCard(md: MonthModel): string {
 
 export function standouts(md: MonthModel): string[] {
   const out: string[] = [];
-  const rec = md.fieldDays.filter((d) => d.market === 'recorded' && d.marketMin);
-  if (rec.length && md.market.min) {
+  // A recorded 0 (auto-closed, no store) is a real day: it counts in the
+  // average, same as the KPI tile's market.min / market.days.
+  if (md.market.min) {
+    const rec = md.fieldDays.filter((d) => d.market === 'recorded' && d.marketMin != null);
     const longest = [...rec].sort((a, b) => (b.marketMin ?? 0) - (a.marketMin ?? 0))[0];
     out.push(
-      `<b>Market days.</b> Avg ${hm(Math.round(md.market.min / rec.length))} tracked per day; the longest was ${hm(longest.marketMin)} on ${WD[longest.date.getDay()]} ${dayLabel(longest.date)}, with ${pct(longest.inStoreMin, longest.marketMin!)}% of it inside stores.`,
+      `<b>Market days.</b> Avg ${hm(Math.round(md.market.min / md.market.days))} tracked per day; the longest was ${hm(longest.marketMin)} on ${WD[longest.date.getDay()]} ${dayLabel(longest.date)}, with ${pct(longest.inStoreMin, longest.marketMin!)}% of it inside stores.`,
     );
     out.push(
       `<b>~${pct(md.inStoreOnMarketDays, md.market.min)}% of market time is spent inside stores</b> (${hm(md.inStoreOnMarketDays)} of ${hm(md.market.min)}); the rest is travel and time between stores.`,
@@ -813,7 +815,10 @@ export function reportHtml(repName: string, months: MonthModel[], generated: Dat
   // @page margin boxes: Chromium 131+ (current Android System WebView) prints
   // the footer; an older WebView simply omits it.
   const box = `font-family: Inter, "Segoe UI", Roboto, system-ui, sans-serif; font-size: 8px; color: ${C.faint};`;
-  const footer = `@page { @bottom-left { content: "${esc(repName).replace(/"/g, '')} · Field report · ${period}"; ${box} }
+  // CSS string, not HTML: entities aren't decoded inside <style>, so strip what
+  // could end the string or the element instead of HTML-escaping.
+  const cssName = repName.replace(/["\\<>\r\n]/g, '');
+  const footer = `@page { @bottom-left { content: "${cssName} · Field report · ${period}"; ${box} }
     @bottom-right { content: "Page " counter(page) " of " counter(pages); ${box} } }`;
   return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(repName)} — Field report</title>
 <style>${CSS}${footer}</style></head><body>${months

@@ -149,6 +149,23 @@ assert.ok(standouts(full).some((s) => s.includes('Data gaps')));
   assert.ok(h.includes('add a straight-line distance instead'));
 }
 
+// A recorded 0-minute day counts in the average (ultrareview 2026-10-02).
+{
+  const at = (d: number, h: number) => new Date(2026, 8, d, h).toISOString();
+  const m = buildMonth({
+    month: new Date(2026, 8, 1),
+    days: [
+      { check_in_time: at(1, 10), check_out_time: at(1, 22), auto_closed: true, total_market_time_minutes: 0, total_distance_km: '0', odo_start: null, odo_end: null },
+      { check_in_time: at(2, 10), check_out_time: at(2, 17), auto_closed: false, total_market_time_minutes: 400, total_distance_km: '20', odo_start: null, odo_end: null },
+    ],
+    visits: [{ id: 'a', store_id: 's', storeName: 'S', check_in_time: at(2, 11), check_out_time: at(2, 12), duration_minutes: 60, auto_closed: false, notes: null, cases: 0 }],
+    dayReports: [], casesByDay: {}, casesTotal: 0, now: new Date(2026, 9, 1),
+  });
+  assert.ok(standouts(m)[0].includes('Avg 3h 20m'), standouts(m)[0]);
+  const h = reportHtml('A & "B" </style>', [m], new Date(2026, 9, 1));
+  assert.ok(h.includes('content: "A & B /style · Field report'), 'footer name is CSS-safe, not HTML-escaped');
+}
+
 if (process.env.PREVIEW_DIR) {
   writeFileSync(join(process.env.PREVIEW_DIR, 'full.html'), html);
   writeFileSync(join(process.env.PREVIEW_DIR, 'partial.html'), html2);

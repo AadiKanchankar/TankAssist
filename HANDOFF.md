@@ -12,6 +12,13 @@ Session-state snapshot for the next Claude Code session. **Temporal** — record
 
 ## What is actually live right now
 
+### 2026-10-02 — live security audit (owner's checklist) + migration `security_audit_c1_h2_m1`
+
+33 attack tests by impersonation (rep A/B, manager A, a temporary "manager B", management, anon) in uncommitted transactions; live data verified unchanged after each run.
+- **Fixed (owner-approved, re-tested 8/8 attacks refused, 5/5 legit flows still work):** C1 any rep → management via self-set `is_tester` (dropped `Users: self update (role locked)`); H2 any user could overwrite/delete any `visit-photos` object (dropped UPDATE/DELETE, added 5 MB + JPEG/PNG); M1 reps could delete/edit their own `store_visit_photos` rows (dropped).
+- **Passed:** RLS on every table; anon gets nothing; reps can't read other reps' visits/attendance/users/reports/tokens/permits/location requests or write for others; SMs can't change roles; manager B can't see manager A's reps; order/permit RPCs refuse unauthorised callers; all buckets private; service-role key never in code or git history (only the anon JWT ever committed); no `.env` ever committed; no token/OTP/location logging; no deep links.
+- **Open — see Known defects.**
+
 ### 2026-10-01 — error-leak sweep, live-location fix, distance verification, PDF redesign (JS-only + one migration)
 
 **Error leak (§1).** 45 raw-error renders across 20 files (≈38 Alerts, enrollment inline errors, login/OTP text, live-location error, ErrorBoundary, the challan message that embedded DB text, the odometer "cloud OCR unavailable (…)" note, the permit "Couldn't open the file" alert). All now go through `lib/userError.ts` → safe sentence or `Something went wrong (TA-XXXX)`. `lib/userError.test.ts` is the regression guard. A second pass with `/code-review ultra` (user-launched) is still worth running.
@@ -225,6 +232,14 @@ Consequence: an allocation against **Tank 90 z** comes back with `computed_* = n
      set facility_to_id = '<warehouse-uuid>'
    where direction = 'factory_to_warehouse' and facility_to_id is null;
   ```
+- **Security audit 2026-10-02 — open items (not yet approved):**
+  - **H1 evidence rewrite:** a rep can UPDATE their own attendance after punch-out (`odo_end`, `total_distance_km` — TA fraud) and their own visits (`is_mock_location`, `latitude`, `distance_from_store_meters` — erases anti-cheat flags). Confirmed live. Fix design: trigger freezing check-in time/position/mock flag and closed rows for `current_user = 'authenticated'` (the 22:30 sweep runs as definer, unaffected); must be tested against punch-out, check-out, close-on-next-check-in and address/notes writes.
+  - **M2 scope:** any sales_manager reads every rep's `daily_reports`, `store_visit_photos` rows and `odometer-photos` (visits/attendance are already `manages_rep`-scoped).
+  - **M3 prices:** reps can read `order_items`/`products` price columns via the API (documented limit; needs a definer view for management).
+  - **M4 Google Maps key** is in client JS for Directions/Geocoding/Places web calls — verify API restrictions + quota in Google Cloud.
+  - **Dashboard-only checks:** Supabase Auth OTP expiry/length, SMS rate limits/CAPTCHA, JWT expiry.
+  - **Low:** `phone_registered` is an anon phone-enumeration oracle (by design); 6 auth users with no profile (can sign in, see nothing — delete); 2 `location_requests` stuck `pending` since 21-09, no expiry/retention; rep can edit a warning's text (should be ack-only) and `requested_by`/`status` on requests to them; `register_push_token` can claim any token string; API roles hold `TRUNCATE` on all tables (Supabase default, not reachable via REST); rep one-login is client-enforced; `npm audit` 6 high/15 moderate, all build tooling; `pg_net` in public.
+  - **Bug:** managers' "Delete store" always fails — DELETE policy exists but no DELETE grant.
 - **Odometer tenths digit read as a whole km (owner: "leave for now", 2026-10-01).** Banty 30-09 stored 408036→408652 = "616 km" (really 61.6); today's start is 40865 (tenths dropped), so his chain flips between the two forms. `resolveOdometerReading` only guards the END reading against the start; the punch-in reading is never checked against the previous day's end. Fix later: compare a new start with the rep's last end and offer the ×10 / ÷10 reading.
 - **Bhagwan & Banty have no assigned manager.** Live location no longer depends on it, but the review queue / push routing still treat them as orphans (any SM + management). Assign when the org chart is decided.
 - **PJP plan-date resolution is local-date, not a shift window.** A visit logged after local midnight resolves to the neighbouring day's plan and can read as off-plan. Handled by wording (the flag is `soft` and says "may belong to the neighbouring day's plan… Worth confirming") rather than silently mis-accusing an honest rep. Upgrade path if reps genuinely work past midnight: explicit `shift_start`/`shift_end` on `journey_plans`.

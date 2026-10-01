@@ -29,6 +29,9 @@ assert.match(userMessage({ code: 'P0001', message: 'violates check constraint "x
 // Our own thrown Error passes; a runtime TypeError does not.
 assert.equal(userMessage(new Error('Sharing is not available on this device.')), 'Sharing is not available on this device.');
 assert.match(userMessage(new TypeError("Cannot read property 'id' of undefined")), /TA-/);
+// Our own subclass keeps name 'Error', so its authored message survives (ultrareview 2026-10-02).
+class Ours extends Error {}
+assert.equal(userMessage(new Ours('The challan photo was saved but its quantities were not.')), 'The challan photo was saved but its quantities were not.');
 
 // Network, auth, storage, bare strings.
 assert.match(userMessage(new TypeError('Network request failed')), /No connection/);

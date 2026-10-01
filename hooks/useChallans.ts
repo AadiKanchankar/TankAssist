@@ -75,7 +75,9 @@ export class ChallanLinesError extends Error {
     message: string,
   ) {
     super(message);
-    this.name = 'ChallanLinesError';
+    // name stays 'Error' on purpose: userMessage() passes only plain-named
+    // Errors through as authored text, and this message is already safe.
+    // Callers tell it apart with instanceof, never by name.
   }
 }
 
