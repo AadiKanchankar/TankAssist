@@ -33,6 +33,7 @@ import {
   useOdometerFlags,
   usePlanSubmissions,
 } from '../../hooks/useJourneyPlans';
+import { userMessage } from '../../lib/userError';
 
 type EnrollStep = 'form' | 'otp' | 'done';
 
@@ -210,7 +211,7 @@ export default function AdminTeamScreen({ navigation }: { navigation: any }) {
       if (error) throw error;
       setStep('otp');
     } catch (err: any) {
-      setEnrollError(err.message || 'Failed to send code.');
+      setEnrollError(userMessage(err));
     }
     setSending(false);
   };
@@ -243,9 +244,7 @@ export default function AdminTeamScreen({ navigation }: { navigation: any }) {
       });
       if (error) {
         setEnrollError(
-          `Code verified, but saving the profile failed: ${
-            error.message || 'unknown error'
-          }. Tap "Retry save" to finish.`
+          `Code verified, but saving the profile failed: ${userMessage(error)} Tap "Retry save" to finish.`
         );
         return;
       }
@@ -279,7 +278,7 @@ export default function AdminTeamScreen({ navigation }: { navigation: any }) {
       } catch {}
       await saveProfile(id);
     } catch (e: any) {
-      setEnrollError(e.message || 'Verification failed.');
+      setEnrollError(userMessage(e));
     }
     setVerifying(false);
   };

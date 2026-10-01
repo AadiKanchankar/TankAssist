@@ -41,6 +41,7 @@ import {
   Permit,
   permitLines,
 } from '../../hooks/usePermits';
+import { userMessage } from '../../lib/userError';
 
 const BUCKET = 'excise-permits';
 const STATUS_META: Record<string, { label: string; color: string }> = {
@@ -151,7 +152,7 @@ export default function PermitsScreen({ visible, onClose }: { visible: boolean; 
       );
       if (result?.permit_id) setOpenId(result.permit_id);
     } catch (err: any) {
-      Alert.alert('Couldn’t upload the permit', err?.message || 'Try again.');
+      Alert.alert('Couldn’t upload the permit', userMessage(err));
     }
     setUploading(false);
   };
@@ -279,7 +280,7 @@ function ReviewModal({
     setBusy(true);
     const { error } = await supabase.from('excise_permits').update(patch).eq('id', permit.id);
     setBusy(false);
-    if (error) { Alert.alert('Couldn’t update', error.message); return; }
+    if (error) { Alert.alert('Couldn’t update', userMessage(error)); return; }
     await refreshAll();
   };
 
@@ -303,7 +304,7 @@ function ReviewModal({
         'The original document is no longer in storage. The extracted details below are still on record.',
       );
     } else {
-      Alert.alert('Couldn’t open the file', message || 'Check your connection and try again.');
+      Alert.alert('Couldn’t open the file', userMessage(message));
     }
   };
 
@@ -335,7 +336,7 @@ function ReviewModal({
       conversion_formula_version: CONVERSION_FORMULA_VERSION,
     });
     setBusy(false);
-    if (error) { Alert.alert('Couldn’t add allocation', error.message); return; }
+    if (error) { Alert.alert('Couldn’t add allocation', userMessage(error)); return; }
     await refreshAll();
   };
 
@@ -343,7 +344,7 @@ function ReviewModal({
     setBusy(true);
     const { error } = await supabase.from('permit_product_allocations').delete().eq('id', id);
     setBusy(false);
-    if (error) { Alert.alert('Couldn’t remove', error.message); return; }
+    if (error) { Alert.alert('Couldn’t remove', userMessage(error)); return; }
     await refreshAll();
   };
 
@@ -361,7 +362,7 @@ function ReviewModal({
       .update({ computed_cases: cases, remainder_bottles: rem, needs_review: false })
       .eq('id', id);
     setBusy(false);
-    if (error) { Alert.alert('Couldn’t save', error.message); return; }
+    if (error) { Alert.alert('Couldn’t save', userMessage(error)); return; }
     await refreshAll();
   };
 
@@ -370,7 +371,7 @@ function ReviewModal({
     setBusy(true);
     const { error } = await supabase.rpc('approve_excise_permit', { p_permit_id: permit.id });
     setBusy(false);
-    if (error) { Alert.alert('Can’t approve yet', error.message); return; }
+    if (error) { Alert.alert('Can’t approve yet', userMessage(error)); return; }
     await refreshAll();
     Alert.alert('Approved', 'The shipment has been written to the inventory ledger.');
     onClose();
@@ -381,7 +382,7 @@ function ReviewModal({
     setBusy(true);
     const { error } = await supabase.rpc('reject_excise_permit', { p_permit_id: permit.id, p_reason: reason.trim() });
     setBusy(false);
-    if (error) { Alert.alert('Couldn’t reject', error.message); return; }
+    if (error) { Alert.alert('Couldn’t reject', userMessage(error)); return; }
     setRejecting(false);
     setReason('');
     await refreshAll();

@@ -17,6 +17,7 @@ import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
 import StoreLocationPicker from '../../components/StoreLocationPicker';
 import type { StoreLocationValue } from '../../components/StoreLocationPicker';
+import { userMessage } from '../../lib/userError';
 
 interface StoreParam {
   id: string;
@@ -87,7 +88,7 @@ export default function StoreFormScreen({ route, navigation }: { route: any; nav
       }
       navigation.goBack();
     } catch (err: any) {
-      Alert.alert('Couldn’t save the store', err.message || 'Try again.');
+      Alert.alert('Couldn’t save the store', userMessage(err));
     }
     setSaving(false);
   };

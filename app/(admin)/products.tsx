@@ -28,6 +28,7 @@ import { uploadProductImage, getSignedUrls } from '../../lib/storage';
 import { useAuthStore } from '../../store/useAuthStore';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
 import { useProducts, Product, caseConfig } from '../../hooks/useProducts';
+import { userMessage } from '../../lib/userError';
 
 const fmtPrice = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 
@@ -137,7 +138,7 @@ export default function ProductsScreen() {
     setTogglingOos(p.id);
     const { error } = await supabase.from('products').update({ is_out_of_stock: !p.is_out_of_stock }).eq('id', p.id);
     setTogglingOos(null);
-    if (error) { Alert.alert('Couldn’t update', error.message || 'Try again.'); return; }
+    if (error) { Alert.alert('Couldn’t update', userMessage(error)); return; }
     await refetch();
   };
 
@@ -209,7 +210,7 @@ export default function ProductsScreen() {
       setShowModal(false);
       await refetch();
     } catch (err: any) {
-      Alert.alert('Couldn’t save the product', err.message || 'Try again.');
+      Alert.alert('Couldn’t save the product', userMessage(err));
     }
     setSaving(false);
   };
@@ -229,7 +230,7 @@ export default function ProductsScreen() {
           style: archiving ? 'destructive' : 'default',
           onPress: async () => {
             const { error } = await supabase.from('products').update({ is_active: !archiving }).eq('id', editing.id);
-            if (error) { Alert.alert('Couldn’t update', error.message || 'Try again.'); return; }
+            if (error) { Alert.alert('Couldn’t update', userMessage(error)); return; }
             setShowModal(false);
             await refetch();
           },

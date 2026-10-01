@@ -12,6 +12,7 @@ import { useAuthStore } from '../../store/useAuthStore';
 import { useMyPlan, useSubmitPlan } from '../../hooks/useJourneyPlans';
 import { usePlanStores, PlanStore } from '../../hooks/usePlanStores';
 import { planDateFor, PLAN_STATUS_LABEL } from '../../lib/journeyPlan';
+import { userMessage } from '../../lib/userError';
 
 /**
  * The rep submits a planned route for the day; their manager approves it.
@@ -98,7 +99,7 @@ export default function JourneyPlanScreen({ navigation }: { navigation: any }) {
         [{ text: 'OK', onPress: () => navigation.goBack() }],
       );
     } catch (e: any) {
-      Alert.alert('Couldn’t send the plan', e.message || 'Try again.');
+      Alert.alert('Couldn’t send the plan', userMessage(e));
     }
   };
 

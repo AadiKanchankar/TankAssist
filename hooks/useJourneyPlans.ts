@@ -411,6 +411,12 @@ async function artifactCounts(visitIds: string[]): Promise<Record<string, number
   return out;
 }
 
+/** The signed-in user's id, from the in-memory session (no round trip). */
+async function viewerId(): Promise<string | undefined> {
+  const { data } = await supabase.auth.getSession();
+  return data.session?.user.id;
+}
+
 /**
  * Visits with at least one flag, newest first — the manager reviews THESE, not
  * all activity. Every flag but mock-location is derived here rather than
@@ -463,14 +469,16 @@ export function useFlaggedVisits() {
         planBy[`${s.rep_id}|${s.plan_date}`] = s;
       }
 
-      const info = await repInfo(rows.map((v) => v.user_id));
+      const [info, me] = await Promise.all([repInfo(rows.map((v) => v.user_id)), viewerId()]);
       const prevByRep: Record<string, VisitForFlags> = {};
       const out: FlaggedVisit[] = [];
 
       for (const v of rows) {
         // An unattributable visit can't be reviewed against a rep's plan, and
-        // it must not crash the queue for every other row.
-        if (!v.user_id) continue;
+        // it must not crash the queue for every other row. Your own visits are
+        // skipped: nobody manages themselves (manages_rep), so resolving one is
+        // refused by RLS — a tester's own rep-mode visits hit exactly that.
+        if (!v.user_id || v.user_id === me) continue;
         const visit: VisitForFlags = {
           id: v.id,
           store_id: v.store_id,
@@ -532,11 +540,11 @@ export function useOdometerFlags() {
 
       const rows = (data as any[]) ?? [];
       if (!rows.length) return [];
-      const info = await repInfo(rows.map((r) => r.user_id));
+      const [info, me] = await Promise.all([repInfo(rows.map((r) => r.user_id)), viewerId()]);
 
       const out: FlaggedDay[] = [];
       for (const r of rows) {
-        if (!r.user_id) continue;
+        if (!r.user_id || r.user_id === me) continue; // see useFlaggedVisits
         const m = mismatchFlag(r.odo_start, r.odo_end, r.total_distance_km);
         if (!m.flagged) continue;
         out.push({

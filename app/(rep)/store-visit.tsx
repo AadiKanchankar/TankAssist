@@ -63,6 +63,7 @@ import {
 } from '../../lib/stockBuckets';
 import { emptyDraft, type VisitDraft } from '../../lib/visitDraft';
 import { saveDraft, loadDraft, clearDraft } from '../../lib/visitDraftStore';
+import { userMessage } from '../../lib/userError';
 
 interface StoreParam {
   id: string;
@@ -391,7 +392,7 @@ export default function StoreVisitScreen({
 
         await loadStepperData();
       } catch (err: any) {
-        Alert.alert('Couldn’t check in', err.message || 'Try again.');
+        Alert.alert('Couldn’t check in', userMessage(err));
         navigation.goBack();
       }
       setInitializing(false);
@@ -614,7 +615,7 @@ export default function StoreVisitScreen({
       setDeliveredPhotoUris([]);
       goNext();
     } catch (err: any) {
-      Alert.alert('Couldn’t mark delivered', err.message || 'Try again.');
+      Alert.alert('Couldn’t mark delivered', userMessage(err));
     }
     setPrevBusy(false);
   };
@@ -641,7 +642,7 @@ export default function StoreVisitScreen({
             p_reason: reason,
           });
           if (error) {
-            Alert.alert('Couldn’t cancel', error.message || 'Try again.');
+            Alert.alert('Couldn’t cancel', userMessage(error));
             setPrevBusy(false);
             return;
           }
@@ -713,7 +714,7 @@ export default function StoreVisitScreen({
               if (itErr) throw itErr;
               setOrderPlaced(true);
             } catch (err: any) {
-              Alert.alert('Couldn’t place order', err.message || 'Try again.');
+              Alert.alert('Couldn’t place order', userMessage(err));
             }
             setOrderBusy(false);
           },
@@ -833,7 +834,7 @@ export default function StoreVisitScreen({
       navigation.goBack();
     } catch (err: any) {
       setSubmitting(false);
-      Alert.alert('Couldn’t save', err.message || 'Try again.');
+      Alert.alert('Couldn’t save', userMessage(err));
     }
   };
 
@@ -862,7 +863,7 @@ export default function StoreVisitScreen({
       setTimeout(() => navigation.goBack(), 1400);
     } catch (err: any) {
       setSubmitting(false);
-      Alert.alert('Couldn’t check out', err.message || 'Try again.');
+      Alert.alert('Couldn’t check out', userMessage(err));
     }
   };
 

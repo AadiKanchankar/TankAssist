@@ -16,7 +16,7 @@ import { supabase } from '../../lib/supabase';
 import { getSignedUrls, ODOMETER_BUCKET } from '../../lib/storage';
 import { toDateStr, fmtDDMMYYYY, fmtMinutes } from '../../lib/reportExport';
 import { periodFigure, coverageNote, dayFigure, odometerKm, routeFor, toNum, fmtKmShort } from '../../lib/reportFigures';
-import { mismatchFlag } from '../../lib/odometer';
+import { mismatchFlag, MISMATCH_FLOOR_KM, MISMATCH_PERCENT } from '../../lib/odometer';
 import { FAR_FROM_STORE_METERS } from '../../lib/journeyPlan';
 import { useRepReport, RepReport, ReportDay, ReportVisit } from '../../hooks/useRepReport';
 
@@ -118,6 +118,12 @@ function OdometerView({ data }: { data: RepReport }) {
             <Metric label="Route (GPS)" value={gps.value == null ? '—' : `${gps.value.toFixed(1)} km`} note={coverageNote(gps)} />
           </View>
         </View>
+        {/* The gap is expected, not an error — say so where the two sit side by side. */}
+        <Text style={[Type.caption, styles.foot]}>
+          The odometer normally reads higher: the route only joins punch-in, store check-ins and punch-out, so
+          riding between them doesn’t count. A day is flagged only when the odometer is more than{' '}
+          {Math.round(MISMATCH_PERCENT * 100)}% and {MISMATCH_FLOOR_KM} km over the route.
+        </Text>
       </BentoTile>
 
       {days.map((d) => {

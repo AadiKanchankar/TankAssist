@@ -7,6 +7,7 @@ import { Colors, Type, Space, Radius, Layout } from '../constants/colors';
 import Button from './Button';
 import Header from './Header';
 import { supabase } from '../lib/supabase';
+import { errorCode, userMessage } from '../lib/userError';
 
 const TIMEOUT_MS = 18000;
 
@@ -118,7 +119,18 @@ export default function GetLocationButton({ repId, repName }: { repId: string; r
       .insert({ rep_id: repId, requested_by: (await supabase.auth.getUser()).data.user?.id })
       .select()
       .single();
-    if (error || !req) { setErrMsg(error?.message || 'Couldn’t send the request.'); setPhase('error'); return; }
+    if (error || !req) {
+      // Any sales manager / management may ask for any active rep (owner
+      // decision 2026-10-01), so a 42501 here means the target is not an
+      // active rep — say that, not the policy.
+      setErrMsg(
+        errorCode(error) === '42501'
+          ? 'Live location is only available for active reps.'
+          : userMessage(error),
+      );
+      setPhase('error');
+      return;
+    }
 
     setPhase('waiting');
     const onComplete = (row: any) => {

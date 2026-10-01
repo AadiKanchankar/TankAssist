@@ -24,6 +24,7 @@ import { exportRepPdf } from '../../lib/reportPdf';
 import { displayFigure, fmtKmShort } from '../../lib/reportFigures';
 import { useRepReport } from '../../hooks/useRepReport';
 import type { DrilldownKind, DrilldownParams } from './report-drilldown';
+import { userMessage } from '../../lib/userError';
 
 type Period = 'daily' | 'weekly' | 'monthly';
 
@@ -96,7 +97,7 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
     try {
       await exportMonthlyReport(rep.id, rep.name, downloadMonthAnchor);
     } catch (err: any) {
-      Alert.alert('Export failed', err.message || 'Could not generate the report.');
+      Alert.alert('Export failed', userMessage(err));
     }
     setExportKind(null);
   };
@@ -106,7 +107,7 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
     try {
       await exportRepPdf(rep.id, rep.name, [downloadMonthAnchor]);
     } catch (err: any) {
-      Alert.alert('Export failed', err.message || 'Could not generate the report.');
+      Alert.alert('Export failed', userMessage(err));
     }
     setExportKind(null);
   };

@@ -148,7 +148,7 @@ class CloudEngine implements OdometerEngine {
       if (res === 'timeout') {
         why = `no response in ${CLOUD_TIMEOUT_MS / 1000}s`;
       } else if ((res as any)?.error) {
-        why = `cloud error: ${(res as any).error?.message ?? 'unknown'}`;
+        why = `cloud error ${(res as any).error?.context?.status ?? ''}`.trim();
       } else {
         const data = (res as any)?.data as OdometerReading | undefined;
         if (data && data.value != null) {
@@ -159,7 +159,8 @@ class CloudEngine implements OdometerEngine {
         why = 'cloud read no digits';
       }
     } catch (e: any) {
-      why = `cloud unreachable: ${e?.message ?? e}`;
+      console.warn('[odometer] cloud unreachable', e);
+      why = 'cloud unreachable';
     }
     // Offline fallback. The rep confirms every reading anyway, so a bad
     // fallback read costs a correction, never a wrong saved number.

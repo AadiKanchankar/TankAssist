@@ -28,6 +28,7 @@ import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import { orderStatusLabel, orderValue, fmtOrderPrice } from '../../lib/orders';
 import { useOrderDetail, orderDetailKey, OrderDetailData } from '../../hooks/useOrders';
+import { userMessage } from '../../lib/userError';
 
 const fmtDate = (iso: string) =>
   new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
@@ -84,7 +85,7 @@ export default function OrderDetailScreen({ route, navigation }: { route: any; n
     },
     onError: (err, _vars, ctx) => {
       if (ctx?.prev !== undefined) queryClient.setQueryData(key, ctx.prev);
-      Alert.alert('Couldn’t update the order', (err as any)?.message || 'Try again.');
+      Alert.alert('Couldn’t update the order', userMessage(err));
     },
     onSuccess: (to) => {
       if (to === 'delivered') {

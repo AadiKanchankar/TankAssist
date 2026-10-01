@@ -31,6 +31,7 @@ import {
   toQty,
   todayStr,
 } from '../../lib/challan';
+import { userMessage } from '../../lib/userError';
 
 type QtyDraft = Record<string, Partial<Record<SizeClass, string>>>;
 
@@ -146,10 +147,10 @@ export default function ChallanScreen({ route, navigation }: { route: any; navig
       // to finish it. Keep the id and let the rep retry just the lines.
       if (err instanceof ChallanLinesError) {
         setPendingChallanId(err.challanId);
-        Alert.alert('Quantities not saved', `${err.message}\n\nTap Save again to retry.`);
+        Alert.alert('Quantities not saved', `${userMessage(err)}\n\nTap Save again to retry.`);
         return;
       }
-      Alert.alert('Could not save the challan', err?.message ?? 'Try again.');
+      Alert.alert('Could not save the challan', userMessage(err));
     }
   };
 

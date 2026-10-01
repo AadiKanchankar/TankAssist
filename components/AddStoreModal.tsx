@@ -9,6 +9,7 @@ import type { StoreLocationValue } from './StoreLocationPicker';
 import { supabase } from '../lib/supabase';
 import { haversineKm } from '../lib/haversine';
 import { findDuplicateCandidates, DuplicateMatch } from '../lib/journeyPlan';
+import { userMessage } from '../lib/userError';
 
 export interface CreatedStore {
   id: string;
@@ -122,7 +123,7 @@ export default function AddStoreModal({
         longitude: data.longitude,
       });
     } catch (err: any) {
-      Alert.alert('Couldn’t add the store', err.message || 'Try again.');
+      Alert.alert('Couldn’t add the store', userMessage(err));
     }
     setCreating(false);
   };

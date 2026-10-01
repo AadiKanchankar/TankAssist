@@ -28,6 +28,7 @@ import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
 import { fmtOrderPrice } from '../../lib/orders';
 import { useStoreDetail, Store, StockRow } from '../../hooks/useStores';
+import { userMessage } from '../../lib/userError';
 
 const fmtDate = (iso: string) =>
   new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
@@ -81,7 +82,7 @@ export default function StoreDetailScreen({ route, navigation }: { route: any; n
           setDeleting(true);
           const { error } = await supabase.from('stores').delete().eq('id', store.id);
           setDeleting(false);
-          if (error) Alert.alert('Couldn’t delete', error.message);
+          if (error) Alert.alert('Couldn’t delete', userMessage(error));
           else navigation.goBack();
         },
       },

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../lib/supabase';
 import { uploadChallanPhoto } from '../lib/storage';
 import { ChallanLine, filledLines, sortOwnBrandFirst } from '../lib/challan';
+import { userMessage } from '../lib/userError';
 
 /**
  * Catalog columns the CHALLAN form reads.
@@ -128,7 +129,7 @@ export function useCreateChallan(repId: string | undefined) {
       if (itemsError) {
         throw new ChallanLinesError(
           challanId,
-          `The challan photo was saved but its quantities were not: ${itemsError.message}`,
+          `The challan photo was saved but its quantities were not. ${userMessage(itemsError)}`,
         );
       }
 

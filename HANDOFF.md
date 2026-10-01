@@ -2,7 +2,7 @@
 
 Session-state snapshot for the next Claude Code session. **Temporal** — records what is live, pending, and out of scope as of the date below. Durable architecture facts live in `CLAUDE.md`; plain-language status for the user is `PROJECT_STATUS.md`.
 
-- **Snapshot date:** 2026-09-24 (builds/OTAs reconciled against `eas build:list` / `eas update:list`, data against the live DB via MCP — not against the previous copy of this file)
+- **Snapshot date:** 2026-10-01 (builds/OTAs as of 2026-09-24 reconciled against `eas build:list` / `eas update:list`, data against the live DB via MCP — not against the previous copy of this file)
 - **Supabase project:** `ldgunrxceogfrohjrlxz` (live MCP access; verify before assuming)
 - **Repo:** `github.com/AadiKanchankar/TankAssist`. ⚠️ **Until 2026-09-23 `master` was 17 commits stale** (stuck at `9964b90`, the 1.1.0 build) while all work since 19 Aug lived on `feat/timeinstore-challan-review-push`. Both were fast-forwarded to `7d2085a` that day. **Before trusting any branch, check it against the newest EAS build's commit** — a stale branch plus a stale HANDOFF is how a whole session once got built on the wrong base.
 - **Type state:** `npx tsc --noEmit` clean. `*.test.ts` files pass (`npx tsx <file>`). `expo-doctor` **18/18** after `npx expo install --fix` cleared patch drift on `expo`, `expo-file-system`, `expo-location`, `expo-sharing`, `expo-updates`.
@@ -11,6 +11,20 @@ Session-state snapshot for the next Claude Code session. **Temporal** — record
 ---
 
 ## What is actually live right now
+
+### 2026-10-01 — error-leak sweep, live-location fix, distance verification, PDF redesign (JS-only + one migration)
+
+**Error leak (§1).** 45 raw-error renders across 20 files (≈38 Alerts, enrollment inline errors, login/OTP text, live-location error, ErrorBoundary, the challan message that embedded DB text, the odometer "cloud OCR unavailable (…)" note, the permit "Couldn't open the file" alert). All now go through `lib/userError.ts` → safe sentence or `Something went wrong (TA-XXXX)`. `lib/userError.test.ts` is the regression guard. A second pass with `/code-review ultra` (user-launched) is still worth running.
+
+**Two bugs the leaked text was hiding (§2).**
+- `location_requests` insert policy still had the pre-2026-08-19 inline ownership rule; Bhagwan and Banty have **no `assigned_manager_id`**, so the sales manager got 42501 (log: 403 at 2026-09-30 05:38 UTC). **Migration `location_requests_any_manager` (owner-approved):** any sales_manager/management → any active rep, never self. Verified 8/8 by impersonation in a rolled-back transaction (SM→2 unassigned + own rep allowed; SM→management user and SM→self denied; management→unassigned and SM-assigned allowed; rep→rep denied); 0 test rows persisted.
+- `flag_resolutions` "Couldn't save": the review queue listed the **viewer's own** visits/odometer days (Aadi has 14 visits / 13 days from rep-mode testing); `manages_rep` excludes self → 42501. Queue now skips your own rows (client-only).
+
+**Distance verification (§3) — the maths is right; Bhagwan's odometer is the outlier.** Every measured Bhagwan day uses road-network Directions (driving, `optimize:false`, punch-in and punch-out legs included; he punches in/out at the same point). Banty 30-09: route 52.8 km vs odometer 61.6 km (1.17×, normal slack). Bhagwan 24–30 Sep: odometer **1.7–4.0×** route every day; 28-09 = 13 stores all within ~7 km of punch-in, route 27.5 km, odometer **110 km**. Readings chain cleanly day to day, so not OCR misreads — either riding that never touches a store, or inflated readings; the manager's Odometer drill-down photos settle it. Owner agrees. Spot-check link for 30-09 (stored 43.3 km): `https://www.google.com/maps/dir/?api=1&travelmode=driving&origin=28.37316,77.28439&destination=28.37318,77.28435&waypoints=28.43090,77.29742%7C28.43792,77.29862%7C28.44567,77.30038%7C28.44571,77.30021%7C28.42065,77.28765%7C28.41933,77.30101%7C28.42827,77.32056%7C28.34244,77.31683`. The odometer drill-down now says on screen why the odometer reads higher.
+
+**PDF redesign (§4)** — see CLAUDE.md "Reports". Previewed with headless Chrome on a synthetic 25-day month (page 1 fits; 8 pages total) and a 9-day partial (4 pages). The old PDF also summed unrecorded market time/distance as 0 and re-derived per-visit cases with its own query; both fixed by the rewrite.
+
+**OTA vs build:** everything is JS — ships by OTA on runtime 1.3.0. The only server change is the migration above (already live).
 
 ### 2026-09-24 — perf emergency + auto-close/check-in/location batch (two OTAs, runtime 1.3.0)
 
@@ -211,6 +225,8 @@ Consequence: an allocation against **Tank 90 z** comes back with `computed_* = n
      set facility_to_id = '<warehouse-uuid>'
    where direction = 'factory_to_warehouse' and facility_to_id is null;
   ```
+- **Odometer tenths digit read as a whole km (owner: "leave for now", 2026-10-01).** Banty 30-09 stored 408036→408652 = "616 km" (really 61.6); today's start is 40865 (tenths dropped), so his chain flips between the two forms. `resolveOdometerReading` only guards the END reading against the start; the punch-in reading is never checked against the previous day's end. Fix later: compare a new start with the rep's last end and offer the ×10 / ÷10 reading.
+- **Bhagwan & Banty have no assigned manager.** Live location no longer depends on it, but the review queue / push routing still treat them as orphans (any SM + management). Assign when the org chart is decided.
 - **PJP plan-date resolution is local-date, not a shift window.** A visit logged after local midnight resolves to the neighbouring day's plan and can read as off-plan. Handled by wording (the flag is `soft` and says "may belong to the neighbouring day's plan… Worth confirming") rather than silently mis-accusing an honest rep. Upgrade path if reps genuinely work past midnight: explicit `shift_start`/`shift_end` on `journey_plans`.
 
 ---
@@ -225,7 +241,9 @@ Everything below is installed and OTA-current on the `ef195f8` build; none of it
 5. **Voice** — permission + no-audio notice; EN/HI/MR persists; partials editable; two fields don't cross-transcribe.
 6. **CSV and PDF** — filenames exact; cases match the hybrid; visit-heavy month paginates without clipping.
 7. **Out-of-stock** — an OOS product is blocked in the picker **and** the `trg_reject_oos_order_item` trigger rejects a stale client.
-8. **Live location** — manager asks → checked-in rep answers; 18 s timeout falls back to last known; a checked-out rep never responds; a sales_manager cannot request a rep who isn't theirs.
+8. **Live location** — any sales manager / management asks for any active rep (incl. unassigned Bhagwan) → checked-in rep answers; 18 s timeout falls back to last known; a checked-out rep never responds.
+15. **Error text** — trigger a previously-leaking error (e.g. resolve a flag on your own row via an old build, or any denied action) → a plain sentence or `(TA-XXXX)`, never a table/policy name.
+16. **Report PDF** — export a heavy month: page 1 is one page, both charts show their legend, a no-punch-out day is a dashed `n/a` (never 0), Route km and Odo km both present, visit log grouped by day.
 9. **Excise** — upload PDF → parse → review → allocate → approve → ledger row; duplicate upload routes to the existing permit; "View original document" opens (this was the `lib/storage.ts` bucket bug).
 10. **Tester switch** — flip rep/sales_manager/management, land on the right dashboard, badge persists, full write rights in each role.
 11. **Stock buckets** — floor/display/godown captured; a blank godown stays blank on the next visit's prefill (must NOT come back as 0); total rolls loose bottles into cases; StoreDetail shows chips, and the 6 legacy rows show "Breakdown not recorded".

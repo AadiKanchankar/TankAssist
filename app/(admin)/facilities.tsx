@@ -23,6 +23,7 @@ import StatePicker from '../../components/StatePicker';
 import { supabase } from '../../lib/supabase';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
 import { useFacilities, isLicenceExpired, Facility, FacilityType } from '../../hooks/useFacilities';
+import { errorCode, userMessage } from '../../lib/userError';
 
 const FACILITY_TYPES: { value: FacilityType; label: string }[] = [
   { value: 'factory', label: 'Factory' },
@@ -147,14 +148,13 @@ export default function FacilitiesScreen({
       setShowForm(false);
       await refetch();
     } catch (err: any) {
-      const msg = String(err?.message || '');
+      // The licence-lock trigger's own P0001 text is authored for this screen,
+      // so userMessage passes it through.
       Alert.alert(
         'Couldn’t save the facility',
-        msg.includes('duplicate') || msg.includes('unique')
+        errorCode(err) === '23505'
           ? 'That licence number is already registered to another facility.'
-          : msg.includes('Licence number is locked')
-          ? 'Permits already reference this facility, so its licence number is locked. Set it inactive and add a new facility instead.'
-          : msg || 'Try again.'
+          : userMessage(err)
       );
     }
     setSaving(false);

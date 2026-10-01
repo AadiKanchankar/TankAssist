@@ -2,6 +2,7 @@ import React from 'react';
 import { View, Text, StyleSheet, ScrollView } from 'react-native';
 import { Colors, Type, Space, Radius } from '../constants/colors';
 import Button from './Button';
+import { errorRef } from '../lib/userError';
 
 interface Props {
   children: React.ReactNode;
@@ -42,7 +43,7 @@ export default class ErrorBoundary extends React.Component<Props, State> {
     // the rep can reach, so the stack has to be on screen to be useful.
     this.setState({ info: info?.componentStack?.slice(0, 2000) ?? '' });
     // Still log it, for anyone attached to Metro or logcat.
-    console.error('[ErrorBoundary]', this.props.label ?? '', error, info?.componentStack);
+    console.error(`[ErrorBoundary ${errorRef(error)}]`, this.props.label ?? '', error, info?.componentStack);
   }
 
   reset = () => {
@@ -60,18 +61,21 @@ export default class ErrorBoundary extends React.Component<Props, State> {
           <Text style={styles.title}>Something broke on this screen</Text>
           <Text style={styles.body}>
             Your work is not lost — anything already saved is on the server. Go back and try again.
-            If it keeps happening, long-press the details below to copy them and send them to the
+            If it keeps happening, long-press the reference below to copy it and send it to the
             office.
           </Text>
 
           <Button title="Try again" onPress={this.reset} style={{ marginTop: Space.lg }} />
 
+          {/* The error's own text can carry DB detail (lib/userError), so a
+              release build shows only the reference + where it happened; the
+              full error is in logcat under the same ref. Dev builds keep it. */}
           <View style={styles.detail}>
             <Text style={styles.detailText} selectable>
-              {this.props.label ? `${this.props.label}\n` : ''}
-              {error.name}: {error.message}
-              {'\n\n'}
-              {error.stack?.slice(0, 1200)}
+              {errorRef(error)}
+              {this.props.label ? ` · ${this.props.label}` : ''}
+              {__DEV__ ? `\n${error.name}: ${error.message}\n\n${error.stack?.slice(0, 1200) ?? ''}` : ''}
+              {this.state.info ? `\n${this.state.info.slice(0, 600)}` : ''}
             </Text>
           </View>
         </ScrollView>

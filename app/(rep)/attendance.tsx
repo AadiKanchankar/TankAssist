@@ -14,6 +14,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { uploadSelfie, uploadOdometerPhoto } from '../../lib/storage';
 import OdometerCapture, { OdometerResult } from '../../components/OdometerCapture';
 import { reverseGeocode } from '../../lib/geocoding';
+import { userMessage } from '../../lib/userError';
 
 export default function AttendanceScreen({ navigation }: { navigation: any }) {
   const { profile } = useAuthStore();
@@ -137,7 +138,7 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
       setTimeout(() => navigation.goBack(), 1400);
       return;
     } catch (err: any) {
-      Alert.alert('Couldn’t check in', err.message || 'Try again.');
+      Alert.alert('Couldn’t check in', userMessage(err));
     }
     setSubmitting(false);
   };

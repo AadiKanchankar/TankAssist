@@ -60,6 +60,7 @@ import {
   planDateFor,
   PLAN_STATUS_LABEL,
 } from '../../lib/journeyPlan';
+import { userMessage } from '../../lib/userError';
 
 interface StoreSearchResult {
   id: string;
@@ -250,7 +251,7 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
 
               await refetch();
             } catch (err: any) {
-              Alert.alert('Couldn’t punch out', err.message || 'Try again.');
+              Alert.alert('Couldn’t punch out', userMessage(err));
             }
             setPunchingOut(false);
           },
@@ -312,7 +313,7 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
         refetchOpenVisit();
       }, 1200);
     } catch (e: any) {
-      Alert.alert('Couldn’t check out', e?.message ?? 'Try again.');
+      Alert.alert('Couldn’t check out', userMessage(e));
     } finally {
       setCheckingOut(false);
     }

@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { supabase } from '../lib/supabase';
 import { registerPushToken, unregisterPushToken } from '../lib/push';
 import { Session, User } from '@supabase/supabase-js';
+import { userMessage } from '../lib/userError';
 
 interface UserProfile {
   id: string;
@@ -142,7 +143,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     });
     set({ loading: false });
     if (error) {
-      return { error: error.message };
+      return { error: userMessage(error) };
     }
     return { error: null };
   },
@@ -156,7 +157,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     });
     if (error) {
       set({ loading: false });
-      return { error: error.message };
+      return { error: userMessage(error) };
     }
     if (data.session) {
       const profile = await get().fetchProfile(data.session.user.id);

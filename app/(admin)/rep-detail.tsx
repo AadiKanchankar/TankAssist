@@ -11,6 +11,7 @@ import GetLocationButton from '../../components/GetLocationButton';
 import { supabase } from '../../lib/supabase';
 import { useAuthStore } from '../../store/useAuthStore';
 import RepReportSection from './rep-report-detail';
+import { userMessage } from '../../lib/userError';
 
 type Tab = 'assign' | 'report';
 type Role = 'rep' | 'sales_manager' | 'management';
@@ -91,7 +92,7 @@ export default function RepDetailScreen({ route, navigation }: { route: any; nav
               .update({ is_active: !deactivating })
               .eq('id', rep.id);
             if (error) {
-              Alert.alert('Couldn’t update', error.message || 'Try again.');
+              Alert.alert('Couldn’t update', userMessage(error));
               return;
             }
             setIsActive(!deactivating);
@@ -237,7 +238,7 @@ function AssignStoresSection({ rep }: { rep: Member }) {
       }
       Alert.alert('Stores assigned', `Assigned ${selectedStoreIds.size} store${selectedStoreIds.size === 1 ? '' : 's'}.`);
     } catch (err: any) {
-      Alert.alert('Couldn’t assign stores', err.message || 'Try again.');
+      Alert.alert('Couldn’t assign stores', userMessage(err));
     }
     setAssigning(false);
   };

@@ -11,6 +11,7 @@ import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
 import FacilitiesScreen from '../(admin)/facilities';
 import PermitsScreen from '../(admin)/permits';
+import { userMessage } from '../../lib/userError';
 
 const TESTER_ROLES: { value: 'rep' | 'sales_manager' | 'management'; label: string }[] = [
   { value: 'rep', label: 'Rep' },
@@ -111,7 +112,7 @@ export default function ProfileScreen() {
     const { error } = await supabase.rpc('switch_tester_role', { new_role: newRole });
     if (error) {
       setSwitching(null);
-      Alert.alert('Couldn’t switch role', error.message || 'Try again.');
+      Alert.alert('Couldn’t switch role', userMessage(error));
       return;
     }
     await refreshProfile();

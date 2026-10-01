@@ -13,6 +13,7 @@ import { supabase } from '../../lib/supabase';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
 import { repCasesSold } from '../../lib/reportSemantics';
 import { displayFigure, fmtKmShort, AttendanceFigures } from '../../lib/reportFigures';
+import { userMessage } from '../../lib/userError';
 
 export default function ReportScreen() {
   const { profile } = useAuthStore();
@@ -89,7 +90,7 @@ export default function ReportScreen() {
       if (error) throw error;
       setSubmitted(true);
     } catch (err: any) {
-      Alert.alert('Couldn’t submit the report', err.message || 'Try again.');
+      Alert.alert('Couldn’t submit the report', userMessage(err));
     }
     setSubmitting(false);
   };

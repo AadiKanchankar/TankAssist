@@ -37,6 +37,7 @@ import {
   resolutionKey,
   type FlagAction,
 } from '../../hooks/useFlagResolutions';
+import { userMessage } from '../../lib/userError';
 
 const fmtWhen = (iso: string | null) =>
   iso
@@ -185,7 +186,7 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
     try {
       await review.mutateAsync({ planId, status: 'approved' });
     } catch (e: any) {
-      Alert.alert('Couldn’t approve', e.message || 'Try again.');
+      Alert.alert('Couldn’t approve', userMessage(e));
     } finally {
       setReviewingId(null);
     }
@@ -201,7 +202,7 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
       setRejecting(null);
       setReason('');
     } catch (e: any) {
-      Alert.alert('Couldn’t send back', e.message || 'Try again.');
+      Alert.alert('Couldn’t send back', userMessage(e));
     }
   };
 
@@ -255,7 +256,7 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
       setResolving(null);
       setResolveNote('');
     } catch (e: any) {
-      Alert.alert('Couldn’t save', e?.message ?? 'Try again.');
+      Alert.alert('Couldn’t save', userMessage(e));
     }
   };
 
@@ -382,7 +383,7 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
     return TYPE_ORDER.map((kind) => {
       const rows = buckets[kind];
       const key = `type-${kind}`;
-      const e = emptyFor[kind];
+      const empty = emptyFor[kind];
       return {
         key,
         title: TYPE_TITLE[kind],
@@ -396,9 +397,9 @@ export default function ExceptionsScreen({ navigation }: { navigation: any }) {
                 {
                   kind: 'empty' as const,
                   key: `empty-${kind}`,
-                  icon: e.icon,
-                  title: e.title,
-                  message: e.message,
+                  icon: empty.icon,
+                  title: empty.title,
+                  message: empty.message,
                 },
               ],
       };
