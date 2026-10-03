@@ -63,6 +63,12 @@ async function getToken(): Promise<string | null> {
       name: 'Plan approvals',
       importance: Notifications.AndroidImportance.HIGH,
     });
+    // "Your live location was viewed" (on_location_viewed trigger): sits in
+    // the shade silently — no sound, no heads-up.
+    await Notifications.setNotificationChannelAsync('location', {
+      name: 'Location viewed',
+      importance: Notifications.AndroidImportance.LOW,
+    });
   }
 
   const existing = await Notifications.getPermissionsAsync();

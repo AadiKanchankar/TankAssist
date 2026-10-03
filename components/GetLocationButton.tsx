@@ -1,29 +1,35 @@
-import React, { useRef, useState } from 'react';
-import { View, Text, StyleSheet, Modal, Pressable, ActivityIndicator, Linking } from 'react-native';
+import React, { useState } from 'react';
+import { View, Text, StyleSheet, Modal, ActivityIndicator, Linking } from 'react-native';
 import MapView, { PROVIDER_GOOGLE, Marker } from 'react-native-maps';
 import { Ionicons } from '@expo/vector-icons';
-import type { RealtimeChannel } from '@supabase/supabase-js';
 import { Colors, Type, Space, Radius, Layout } from '../constants/colors';
 import Button from './Button';
 import Header from './Header';
 import { supabase } from '../lib/supabase';
 import { errorCode, userMessage } from '../lib/userError';
 
-const TIMEOUT_MS = 18000;
-
-type Phase = 'checking' | 'waiting' | 'live' | 'fallback' | 'notCheckedIn' | 'error';
+/** A duty fix newer than this reads as "live"; the phone reports every 3 min. */
+const LIVE_MAX_AGE_MS = 10 * 60_000;
 
 interface Fix {
   lat: number;
   lng: number;
-  at: string | null; // ISO timestamp of the reading (null = just now / live)
+  at: string | null; // ISO timestamp of the reading
   live: boolean;
-  sourceLabel?: string; // for the fallback ("last check-in", "last visit")
+  sourceLabel: string;
+}
+
+interface View_ {
+  icon: keyof typeof Ionicons.glyphMap;
+  tone: string;
+  title: string;
+  msg: string;
+  fix: Fix | null;
 }
 
 async function fetchLastKnown(repId: string): Promise<Fix | null> {
-  // Most recent GPS event for the rep across attendance + visits. Managers can
-  // read both via existing RLS. Pick the newest of the two.
+  // Most recent check-in GPS across attendance + visits. Managers can read
+  // both via existing RLS. Pick the newer of the two.
   const [{ data: att }, { data: vis }] = await Promise.all([
     supabase
       .from('attendance')
@@ -43,161 +49,109 @@ async function fetchLastKnown(repId: string): Promise<Fix | null> {
       .maybeSingle(),
   ]);
   const cands: Fix[] = [];
-  if (att?.latitude != null) cands.push({ lat: att.latitude, lng: att.longitude, at: att.check_in_time, live: false, sourceLabel: 'last check-in' });
-  if (vis?.latitude != null) cands.push({ lat: vis.latitude, lng: vis.longitude, at: vis.check_in_time, live: false, sourceLabel: 'last store visit' });
-  if (cands.length === 0) return null;
+  if (att?.latitude != null) cands.push({ lat: att.latitude, lng: att.longitude, at: att.check_in_time, live: false, sourceLabel: 'punch-in' });
+  if (vis?.latitude != null) cands.push({ lat: vis.latitude, lng: vis.longitude, at: vis.check_in_time, live: false, sourceLabel: 'store check-in' });
   cands.sort((a, b) => (b.at || '').localeCompare(a.at || ''));
-  return cands[0];
+  return cands[0] ?? null;
 }
 
 const fmtWhen = (iso: string | null) => {
-  if (!iso) return 'just now';
+  if (!iso) return 'unknown time';
   const d = new Date(iso);
   return d.toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 };
 
+const ago = (iso: string) => {
+  const min = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60_000));
+  return min < 1 ? 'just now' : `${min} min ago`;
+};
+
 /**
- * Requester-side "Get location" (management + sales_manager). Fast-fails if the
- * rep isn't checked in; otherwise sends a request over Supabase Realtime and
- * waits ~18s, then falls back to the rep's last-known GPS. Reuses react-native-maps.
- * RLS gates who may actually request whom — this only offers the control.
+ * Manager-side "Get location" (management + sales_manager). While a rep is on
+ * duty their phone reports its position every few minutes (lib/dutyLocation),
+ * so this answers instantly — no request for the rep to accept. Logging the
+ * view (location_requests INSERT) is what tells the rep: its trigger snapshots
+ * what was shown and, only while they are on duty, sends them a silent
+ * "Your live location was viewed" notification. RLS gates who may look.
  */
 export default function GetLocationButton({ repId, repName }: { repId: string; repName: string }) {
   const [open, setOpen] = useState(false);
-  const [phase, setPhase] = useState<Phase>('checking');
-  const [fix, setFix] = useState<Fix | null>(null);
-  const [errMsg, setErrMsg] = useState('');
-  const channelRef = useRef<RealtimeChannel | null>(null);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const doneRef = useRef(false);
-
-  const cleanup = () => {
-    if (channelRef.current) { supabase.removeChannel(channelRef.current); channelRef.current = null; }
-    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
-  };
-
-  const close = () => { cleanup(); setOpen(false); };
-
-  const toFallback = async () => {
-    if (doneRef.current) return;
-    doneRef.current = true;
-    cleanup();
-    const last = await fetchLastKnown(repId);
-    if (last) { setFix(last); setPhase('fallback'); }
-    else { setErrMsg('No recent location on record for this rep.'); setPhase('error'); }
-  };
+  const [view, setView] = useState<View_ | null>(null);
 
   const start = async () => {
-    doneRef.current = false;
-    setFix(null);
-    setErrMsg('');
-    setPhase('checking');
+    setView(null);
     setOpen(true);
+    const me = (await supabase.auth.getSession()).data.session?.user.id;
 
-    // 1) Fast-fail if the rep isn't checked in today.
-    const today = new Date().toISOString().split('T')[0];
-    const { data: att } = await supabase
-      .from('attendance')
-      .select('check_out_time')
-      .eq('user_id', repId)
-      .gte('check_in_time', `${today}T00:00:00`)
-      .lt('check_in_time', `${today}T23:59:59`)
-      .order('check_in_time', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    const checkedIn = !!att && !att.check_out_time;
-    if (!checkedIn) {
-      setPhase('notCheckedIn');
-      const last = await fetchLastKnown(repId);
-      setFix(last);
+    // One wave: on-duty state, the duty fix, check-in fallbacks, and the view log.
+    const [{ data: day }, { data: pos }, last, { error: logError }] = await Promise.all([
+      supabase.from('attendance').select('check_in_time').eq('user_id', repId)
+        .is('check_out_time', null).limit(1).maybeSingle(),
+      supabase.from('rep_positions').select('lat, lng, recorded_at, is_mock').eq('rep_id', repId).maybeSingle(),
+      fetchLastKnown(repId),
+      supabase.from('location_requests').insert({ rep_id: repId, requested_by: me }),
+    ]);
+
+    // An unlogged view would be one the rep is never told about — don't show it.
+    if (logError) {
+      setView({
+        icon: 'close-circle-outline', tone: Colors.alert, title: 'Couldn’t get location', fix: null,
+        // Any manager may look up any active rep, so 42501 means the target is not one.
+        msg: errorCode(logError) === '42501' ? 'Live location is only available for active reps.' : userMessage(logError),
+      });
       return;
     }
 
-    // 2) Insert the request; subscribe to its completion.
-    const { data: req, error } = await supabase
-      .from('location_requests')
-      .insert({ rep_id: repId, requested_by: (await supabase.auth.getUser()).data.user?.id })
-      .select()
-      .single();
-    if (error || !req) {
-      // Any sales manager / management may ask for any active rep (owner
-      // decision 2026-10-01), so a 42501 here means the target is not an
-      // active rep — say that, not the policy.
-      setErrMsg(
-        errorCode(error) === '42501'
-          ? 'Live location is only available for active reps.'
-          : userMessage(error),
-      );
-      setPhase('error');
-      return;
+    const duty: Fix | null = pos
+      ? { lat: pos.lat, lng: pos.lng, at: pos.recorded_at, live: true, sourceLabel: 'phone GPS' }
+      : null;
+    const newest = [duty, last].filter((f): f is Fix => !!f)
+      .sort((a, b) => (b.at || '').localeCompare(a.at || ''))[0] ?? null;
+    const mock = pos?.is_mock ? ' The phone reported a mock (fake) location.' : '';
+
+    if (!day) {
+      setView({
+        icon: 'alert-circle-outline', tone: Colors.warning, title: 'Rep isn’t on duty',
+        msg: newest ? `Showing their last known position (${newest.sourceLabel}, ${fmtWhen(newest.at)}).` : 'No location on record.',
+        fix: newest && { ...newest, live: false },
+      });
+    } else if (duty && Date.parse(duty.at!) >= Date.parse(day.check_in_time) && Date.now() - Date.parse(duty.at!) <= LIVE_MAX_AGE_MS) {
+      setView({ icon: 'location', tone: Colors.success, title: 'Live location', msg: `Updated ${ago(duty.at!)}.${mock}`, fix: duty });
+    } else {
+      // On duty but the phone has gone quiet: switched off, no signal, battery
+      // saver, or background location not allowed. Say so rather than guess.
+      setView({
+        icon: 'time-outline', tone: Colors.warning, title: 'Location not updating',
+        msg: (newest ? `Showing their last known position (${newest.sourceLabel}, ${fmtWhen(newest.at)}). ` : 'No location on record. ')
+          + 'The rep’s phone may be off or offline, or location may not be set to “Allow all the time”.' + mock,
+        fix: newest && { ...newest, live: false },
+      });
     }
-
-    setPhase('waiting');
-    const onComplete = (row: any) => {
-      if (doneRef.current || !row || row.status !== 'completed' || row.lat == null) return;
-      doneRef.current = true;
-      cleanup();
-      setFix({ lat: row.lat, lng: row.lng, at: row.responded_at, live: true });
-      setPhase('live');
-    };
-
-    channelRef.current = supabase
-      .channel(`locreq-req-${req.id}`)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'location_requests', filter: `id=eq.${req.id}` },
-        (payload) => onComplete(payload.new))
-      .subscribe();
-
-    // Race guard: the rep may have already responded before we subscribed.
-    const { data: fresh } = await supabase.from('location_requests').select('*').eq('id', req.id).maybeSingle();
-    if (fresh?.status === 'completed') onComplete(fresh);
-
-    timerRef.current = setTimeout(toFallback, TIMEOUT_MS);
   };
 
   const navigate = () => {
-    if (!fix) return;
-    Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${fix.lat},${fix.lng}`);
+    if (!view?.fix) return;
+    Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${view.fix.lat},${view.fix.lng}`);
   };
 
   return (
     <>
       <Button title="Get location" onPress={start} variant="secondary" />
 
-      <Modal visible={open} animationType="slide" presentationStyle="pageSheet" onRequestClose={close}>
+      <Modal visible={open} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setOpen(false)}>
         <View style={styles.container}>
-          <Header title={repName} onBack={close} />
+          <Header title={repName} onBack={() => setOpen(false)} />
           <View style={styles.body}>
-            {(phase === 'checking' || phase === 'waiting') && (
+            {!view ? (
               <View style={styles.centered}>
                 <ActivityIndicator size="large" color={Colors.accent} />
-                <Text style={[Type.body, { color: Colors.textSecondary, marginTop: Space.md }]}>
-                  {phase === 'checking' ? 'Checking…' : `Asking ${repName} for their location…`}
-                </Text>
+                <Text style={[Type.body, { color: Colors.textSecondary, marginTop: Space.md }]}>Locating…</Text>
               </View>
-            )}
-
-            {phase === 'notCheckedIn' && (
+            ) : (
               <>
-                <Banner icon="alert-circle-outline" tone={Colors.warning} title="Rep isn’t checked in"
-                  msg={fix ? 'Showing their last known location instead.' : 'No recent location on record.'} />
-                {fix ? <FixMap fix={fix} onNavigate={navigate} /> : null}
+                <Banner icon={view.icon} tone={view.tone} title={view.title} msg={view.msg} />
+                {view.fix ? <FixMap fix={view.fix} onNavigate={navigate} /> : null}
               </>
-            )}
-            {phase === 'live' && fix && (
-              <>
-                <Banner icon="location" tone={Colors.success} title="Live location" msg="As of just now." />
-                <FixMap fix={fix} onNavigate={navigate} />
-              </>
-            )}
-            {phase === 'fallback' && fix && (
-              <>
-                <Banner icon="time-outline" tone={Colors.warning} title="Couldn’t reach the rep"
-                  msg={`Showing their ${fix.sourceLabel} — not live (${fmtWhen(fix.at)}).`} />
-                <FixMap fix={fix} onNavigate={navigate} />
-              </>
-            )}
-            {phase === 'error' && (
-              <Banner icon="close-circle-outline" tone={Colors.alert} title="Couldn’t get location" msg={errMsg} />
             )}
           </View>
         </View>

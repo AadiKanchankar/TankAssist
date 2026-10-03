@@ -40,7 +40,7 @@ import ProfileScreen from './app/(shared)/profile';
 import StoreDetailScreen from './app/(shared)/store-detail';
 import OrderDetailScreen from './app/(shared)/order-detail';
 import TesterBadge from './components/TesterBadge';
-import LocationResponder from './components/LocationResponder';
+import { startDutyTracking, stopDutyTracking } from './lib/dutyLocation';
 import JourneyPlanScreen from './app/(rep)/journey-plan';
 import ChallanScreen from './app/(rep)/challan';
 import ExceptionsScreen from './app/(admin)/exceptions';
@@ -170,10 +170,17 @@ function RepTabs() {
       Alert.alert('Check in first', 'Start your day from the dashboard to open your stores and report.');
     },
   };
+  // On-duty background GPS follows the open day. Punch-out refetches this
+  // query, so it stops here; unmount (logout, role switch) stops it too. The
+  // server also refuses positions once the day is closed — see lib/dutyLocation.
+  const onDuty = dash === undefined ? undefined : !!dash.attendance?.check_in_time && !dash.attendance.check_out_time;
+  useEffect(() => {
+    if (onDuty === true) startDutyTracking();
+    else if (onDuty === false) stopDutyTracking();
+  }, [onDuty]);
+  useEffect(() => () => { stopDutyTracking(); }, []);
   return (
     <>
-      {/* Rep-side live-location responder (active only while checked in). */}
-      <LocationResponder />
       <RepTab.Navigator screenOptions={getTabScreenOptions(insets.bottom)}>
       <RepTab.Screen
         name="Dashboard"

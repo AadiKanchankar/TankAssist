@@ -31,6 +31,7 @@
     "expo-sharing": "~56.0.26",
     "expo-speech-recognition": "^56.0.1",
     "expo-status-bar": "~56.0.4",
+    "expo-task-manager": "~56.0.27",
     "expo-updates": "~56.0.26",
     "moti": "^0.30.0",
     "react": "19.2.3",
