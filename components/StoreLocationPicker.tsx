@@ -21,6 +21,9 @@ export interface StoreLocationValue {
   address: string;
   /** Auto-derived Indian state (never hand-entered). Null until geocoded. */
   state: string | null;
+  /** How the pin got where it is. A GPS pin far from the phone at save time is
+   *  the stale-fix signature (AddStoreModal checks it); a hand pin is deliberate. */
+  pinnedBy?: 'gps' | 'hand';
 }
 
 interface Props {
@@ -56,6 +59,10 @@ export default function StoreLocationPicker({ value, onChange }: Props) {
   // older one — said out loud, because this coordinate is saved for good.
   const [staleFix, setStaleFix] = useState(false);
   const mapRef = useRef<MapView>(null);
+  // Only the newest commit may write: two quick pans each start a geocode, and
+  // the slower, OLDER one used to land last — saving its coordinate while the
+  // map showed the newer one.
+  const commitSeq = useRef(0);
 
   // Initialise the map region once when the picker mounts.
   useEffect(() => {
@@ -93,7 +100,7 @@ export default function StoreLocationPicker({ value, onChange }: Props) {
           latitudeDelta: 0.005,
           longitudeDelta: 0.005,
         });
-        commit(lat, lng);
+        commit(lat, lng, 'gps');
       } else {
         // Permission denied — show default region, no pin until user pans.
         setMapRegion(DEFAULT_REGION);
@@ -121,7 +128,7 @@ export default function StoreLocationPicker({ value, onChange }: Props) {
       // A programmatic move settles with isGesture false, which the region
       // handler ignores — so commit explicitly.
       mapRef.current?.animateToRegion(region, 300);
-      commit(region.latitude, region.longitude);
+      commit(region.latitude, region.longitude, 'gps');
     } catch {
       // Location unavailable: the pin stays where it was.
     } finally {
@@ -133,19 +140,18 @@ export default function StoreLocationPicker({ value, onChange }: Props) {
   // then reverse-geocode to refresh the address AND the auto-derived state.
   // reverseGeocodeDetailed never throws (returns "lat, lng" + null state on
   // failure), so the address is always populated and stays hand-editable.
-  const commit = async (lat: number, lng: number) => {
+  const commit = async (lat: number, lng: number, pinnedBy: 'gps' | 'hand') => {
+    const seq = ++commitSeq.current;
     setGeocoding(true);
-    onChange({ latitude: lat, longitude: lng, address: value.address, state: null });
+    // Address cleared, not kept: the old address next to a new pin is exactly
+    // the divergence that gets saved if the rep taps Save mid-geocode.
+    onChange({ latitude: lat, longitude: lng, address: '', state: null, pinnedBy });
     try {
       const result = await reverseGeocodeDetailed(lat, lng);
-      onChange({
-        latitude: lat,
-        longitude: lng,
-        address: result.address,
-        state: result.state,
-      });
+      if (seq !== commitSeq.current) return;
+      onChange({ latitude: lat, longitude: lng, address: result.address, state: result.state, pinnedBy });
     } finally {
-      setGeocoding(false);
+      if (seq === commitSeq.current) setGeocoding(false);
     }
   };
 
@@ -168,7 +174,7 @@ export default function StoreLocationPicker({ value, onChange }: Props) {
   ) => {
     setIsMoving(false);
     if (details && details.isGesture === false) return;
-    commit(region.latitude, region.longitude);
+    commit(region.latitude, region.longitude, 'hand');
   };
 
   return (

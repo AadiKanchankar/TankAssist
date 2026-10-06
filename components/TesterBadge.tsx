@@ -2,7 +2,7 @@ import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors, Type, Space, Radius, Layout } from '../constants/colors';
+import { Colors, Type, Space, Radius } from '../constants/colors';
 import { useAuthStore } from '../store/useAuthStore';
 
 const ROLE_LABEL: Record<string, string> = {
@@ -14,7 +14,10 @@ const ROLE_LABEL: Record<string, string> = {
 /**
  * Persistent indicator shown only while the logged-in profile is a tester, so
  * it's never ambiguous which role is currently being driven mid-testing.
- * Floats above the tab bar; pointerEvents="none" so it never intercepts taps.
+ * Sits in the status-bar strip at the very top — the one band no app control
+ * occupies. It used to float above the tab bar, where it covered whatever
+ * footer button a screen docked there (the stepper's "Skip — no order").
+ * pointerEvents="none" so it never intercepts taps either way.
  */
 export default function TesterBadge() {
   const profile = useAuthStore((s) => s.profile);
@@ -24,7 +27,7 @@ export default function TesterBadge() {
   return (
     <View
       pointerEvents="none"
-      style={[styles.wrap, { bottom: insets.bottom + Layout.tabBar + Space.sm }]}
+      style={[styles.wrap, { top: Math.max(0, insets.top - PILL_H) }]}
     >
       <View style={styles.pill}>
         <Ionicons name="flask" size={13} color={Colors.warning} />
@@ -34,6 +37,8 @@ export default function TesterBadge() {
   );
 }
 
+const PILL_H = 20;
+
 const styles = StyleSheet.create({
   wrap: { position: 'absolute', left: 0, right: 0, alignItems: 'center' },
   pill: {
@@ -42,8 +47,8 @@ const styles = StyleSheet.create({
     gap: Space.xs,
     backgroundColor: Colors.surfaceDark,
     borderRadius: Radius.pill,
+    height: PILL_H,
     paddingHorizontal: Space.md,
-    paddingVertical: Space.xs,
     opacity: 0.94,
   },
   text: { ...Type.label, color: Colors.textOnDark },

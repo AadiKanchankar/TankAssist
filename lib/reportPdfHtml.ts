@@ -119,6 +119,10 @@ export interface DayRow {
   attRows: number;
   routeKm: number | null;
   odoKm: number | null;
+  /** The dial readings behind odoKm — only for a single punch-in day, where
+   *  start → end is one journey. Null otherwise, and when not captured. */
+  odoStart: number | null;
+  odoEnd: number | null;
   cases: number;
 }
 
@@ -216,6 +220,8 @@ export function buildMonth(input: PdfMonthInput): MonthModel {
       attRows: att.length,
       routeKm: rt.value,
       odoKm: odo,
+      odoStart: att.length === 1 ? toNum(att[0].odo_start) : null,
+      odoEnd: att.length === 1 ? toNum(att[0].odo_end) : null,
       cases: input.casesByDay[key] ?? 0,
     });
   }
@@ -549,12 +555,17 @@ function summaryPage(md: MonthModel, repName: string, generated: Date): string {
           md.market.missing ? `${md.market.missing} not recorded` : '',
           md.market.estimated ? `${md.market.estimated} estimated` : '',
         ].filter(Boolean).join(' · ');
-  const distSub =
-    md.odoKm != null
-      ? `Odometer ${int(Math.round(md.odoKm))} km${md.odoDays < md.routeDays ? ` (${plural(md.odoDays, 'day')})` : ''} · reads higher, see notes`
-      : md.routeKm != null
-      ? `${km(md.routeKm / Math.max(1, md.routeDays))} km per recorded day`
+  // The two distances sit side by side and are never merged: the odometer is
+  // the travel-allowance figure, the route its cross-check. Neither "corrects"
+  // the other — they measure different things.
+  const routeSub =
+    md.routeKm != null
+      ? `${km(md.routeKm / Math.max(1, md.routeDays))} km per recorded day · check-in to check-in only`
       : 'calculated at punch-out';
+  const odoSub =
+    md.odoKm != null
+      ? `Vehicle end − start reading · ${md.odoDays} of ${plural(nField, 'field day')} recorded${md.odoDays < nField ? ` (${nField - md.odoDays} not recorded)` : ''} · usually higher than the route — see notes`
+      : nField ? 'not recorded — no day has both a start and an end reading' : 'no field days';
   const stands = standouts(md)
     .map((s) => `<li>${s}</li>`)
     .join('');
@@ -569,11 +580,12 @@ function summaryPage(md: MonthModel, repName: string, generated: Date): string {
     <div class="meta">Generated ${dayLabel(generated)} ${generated.getFullYear()}<br/>All times device-local</div>
   </header>
   <div class="tiles">
+    ${tile('Odometer · travel allowance', md.odoKm == null ? 'Not recorded' : `${int(Math.round(md.odoKm))} <small>km</small>`, odoSub, `main${md.odoKm == null ? ' nr' : ''}`)}
+    ${tile('Route (GPS)', md.routeKm == null ? '—' : `${km(md.routeKm)} <small>km</small>`, routeSub)}
+    ${tile('Market time', md.market.min == null ? '—' : hm(md.market.min).replace(/ (\d+m)$/, ' <small>$1</small>'), marketNote)}
     ${tile('Cases sold', int(md.casesTotal), md.casesTotal ? `from ${selling} of ${plural(nVisits, 'visit')}` : 'no orders this month', 'good')}
     ${tile('Store visits', String(nVisits), nField ? `${(nVisits / nField).toFixed(1)} per field day` : '—')}
     ${tile('Stores covered', String(md.stores.length), `unique · ${plural(nVisits - md.stores.length, 'repeat visit')}`)}
-    ${tile('Market time', md.market.min == null ? '—' : hm(md.market.min).replace(/ (\d+m)$/, ' <small>$1</small>'), marketNote)}
-    ${tile('Route (GPS)', md.routeKm == null ? '—' : `${km(md.routeKm)} <small>km</small>`, distSub)}
     ${tile('Field days', String(nField), fieldDaysSub(md))}
   </div>
   <div class="banner">▲ ${headline(md)}</div>
@@ -619,6 +631,16 @@ const subCells = (s: Sub) => {
     <td class="n">${p == null ? '—' : `${p}%`}</td><td class="n">${km(s.route)}</td><td class="n">${s.odo == null ? '—' : int(Math.round(s.odo))}</td><td class="n">${s.cases ? int(s.cases) : '–'}</td><td></td>`;
 };
 
+/** "not recorded", never 0 or a bare dash: a missing reading is not a zero. */
+const odoCell = (d: DayRow) => {
+  if (d.odoKm != null) {
+    const rd = d.odoStart != null && d.odoEnd != null ? `<span class="rd">${int(d.odoStart)}→${int(d.odoEnd)}</span>` : '';
+    return `${int(Math.round(d.odoKm))}${rd}`;
+  }
+  if (!d.hasAttendance) return '—';
+  return `<span class="nr">${d.odoStart != null ? 'no end reading' : 'not recorded'}</span>`;
+};
+
 function dayTable(md: MonthModel): string {
   const rows = md.fieldDays;
   // Mon–Sun weeks; subtotals only when the month spans more than one.
@@ -636,7 +658,7 @@ function dayTable(md: MonthModel): string {
       body += `<tr class="${d.cases > 0 ? 'sale' : ''}"><td>${dayLabel(d.date)}</td><td>${WD[d.date.getDay()]}</td><td class="n">${d.visits.length}</td>
         <td class="n">${d.firstIn ? hhmm(d.firstIn) : '—'}</td><td class="n">${d.lastOut ? hhmm(d.lastOut) : '—'}</td>
         <td class="n">${hm(d.inStoreMin)}</td><td class="n">${d.estimated ? '~' : ''}${hm(d.marketMin)}</td><td class="n">${p == null ? '—' : `${p}%`}</td>
-        <td class="n">${d.estimatedRoute ? '~' : ''}${km(d.routeKm)}</td><td class="n">${d.odoKm == null ? '—' : int(Math.round(d.odoKm))}</td>
+        <td class="n">${d.estimatedRoute ? '~' : ''}${km(d.routeKm)}</td><td class="n">${odoCell(d)}</td>
         <td class="n">${d.cases ? int(d.cases) : '–'}</td><td>${tag(d)}</td></tr>`;
     }
     // A one-day week's subtotal would just repeat the row above it.
@@ -654,7 +676,7 @@ function dayTable(md: MonthModel): string {
 function notes(md: MonthModel): string {
   const n: string[] = [
     '<b>In stores</b> = sum of visit durations. <b>Market time</b> = punch-in to punch-out, tracked by the app. <b>In-store %</b> uses only days whose market time was recorded.',
-    `<b>Route (GPS)</b> is the road distance (Google Directions) through punch-in → each store check-in, in visiting order → punch-out. <b>Odometer</b> is the vehicle's end reading minus its start reading. They measure different things and are never merged: the route only joins the points where the rep checked in, so riding between them — wrong turns, fuel, lunch, parking — is invisible to it. <b>The odometer normally reads higher</b>; a day is flagged for review only when it exceeds the route by more than ${Math.round(MISMATCH_PERCENT * 100)}% and ${MISMATCH_FLOOR_KM} km.${md.fieldDays.some((d) => d.estimatedRoute) ? ' Days closed by the 22:30 auto-close add a straight-line distance instead, marked ~ in the table.' : ''}`,
+    `<b>Route (GPS)</b> is the road distance (Google Directions) through punch-in → each store check-in, in visiting order → punch-out. <b>Odometer</b> is the vehicle's end reading minus its start reading. They measure different things and are never merged: the route only joins the points where the rep checked in, so riding between them — wrong turns, fuel, lunch, parking — is invisible to it. <b>The odometer normally reads higher</b>, and that gap is the expected difference between two methods, not an error; a day is flagged for review only when it exceeds the route by more than ${Math.round(MISMATCH_PERCENT * 100)}% and ${MISMATCH_FLOOR_KM} km. The <b>Odo km</b> column shows each day's start → end dial readings; every reading can be checked against its dial photo in the app (Team → rep → Report → Odometer).${md.fieldDays.some((d) => d.estimatedRoute) ? ' Days closed by the 22:30 auto-close add a straight-line distance instead, marked ~ in the table.' : ''}`,
   ];
   for (const d of md.fieldDays) {
     const lastVisit = d.visits[d.visits.length - 1];
@@ -747,8 +769,13 @@ section.detail:last-child { page-break-after: auto; }
 h1 { font-size: 26px; font-weight: 750; letter-spacing: -.3px; margin-top: 2px; }
 .period { font-size: 12px; color: ${C.sub}; margin-top: 1px; }
 .meta { font-size: 9.5px; color: ${C.muted}; text-align: right; line-height: 1.5; }
-.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 .tile { background: #f4f6f9; border-radius: 8px; padding: 8px 12px; }
+.tile.main { grid-column: span 2; background: ${C.accent}; }
+.tile.main .t-value { font-size: 30px; color: ${C.travel}; }
+.tile.main.nr .t-value { font-size: 20px; color: ${C.sub}; }
+td .rd { display: block; font-size: 7.5px; color: ${C.muted}; white-space: nowrap; }
+td .nr { font-size: 8px; color: ${C.muted}; font-style: italic; white-space: nowrap; }
 .tile.good { background: ${C.salesTint}; }
 .tile.good .t-value { color: ${C.sales}; }
 .t-label { font-size: 8.5px; letter-spacing: 1px; text-transform: uppercase; color: ${C.muted}; font-weight: 650; }
