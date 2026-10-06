@@ -12,6 +12,11 @@ Session-state snapshot for the next Claude Code session. **Temporal** — record
 
 ## What is actually live right now
 
+### 2026-10-06b — live location rollout (APK 1.4.0, rebuilt from `master`)
+- The first 1.4.0 build (`b430f35c`, 2026-10-03) **errored in Install dependencies** — nobody ever had it. Cause: local npm 11 pruned three nested `@types/*` lockfile entries that EAS's npm 10 `npm ci` requires (see CLAUDE.md Builds). Lockfile regenerated with npm 10; `expo install --fix` cleared patch drift (`expo`, `expo-constants`, `expo-location`, `expo-notifications`, `expo-updates`). `expo-doctor`: only the SDK 56 Hermes V1 memory-regression warning remains (fix = SDK 57 upgrade, not done).
+- New 1.4.0 APK built from `master` = live location + the 2026-10-06 batch, so no OTA to 1.4.0 is needed for it. Live-location DB side was already live (2026-10-03). Old 1.3.0 phones keep working (and keep receiving 1.3.0 OTAs) until reinstalled.
+- **Rollout check:** `select r.name, p.recorded_at from rep_positions p join users r on r.id=p.rep_id` — a row appears for each rep within ~3 min of punching in on the new APK with "Allow all the time" granted. No row while on duty = old APK, permission refused, or battery saver.
+
 ### 2026-10-06 — store-location carry-over, check-in speed, stepper back-nav, odometer in PDF (JS-only → OTA on runtime 1.3.0)
 
 Built on branch `ota-1.3.0` cut from `41024c9` (BEFORE the 1.4.0 live-location commit `abef2a2`, whose `expo-task-manager` a 1.3.0 binary lacks), published as OTA **`6ecfc5d9`** (group `6ecfc5d9-954e-4ecb-9d18-53ff13988450`, branch `preview`, runtime **1.3.0**, commit `3a12f0a`), then merged into `master`. ⚠️ The 1.4.0 APK (EAS build `b430f35c`, from `abef2a2`) predates this batch: when live location rolls out, publish an OTA to runtime 1.4.0 from `master` so 1.4.0 phones get it too. ⚠️ **Live location (1.4.0, `abef2a2`) is NOT rolled out**: its APK is built but the owner parked it until after this batch; its DB side (`rep_positions`, `report_duty_position`, `trg_location_viewed`) is already live and harmless to 1.3.0.
