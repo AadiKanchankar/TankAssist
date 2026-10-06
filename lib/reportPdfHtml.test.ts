@@ -108,7 +108,12 @@ for (const h of [html, html2]) {
   }
   assert.ok(h.includes('Route (GPS)') && h.includes('Odometer'), 'both distances labelled');
   assert.ok(h.includes('normally reads higher'), 'distance gap explained');
+  // Odometer is its own main box on page 1, ahead of the route.
+  assert.ok(h.includes('tile main') && h.indexOf('Odometer · travel allowance') < h.indexOf('>Route (GPS)<'), 'odometer main tile first');
 }
+// A field day without readings says so — never 0, never a bare dash.
+assert.ok(html.includes('<span class="nr">not recorded</span>'), 'missing odometer reads "not recorded"');
+assert.ok(/<span class="rd">25,\d{3}→25,\d{3}<\/span>/.test(html), 'start→end readings shown per day');
 // Long month stacks charts full width; short range sits side by side.
 assert.ok(html.includes('width="672"') && !html2.includes('width="672"'));
 // Weekly subtotals for the long month only.

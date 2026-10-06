@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
+import * as Location from 'expo-location';
 import { View, Text, StyleSheet, Modal, TextInput, Pressable, ScrollView, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, Type, Space, Radius } from '../constants/colors';
@@ -10,6 +11,7 @@ import { supabase } from '../lib/supabase';
 import { haversineKm } from '../lib/haversine';
 import { findDuplicateCandidates, DuplicateMatch } from '../lib/journeyPlan';
 import { userMessage } from '../lib/userError';
+import { isFreshFix } from '../lib/freshLocation';
 
 export interface CreatedStore {
   id: string;
@@ -33,6 +35,43 @@ interface Props {
   onResolved: (store: CreatedStore) => void;
 }
 
+/** A GPS-placed pin this far from the phone's live fix is the stale-fix signature. */
+const FAR_PIN_KM = 1;
+
+/**
+ * Distance from the pin to where the phone is right now, or null when it
+ * doesn't apply (pin placed by hand, no pin) or can't be known (no fix that is
+ * genuinely fresh within a few seconds — a remembered fix proves nothing here,
+ * it may be the very one that placed the pin).
+ */
+async function pinDistanceFromPhoneKm(loc: StoreLocationValue): Promise<number | null> {
+  if (loc.latitude == null || loc.longitude == null || loc.pinnedBy === 'hand') return null;
+  try {
+    const askedAt = Date.now();
+    const fix = await Promise.race([
+      Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+      new Promise<null>((r) => setTimeout(() => r(null), 4000)),
+    ]);
+    if (!fix || !isFreshFix(fix.timestamp, askedAt)) return null;
+    return haversineKm(loc.latitude, loc.longitude, fix.coords.latitude, fix.coords.longitude);
+  } catch {
+    return null;
+  }
+}
+
+const confirmFarPin = (km: number) =>
+  new Promise<boolean>((resolve) =>
+    Alert.alert(
+      'Pin is far from you',
+      `The store pin is ${km < 10 ? km.toFixed(1) : Math.round(km)} km from where your phone is now. ` +
+        'If you’re standing at the store, tap the locate button to move the pin here.',
+      [
+        { text: 'Fix the pin', style: 'cancel', onPress: () => resolve(false) },
+        { text: 'Save anyway', onPress: () => resolve(true) },
+      ],
+    ),
+  );
+
 const emptyLocation: StoreLocationValue = {
   latitude: null,
   longitude: null,
@@ -53,8 +92,17 @@ const emptyLocation: StoreLocationValue = {
  * skips it is still caught by the manager-visible flag, which derives from
  * store coordinates rather than from whether this dialog appeared.
  */
-export default function AddStoreModal({
-  visible,
+export default function AddStoreModal(props: Props) {
+  // Mounted only while open, so every opening starts from nothing. The form
+  // used to stay mounted with the PREVIOUS store's pin in state; on reopen the
+  // picker mounted first, saw a coordinate, took its "editing an existing
+  // store" branch and centred on the old shop without asking GPS — the parent's
+  // reset effect ran after the child's, too late. That is how "Ravet petrol
+  // pump" opened on Akurdi with a Chinchwad address (2026-10).
+  return props.visible ? <AddStoreForm {...props} /> : null;
+}
+
+function AddStoreForm({
   initialName = '',
   createdByUserId,
   onClose,
@@ -65,15 +113,6 @@ export default function AddStoreModal({
   const [location, setLocation] = useState<StoreLocationValue>(emptyLocation);
   const [creating, setCreating] = useState(false);
   const [dupes, setDupes] = useState<DuplicateMatch[]>([]);
-
-  useEffect(() => {
-    if (visible) {
-      setName(initialName);
-      setLicense('');
-      setLocation(emptyLocation);
-      setDupes([]);
-    }
-  }, [visible, initialName]);
 
   const checkForDuplicates = async (): Promise<DuplicateMatch[]> => {
     const { data } = await supabase.from('stores').select('id, name, latitude, longitude');
@@ -92,7 +131,11 @@ export default function AddStoreModal({
       return;
     }
     if (!skipDuplicateCheck) {
-      const matches = await checkForDuplicates();
+      const [matches, farKm] = await Promise.all([checkForDuplicates(), pinDistanceFromPhoneKm(location)]);
+      // Backstop for a stale pin (the root cause is fixed above): a GPS-placed
+      // pin far from where the phone is NOW. Flag, don't block — a rep may be
+      // adding a shop they aren't standing in.
+      if (farKm != null && farKm > FAR_PIN_KM && !(await confirmFarPin(farKm))) return;
       if (matches.length) {
         setDupes(matches);
         return;
@@ -130,7 +173,7 @@ export default function AddStoreModal({
 
   return (
     <>
-      <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <Modal visible animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
         <View style={styles.screen}>
           <Header title="Add a store" onBack={onClose} />
           <ScrollView style={styles.body} keyboardShouldPersistTaps="handled">

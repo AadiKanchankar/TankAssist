@@ -9,9 +9,12 @@ import {
   Pressable,
   ActivityIndicator,
   Image,
+  BackHandler,
 } from 'react-native';
 import { MotiView } from 'moti';
 import { useReducedMotion } from 'react-native-reanimated';
+import * as Haptics from 'expo-haptics';
+import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import {
   Colors,
@@ -149,6 +152,9 @@ export default function StoreVisitScreen({
   const [checkInTime, setCheckInTime] = useState<string | null>(null);
   const [checkInAddress, setCheckInAddress] = useState<string | null>(null);
   const [initializing, setInitializing] = useState(true);
+  // What the blocker is waiting on, named — a spinner that says what it is
+  // waiting for reads as progress; a bare "Locking…" reads as a hang.
+  const [initStage, setInitStage] = useState<'checking' | 'saving' | 'loading'>('checking');
 
   // Check-in position, confirmed by the rep BEFORE the visit row is written.
   // The mount flow waits on confirmResolver; the panel resolves it with the
@@ -157,20 +163,20 @@ export default function StoreVisitScreen({
   const [pendingFix, setPendingFix] = useState<Fix | null>(null);
   const [locating, setLocating] = useState(false);
   const confirmResolver = useRef<((fix: Fix | null) => void) | null>(null);
-  const locate = async () => {
+  const locate = async (inFlight?: Promise<Fix>) => {
     setLocating(true);
     try {
-      setPendingFix(await freshPosition());
+      setPendingFix(await (inFlight ?? freshPosition()));
     } catch {
       // Keep whatever fix is on screen; the rep can retry.
     }
     setLocating(false);
   };
-  const awaitConfirmedFix = () =>
+  const awaitConfirmedFix = (inFlight: Promise<Fix>) =>
     new Promise<Fix | null>((resolve) => {
       confirmResolver.current = resolve;
       setAwaitingConfirm(true);
-      locate();
+      locate(inFlight);
     });
   const answerConfirm = (fix: Fix | null) => {
     setAwaitingConfirm(false);
@@ -254,7 +260,21 @@ export default function StoreVisitScreen({
     });
   };
 
-  // ─── Mount: lock check-in (unchanged), then load stepper data ───
+  /** Network failure on the check-in write: retry with the same fix, or leave. */
+  const askRetry = (err: unknown): Promise<boolean> =>
+    new Promise((resolve) =>
+      Alert.alert(
+        'Check-in not saved yet',
+        `${userMessage(err)}\n\nYour location is kept — tap Retry when you have signal.`,
+        [
+          { text: 'Back', style: 'cancel', onPress: () => resolve(false) },
+          { text: 'Retry', onPress: () => resolve(true) },
+        ],
+        { cancelable: false },
+      ),
+    );
+
+  // ─── Mount: lock check-in, with stepper data loading in parallel ───
   useEffect(() => {
     (async () => {
       try {
@@ -264,6 +284,18 @@ export default function StoreVisitScreen({
           navigation.goBack();
           return;
         }
+
+        // Measured 2026-10-05 (edge logs, Bhagwan's 15:14 check-in): the lock
+        // was FIVE serial hops — open-visit lookup, insert, then products →
+        // snapshots → orders one after another — and GPS only started after
+        // the first came back. None of the three stepper reads depends on the
+        // visit row, so they and the GPS fix now start HERE, in parallel, and
+        // run while the rep is looking at the confirm panel. After "Check in
+        // here" only the insert itself is waited on. Location stays real: the
+        // row is still written with a confirmed fresh fix, before anything else.
+        const fixP = freshPosition();
+        fixP.catch(() => {});
+        const stepperP = loadStepperData().then(() => null, (e: unknown) => e);
 
         // ── One open visit at a time ──────────────────────────────────────
         // Look for ANY open visit by this rep — not scoped to this store, and
@@ -315,11 +347,12 @@ export default function StoreVisitScreen({
         } else {
           // A FRESH fix, confirmed on screen. Reusing the phone's remembered
           // position recorded the PREVIOUS shop's coordinates on check-in.
-          const fix = await awaitConfirmedFix();
+          const fix = await awaitConfirmedFix(fixP);
           if (!fix) {
             navigation.goBack();
             return;
           }
+          setInitStage('saving');
           const loc = fix.loc;
           const now = new Date().toISOString();
           const lat = loc.coords.latitude;
@@ -330,7 +363,10 @@ export default function StoreVisitScreen({
               haversineKm(lat, lng, store.latitude, store.longitude) * 1000
             );
           }
-          const { data, error } = await supabase
+          // Retried in place on a network failure, with the SAME fix and time:
+          // a dropped connection must not cost the rep their confirmed check-in
+          // or send them back to start over.
+          const insertVisit = () => supabase
             .from('store_visits')
             .insert({
               user_id: profile!.id,
@@ -354,6 +390,10 @@ export default function StoreVisitScreen({
             })
             .select()
             .single();
+          let { data, error } = await insertVisit();
+          while (error && (error as any).code !== '23505' && (await askRetry(error))) {
+            ({ data, error } = await insertVisit());
+          }
           if (error) {
             // 23505 = store_visits_one_open_per_user. Between the check above
             // and this insert, another device checked this rep in somewhere.
@@ -366,6 +406,12 @@ export default function StoreVisitScreen({
                 .is('check_out_time', null)
                 .limit(1)
                 .maybeSingle();
+              // Our own insert landed but its reply was lost (retry after a
+              // timeout): the open visit is THIS store. Re-enter to resume it.
+              if (raced?.store_id === store.id) {
+                navigation.replace('StoreVisit', { store });
+                return;
+              }
               if (raced) {
                 const proceed = await confirmCloseAndContinue(raced);
                 if (!proceed) {
@@ -382,15 +428,19 @@ export default function StoreVisitScreen({
             }
             throw error;
           }
-          setVisitId(data.id);
+          const visit = data!;
+          setVisitId(visit.id);
           setCheckInTime(now);
           reverseGeocode(lat, lng).then(async (addr) => {
             setCheckInAddress(addr);
-            await supabase.from('store_visits').update({ address: addr }).eq('id', data.id);
+            await supabase.from('store_visits').update({ address: addr }).eq('id', visit.id);
           });
         }
 
-        await loadStepperData();
+        setInitStage('loading');
+        const loadErr = await stepperP;
+        // The visit row exists, so leaving is safe: re-entering resumes it.
+        if (loadErr) throw loadErr;
       } catch (err: any) {
         Alert.alert('Couldn’t check in', userMessage(err));
         navigation.goBack();
@@ -399,24 +449,46 @@ export default function StoreVisitScreen({
     })();
   }, []);
 
+  // Depends only on the store, never on the visit row — which is what lets it
+  // run in parallel with check-in. Throws: an empty catalog shown as if the
+  // store stocked nothing would be worse than an error.
   const loadStepperData = async () => {
-    // Active catalog
-    const { data: prods } = await supabase
-      .from('products')
-      // NO price columns. Reps never see or receive pricing: order value is
-      // derived server-side by trg_snapshot_order_item_price from the catalog
-      // price and the quantities below, so the device has no reason to hold it.
-      .select('id, name, unit, qty_per_carton, is_out_of_stock')
-      .eq('is_active', true)
-      .order('name');
+    const [prodsRes, snapsRes, ordersRes] = await Promise.all([
+      supabase
+        .from('products')
+        // NO price columns. Reps never see or receive pricing: order value is
+        // derived server-side by trg_snapshot_order_item_price from the catalog
+        // price and the quantities below, so the device has no reason to hold it.
+        .select('id, name, unit, qty_per_carton, is_out_of_stock')
+        .eq('is_active', true)
+        .order('name'),
+      // Latest snapshot per product for this store. ponytail: newest 500 rows,
+      // not the store's whole history — a product unrecorded in its last 500
+      // snapshots loses only its prefill. A DISTINCT ON view if that ever bites.
+      supabase
+        .from('store_stock_snapshots')
+        .select(`product_id, ${SNAPSHOT_COLUMNS}, recorded_at, recorded_by`)
+        .eq('store_id', store.id)
+        .order('recorded_at', { ascending: false })
+        .limit(500),
+      // Most recent non-terminal order at this store
+      supabase
+        .from('orders')
+        .select(
+          'id, status, created_at, placed_by, order_items(cases, bottles, free_cases, free_bottles, products(name))'
+        )
+        .eq('store_id', store.id)
+        .in('status', ['placed', 'in_process', 'dispatched', 'in_transit'])
+        .order('created_at', { ascending: false })
+        .limit(1),
+    ]);
+    const firstErr = prodsRes.error ?? snapsRes.error ?? ordersRes.error;
+    if (firstErr) throw firstErr;
+    const prods = prodsRes.data;
+    const snaps = snapsRes.data;
+    const orders = ordersRes.data;
     setProducts((prods as ProductRow[]) || []);
 
-    // Latest stock snapshot per product for this store
-    const { data: snaps } = await supabase
-      .from('store_stock_snapshots')
-      .select(`product_id, ${SNAPSHOT_COLUMNS}, recorded_at, recorded_by`)
-      .eq('store_id', store.id)
-      .order('recorded_at', { ascending: false });
     const latest: Record<string, StockLatest> = {};
     for (const s of (snaps as any[]) || []) {
       if (!latest[s.product_id]) latest[s.product_id] = s as StockLatest;
@@ -441,16 +513,6 @@ export default function StoreVisitScreen({
     }
     setStock(prefill);
 
-    // Most recent non-terminal order at this store
-    const { data: orders } = await supabase
-      .from('orders')
-      .select(
-        'id, status, created_at, placed_by, order_items(cases, bottles, free_cases, free_bottles, products(name))'
-      )
-      .eq('store_id', store.id)
-      .in('status', ['placed', 'in_process', 'dispatched', 'in_transit'])
-      .order('created_at', { ascending: false })
-      .limit(1);
     const o = (orders || [])[0] as any;
     if (o) {
       setPrevOrder({
@@ -568,10 +630,53 @@ export default function StoreVisitScreen({
     else setStepStack((s) => [...s, next as Step]);
   };
 
+  // Back never abandons silently. Steps hold typed data in state and the
+  // encrypted draft; photos live only in state until checkout, so leaving
+  // mid-visit with photos taken would drop them without a word.
   const goBack = () => {
-    if (stepStack.length > 1) setStepStack((s) => s.slice(0, -1));
-    else navigation.goBack();
+    if (stepStack.length > 1) {
+      setStepStack((s) => s.slice(0, -1));
+      return;
+    }
+    const unsavedPhotos = shopPhotoUris.length + (stockPhotoUri ? 1 : 0);
+    Alert.alert(
+      'Leave this visit?',
+      'You stay checked in here — resume from your dashboard, or check out when you leave.' +
+        (unsavedPhotos ? `\n\n${unsavedPhotos === 1 ? 'The photo' : `The ${unsavedPhotos} photos`} you took will be lost.` : ''),
+      [
+        { text: 'Stay', style: 'cancel' },
+        { text: 'Leave', style: 'destructive', onPress: () => navigation.goBack() },
+      ],
+    );
   };
+
+  /**
+   * Jump back to a step already visited. Only steps in the history are
+   * reachable, so nothing can be skipped forward, and going forward again
+   * walks the same steps with their state intact. Every step's data lives in
+   * component state and is written once, at checkout — editing a step
+   * OVERWRITES it, never appends. The two steps that write immediately are
+   * guarded: the prior-order step leaves the history once resolved (it can't
+   * be reopened), and a placed order shows as locked, not as a second form.
+   */
+  const jumpTo = (step: Step) => {
+    const at = stepStack.indexOf(step);
+    if (at < 0 || at === stepStack.length - 1) return;
+    Haptics.selectionAsync().catch(() => {});
+    setStepStack((s) => s.slice(0, at + 1));
+  };
+
+  // Android hardware back follows the same rule as the header arrow.
+  useFocusEffect(
+    React.useCallback(() => {
+      if (initializing || awaitingConfirm || cameraTarget) return undefined;
+      const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+        goBack();
+        return true;
+      });
+      return () => sub.remove();
+    }, [initializing, awaitingConfirm, cameraTarget, stepStack, shopPhotoUris, stockPhotoUri]),
+  );
 
   // ─── Camera ───
   const openCamera = (target: CameraTarget) => {
@@ -929,7 +1034,13 @@ export default function StoreVisitScreen({
     return (
       <View style={styles.centered}>
         <ActivityIndicator size="large" color={Colors.accent} />
-        <Text style={styles.initText}>Locking check-in…</Text>
+        <Text style={styles.initText}>
+          {initStage === 'checking'
+            ? 'Checking for an open visit…'
+            : initStage === 'saving'
+            ? 'Saving your check-in…'
+            : 'Loading products and stock…'}
+        </Text>
       </View>
     );
   }
@@ -961,23 +1072,46 @@ export default function StoreVisitScreen({
       {/* Progress indicator — chunking + goal-gradient; the one lime spotlight */}
       <View style={styles.progress}>
         <View style={styles.progressTrack}>
-          {STEP_ORDER.map((s, i) => (
-            <View
-              key={s}
-              style={[
-                styles.progressSeg,
-                {
-                  backgroundColor:
-                    i < idx ? Colors.accent : i === idx ? Colors.spotlight : Colors.border,
-                },
-              ]}
-            />
-          ))}
+          {STEP_ORDER.map((s, i) => {
+            // Done = visited and tappable. A past step never visited (skipped,
+            // or the resolved prior order) is faded and inert.
+            const done = i < idx && stepStack.includes(s);
+            return (
+              <Pressable
+                key={s}
+                onPress={() => jumpTo(s)}
+                disabled={!done}
+                // The bar is 5 px; the target is the full 44 px row.
+                style={styles.progressHit}
+                accessibilityRole="button"
+                accessibilityState={{ disabled: !done }}
+                accessibilityLabel={done ? `Go back to ${STEP_TITLES[s]}` : STEP_TITLES[s]}
+              >
+                {({ pressed }) => (
+                  <View
+                    style={[
+                      styles.progressSeg,
+                      {
+                        backgroundColor:
+                          i === idx ? Colors.spotlight : i < idx ? Colors.accent : Colors.border,
+                        // Skipped past step: same hue, faded — passed, not done.
+                        opacity: i < idx && !done ? 0.3 : 1,
+                      },
+                      pressed && { transform: [{ scaleY: 1.8 }] },
+                    ]}
+                  />
+                )}
+              </Pressable>
+            );
+          })}
         </View>
         <View style={styles.progressMeta}>
           <Text style={[Type.label, { color: Colors.text }]}>
             Step {idx + 1} of {STEP_ORDER.length} · {STEP_TITLES[current]}
           </Text>
+          {stepStack.length > 1 ? (
+            <Text style={[Type.caption, { color: Colors.textMuted }]}>Tap a green bar to go back</Text>
+          ) : null}
           <Text style={[Type.caption, tabularNums, { color: Colors.textMuted }]}>
             {checkInTime
               ? new Date(checkInTime).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
@@ -1535,8 +1669,11 @@ const styles = StyleSheet.create({
     borderBottomColor: Colors.border,
     gap: Space.sm,
   },
-  progressTrack: { flexDirection: 'row', gap: 4 },
-  progressSeg: { flex: 1, height: 5, borderRadius: Radius.pill },
+  // Hit rows grow into the container's own padding only — never past it into
+  // the header, where they would steal taps from the back arrow.
+  progressTrack: { flexDirection: 'row', gap: 4, marginVertical: -Space.md },
+  progressHit: { flex: 1, height: Layout.tap, justifyContent: 'center' },
+  progressSeg: { height: 5, borderRadius: Radius.pill },
   progressMeta: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   scroll: { flex: 1 },
   content: { padding: Layout.screenPad },
