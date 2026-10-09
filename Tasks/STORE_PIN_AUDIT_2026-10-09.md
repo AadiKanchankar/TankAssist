@@ -91,6 +91,14 @@ Rejected alternative: *"first check-in sets the pin"*. It lets the first rep pin
 wherever they are standing — including home — and then check in there forever. That is the
 bypass §3 exists to remove.
 
+## C. Pinned outside India (found 2026-10-09, after the first pass)
+
+A sweep of every store's pin against India's bounding box found one: a second **Gopichand' chowk**
+(`758246ee…`, created by Bhagwan, no visits/plans/orders) pinned at **0.1618, 67.0920** — in the
+Indian Ocean; its "address" is just those numbers. The visit-distance audit could not see it
+because nobody ever checked in there. Retire it with the duplicates. The proposed constraint
+rejects any active store pinned outside India, so this cannot recur.
+
 ## Not pin problems (do not "correct" these stores)
 
 Single bad **fixes** at otherwise well-pinned stores — the geofence will rightly refuse these:
