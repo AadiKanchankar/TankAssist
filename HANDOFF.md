@@ -73,6 +73,14 @@ company), "Total stores visited" / "Unique stores covered", store-wise sales tab
 batch imports the 1.4.0-only `expo-task-manager` path, so it goes to runtime 1.4.0 only. Any phone
 still on 1.3.0 must install APK `b564470a` (or later) first.
 
+**Builds (2026-10-09):** test APK **`d35abb88`** from `477f47c` (this batch baked in, channel
+`preview`) — **for the on-device rep pass only, never distributed**. Everyone else moves to
+**`b564470a`** (1.4.0 from `765f7af`, without this batch):
+`https://expo.dev/accounts/tankassist/projects/TankAssist-Codex/builds/b564470a-bcd8-4c09-9ec2-f8aa25a82ba8`.
+At 11:30 IST on 09-10 no field phone was on 1.4.0 (Bhagwan and Banty punched in, `rep_positions`
+empty). Rollout check: a `rep_positions` row appears within ~3 min of punch-in on 1.4.0 with
+"Allow all the time" granted.
+
 **Ship sequence — do not reorder:**
 1. **On-device REP pass on 1.4.0 with this bundle, BEFORE publishing** (a dev/preview build or a
    test-only channel): punch-in gate (My stores + Report greyed before check-in, open after; Report
