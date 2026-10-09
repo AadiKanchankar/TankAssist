@@ -42,6 +42,20 @@ export const PLAN_STATUS_LABEL: Record<PlanStatus, string> = {
 };
 
 /**
+ * A sales manager's plan is approved on creation (owner decision) and the
+ * database marks it by having no reviewer — every manager approval sets
+ * `reviewed_by`. Say "approved automatically" so nobody reads it as having
+ * been looked at.
+ */
+export function isAutoApproved(plan: Pick<JourneyPlan, 'status' | 'reviewed_by'>): boolean {
+  return plan.status === 'approved' && plan.reviewed_by == null;
+}
+
+export function planStatusLabel(plan: Pick<JourneyPlan, 'status' | 'reviewed_by'>): string {
+  return isAutoApproved(plan) ? 'Approved automatically' : PLAN_STATUS_LABEL[plan.status];
+}
+
+/**
  * The plan a visit belongs to is keyed by (rep, LOCAL calendar date) — the
  * `unique (rep_id, plan_date)` constraint makes that a natural key, so no FK
  * on store_visits is needed.
@@ -153,6 +167,14 @@ export interface VisitForFlags {
    * zero — the flag stays silent rather than accusing on missing input.
    */
   artifact_count?: number;
+  /**
+   * Role the visit was made in (`store_visits.actor_role`, frozen at insert).
+   * A sales manager may visit ANY store and plans are auto-approved, so for
+   * them there is no territory to be off: off-plan / no-plan are still
+   * computed (management may want to see an SM far from anything) but come
+   * back soft and labelled advisory. Every other flag applies unchanged.
+   */
+  actor_role?: string | null;
 }
 
 /**
@@ -298,9 +320,17 @@ export function flagsForVisit(
     }
   }
 
+  const advisory = visit.actor_role === 'sales_manager';
+
   // 7. Plan status. An APPROVED plan clears this — deliberately read live, so
   //    a manager approving at noon retroactively clears the morning's visits.
-  if (!plan) {
+  if (!plan && advisory) {
+    flags.push({
+      kind: 'plan_not_approved',
+      reason: 'Advisory — sales manager visit with no plan saved for the day. Sales managers may visit any store.',
+      soft: true,
+    });
+  } else if (!plan) {
     flags.push({ kind: 'plan_not_approved', reason: 'No journey plan was submitted for this day.' });
   } else if (plan.status === 'submitted') {
     flags.push({
@@ -320,13 +350,15 @@ export function flagsForVisit(
     const ambiguous = visit.check_in_time ? nearDateBoundary(visit.check_in_time) : false;
     flags.push({
       kind: 'off_plan',
-      reason: ambiguous
+      reason: advisory
+        ? 'Advisory — not on this sales manager’s plan for the day. Sales managers may visit any store, so this is not a territory breach.'
+        : ambiguous
         ? // The honest-rep false positive this whole design exists to avoid: a
           // late-night or early-morning visit resolves to the neighbouring day's
           // plan, so it reads as off-plan when it may simply be off-by-one.
           'Store is not on this day’s plan — but the visit is close to midnight, so it may belong to the neighbouring day’s plan. Worth confirming before treating it as off-plan.'
         : 'Store is not on the approved plan for this day.',
-      soft: ambiguous,
+      soft: ambiguous || advisory,
     });
   }
 

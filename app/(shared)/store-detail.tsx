@@ -37,10 +37,14 @@ export default function StoreDetailScreen({ route, navigation }: { route: any; n
   const { store: routeStore } = route.params as { store: Store };
   const { profile } = useAuthStore();
   const isManager = profile?.role !== 'rep';
+  // Field mode: a rep always; a sales manager when they reached this store
+  // from their own My day (route param), where it is a store they may visit —
+  // from the Stores tab it stays the manager's view (edit / delete).
+  const fieldMode = !isManager || route.params?.field === true;
   const reduce = useReducedMotion();
   const insets = useSafeAreaInsets();
 
-  const { data, refetch, isPending } = useStoreDetail(routeStore, isManager, profile?.id);
+  const { data, refetch, isPending } = useStoreDetail(routeStore, fieldMode, profile?.id);
   const store = data?.store ?? routeStore;
   const visits = data?.visits ?? [];
   const stock = data?.stock ?? [];
@@ -206,8 +210,8 @@ export default function StoreDetailScreen({ route, navigation }: { route: any; n
             </MotiView>
           )}
 
-          {/* Rep actions — Check-in is the rep's one spotlight */}
-          {!isManager && (
+          {/* Field actions — Check-in is the visitor's one spotlight */}
+          {fieldMode && (
             <MotiView {...entrance(s++, reduce)} style={{ gap: Space.md }}>
               {store.latitude != null && store.longitude != null && (
                 <Button title="Navigate to store" onPress={navigateToStore} variant="secondary" />
@@ -288,8 +292,8 @@ export default function StoreDetailScreen({ route, navigation }: { route: any; n
             )}
           </MotiView>
 
-          {/* Manager actions */}
-          {isManager && (
+          {/* Manager actions — not while visiting as a field user */}
+          {isManager && !fieldMode && (
             <MotiView {...entrance(s++, reduce)} style={styles.managerActions}>
               <Button
                 title="Edit store"

@@ -31,6 +31,7 @@ import { useAuthStore } from '../../store/useAuthStore';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
 import { OrderFilter } from '../../lib/orders';
 import { monthName } from '../../lib/reportExport';
+import { managerShareNote } from '../../lib/reportSemantics';
 import { useManagementDashboard } from '../../hooks/useManagementDashboard';
 import { useCasesTrend, TREND_RANGES, TrendRange } from '../../hooks/useCasesTrend';
 import { useInventoryAnalytics, fmtQty } from '../../hooks/useInventoryAnalytics';
@@ -73,10 +74,12 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
     delivered: 0,
     cancelled: 0,
   };
-  const casesThisMonth = data?.casesThisMonth ?? 0;
+  // Team figures include sales managers' own field work; the share is always shown.
+  const casesFig = data?.casesThisMonth ?? { total: 0, managerOwn: 0 };
+  const casesThisMonth = casesFig.total;
   const casesLastMonth = data?.casesLastMonth ?? 0;
-  const repsCheckedIn = data?.repsCheckedIn ?? 0;
-  const visitsToday = data?.visitsToday ?? 0;
+  const checkedInToday = data?.checkedInToday ?? { total: 0, managerOwn: 0 };
+  const visitsToday = data?.visitsToday ?? { total: 0, managerOwn: 0 };
   const attention = data?.attention ?? [];
   const topStores = data?.topStores ?? [];
   const monthTitle = data?.monthTitle ?? monthName(new Date());
@@ -281,6 +284,9 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
                 {Math.abs(delta)} vs {casesLastMonth} last month
               </Text>
             </View>
+            <Text style={[Type.caption, styles.onDarkMuted, { marginTop: Space.xs }]}>
+              {managerShareNote(casesFig, 'management')}
+            </Text>
           </BentoTile>
         </MotiView>
 
@@ -384,15 +390,21 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
         {/* Today's field activity */}
         <MotiView {...entrance(section++, reduce)} style={styles.bentoRow}>
           <BentoTile style={styles.flex}>
-            <Text style={[Type.label, { color: Colors.textMuted }]}>Reps checked in</Text>
+            <Text style={[Type.label, { color: Colors.textMuted }]}>Checked in</Text>
             <Text style={[Type.metric, tabularNums, { color: Colors.success, marginTop: 2 }]}>
-              {repsCheckedIn}
+              {checkedInToday.total}
+            </Text>
+            <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]}>
+              {managerShareNote(checkedInToday, 'management', true)}
             </Text>
           </BentoTile>
           <BentoTile style={styles.flex}>
-            <Text style={[Type.label, { color: Colors.textMuted }]}>Visits today</Text>
+            <Text style={[Type.label, { color: Colors.textMuted }]}>Total visits today</Text>
             <Text style={[Type.metric, tabularNums, { color: Colors.text, marginTop: 2 }]}>
-              {visitsToday}
+              {visitsToday.total}
+            </Text>
+            <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]}>
+              {managerShareNote(visitsToday, 'management')}
             </Text>
           </BentoTile>
         </MotiView>

@@ -26,6 +26,8 @@ import { supabase } from '../../lib/supabase';
 import { usePullToRefresh } from '../../hooks/usePullToRefresh';
 import { useManagerDashboard, RepSummary } from '../../hooks/useManagerDashboard';
 import { OrderFilter } from '../../lib/orders';
+import { casesSold, managerShareNote } from '../../lib/reportSemantics';
+import { toDateStr, addDays } from '../../lib/reportExport';
 
 interface RepVisit {
   id: string;
@@ -48,11 +50,14 @@ export default function AdminDashboard({ navigation }: { navigation: any }) {
   const reduce = useReducedMotion();
   const insets = useSafeAreaInsets();
   const { profile } = useAuthStore();
-  const { data, refetch, isPending, isError } = useManagerDashboard();
-  const presentCount = data?.presentCount ?? 0;
-  const absentCount = data?.absentCount ?? 0;
-  const totalAssigned = data?.totalAssigned ?? 0;
-  const totalVisited = data?.totalVisited ?? 0;
+  const { data, refetch, isPending, isError } = useManagerDashboard(profile?.id);
+  // The team = your reps + you (owner decision: team totals include the
+  // manager's own field work, and always say how much of it was yours).
+  const teamSize = (data?.repsTotal ?? 0) + 1;
+  const teamPresent = (data?.repsPresent ?? 0) + (data?.meCheckedIn ? 1 : 0);
+  const visits = data?.visits ?? { total: 0, managerOwn: 0 };
+  const stores = data?.stores ?? { total: 0, managerOwn: 0 };
+  const coveragePct = data?.coveragePct ?? 0;
   const reps = data?.reps ?? [];
   const pipeline = data?.pipeline;
 
@@ -70,15 +75,21 @@ export default function AdminDashboard({ navigation }: { navigation: any }) {
 
   const { refreshing, onRefresh } = usePullToRefresh(refetch);
 
-  // Drill-down: a rep's visits today (unchanged logic).
+  // Drill-down: a rep's visits today. Per-visit cases come from casesSold's
+  // byVisit — the stepper stopped writing store_visits.cases_sold at the
+  // orders cutover, so reading it raw printed "0 cases" on every visit.
   const loadRepVisits = async (repId: string) => {
-    const { data } = await supabase
-      .from('store_visits')
-      .select('id, check_in_time, check_out_time, cases_sold, duration_minutes, stores(name)')
-      .eq('user_id', repId)
-      .gte('check_in_time', `${today}T00:00:00`)
-      .lt('check_in_time', `${today}T23:59:59`)
-      .order('check_in_time', { ascending: true });
+    const tomorrow = toDateStr(addDays(new Date(`${today}T00:00:00`), 1));
+    const [{ data }, cases] = await Promise.all([
+      supabase
+        .from('store_visits')
+        .select('id, check_in_time, check_out_time, duration_minutes, stores(name)')
+        .eq('user_id', repId)
+        .gte('check_in_time', `${today}T00:00:00`)
+        .lt('check_in_time', `${today}T23:59:59`)
+        .order('check_in_time', { ascending: true }),
+      casesSold(today, tomorrow, { userId: repId }),
+    ]);
 
     setRepVisits(
       (data || []).map((v: any) => ({
@@ -86,7 +97,7 @@ export default function AdminDashboard({ navigation }: { navigation: any }) {
         store_name: v.stores?.name || 'Unknown',
         check_in_time: v.check_in_time,
         check_out_time: v.check_out_time,
-        cases_sold: v.cases_sold,
+        cases_sold: cases.byVisit[v.id] ?? 0,
         duration_minutes: v.duration_minutes,
       }))
     );
@@ -105,9 +116,7 @@ export default function AdminDashboard({ navigation }: { navigation: any }) {
     day: 'numeric',
   });
 
-  const totalReps = presentCount + absentCount;
-  const lowCoverage = totalReps > 0 && presentCount / totalReps < 0.5;
-  const coveragePct = totalAssigned > 0 ? Math.round((totalVisited / totalAssigned) * 100) : 0;
+  const lowCoverage = teamPresent / teamSize < 0.5;
   const goToOrders = (filter: OrderFilter) =>
     navigation.navigate('Orders', { screen: 'OrdersList', params: { filter } });
 
@@ -156,7 +165,7 @@ export default function AdminDashboard({ navigation }: { navigation: any }) {
         {/* Hero — reps checked in (spotlight when under half) */}
         <MotiView {...entrance(section++, reduce)}>
           <BentoTile variant="dark" style={{ marginTop: Space.md }}>
-            <Text style={[Type.label, styles.onDarkMuted]}>Reps checked in today</Text>
+            <Text style={[Type.label, styles.onDarkMuted]}>Team checked in today</Text>
             <View style={styles.heroRatioRow}>
               <Text
                 style={[
@@ -165,26 +174,32 @@ export default function AdminDashboard({ navigation }: { navigation: any }) {
                   { color: lowCoverage ? Colors.spotlight : Colors.textOnDark },
                 ]}
               >
-                {presentCount}
+                {teamPresent}
               </Text>
               <Text style={[Type.section, styles.onDarkMuted, { marginBottom: 2 }]}>
                 {' '}
-                / {totalReps}
+                / {teamSize}
               </Text>
             </View>
             <Text style={[Type.body, styles.onDarkMuted]}>
-              {absentCount} not checked in
+              {data?.repsPresent ?? 0} of {data?.repsTotal ?? 0} reps ·{' '}
+              {data?.meCheckedIn ? (data.mePunchedOut ? 'you’ve ended your day' : 'you’re checked in') : 'you haven’t checked in'}
             </Text>
           </BentoTile>
         </MotiView>
 
-        {/* Bento row: visits today · coverage */}
+        {/* Team figures — each says how much of it was your own field work. */}
         <MotiView {...entrance(section++, reduce)} style={styles.bentoRow}>
           <BentoTile style={styles.flex}>
-            <Metric label="Visits today" value={totalVisited} />
+            <Metric label="Total visits today" value={visits.total} note={managerShareNote(visits, 'self')} />
           </BentoTile>
           <BentoTile style={styles.flex}>
-            <Metric label="Store coverage" value={`${coveragePct}%`} />
+            <Metric label="Unique stores covered" value={stores.total} note={managerShareNote(stores, 'self')} />
+          </BentoTile>
+        </MotiView>
+        <MotiView {...entrance(section++, reduce)} style={styles.bentoRow}>
+          <BentoTile style={styles.flex}>
+            <Metric label="Assigned stores visited" value={`${coveragePct}%`} note="Your reps’ assignments today" />
           </BentoTile>
         </MotiView>
 
@@ -224,7 +239,7 @@ export default function AdminDashboard({ navigation }: { navigation: any }) {
 
         {/* Team today */}
         <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
-          <Text style={[Type.section, styles.sectionTitle]}>Your team today</Text>
+          <Text style={[Type.section, styles.sectionTitle]}>Your reps today</Text>
           <BentoTile>
             {reps.length === 0 ? (
               <Text style={[Type.body, { color: Colors.textMuted }]}>No reps yet.</Text>

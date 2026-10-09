@@ -177,9 +177,11 @@ export default function RepReportSection({ rep }: { rep: RepParam }) {
               <StatTile label="Route (GPS)" {...route} onPress={() => open('route')} />
               <StatTile label="Odometer" {...odo} onPress={() => open('odometer')} />
               <StatTile label="Cases sold" value={String(data.cases.total)} onPress={() => open('cases')} />
+              {/* Every visit, repeats included — the same list its drill-down
+                  shows, so the tile and the page it opens always agree. */}
               <StatTile
-                label="Stores visited"
-                value={String(visits.filter((v) => v.check_out_time).length)}
+                label="Total stores visited"
+                value={String(visits.length)}
                 onPress={() => open('visits')}
               />
               <StatTile label="Market time" {...market} wide />

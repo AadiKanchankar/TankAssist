@@ -188,6 +188,27 @@ assert.equal(planDateFor(new Date(2026, 0, 9, 23, 30)), '2026-01-09', 'zero-padd
   assert.equal(none[0].kind, 'plan_not_approved');
 }
 
+// ── sales manager visits: off-plan / no-plan are ADVISORY, the rest is not ──
+{
+  const sm = (o: Partial<VisitForFlags> = {}) => visit({ actor_role: 'sales_manager', ...o });
+  const off = flagsForVisit(sm({ store_id: 's9' }), plan({ reviewed_by: null }), null, haversineKm);
+  assert.equal(off[0].kind, 'off_plan', 'still computed for management');
+  assert.equal(off[0].soft, true, 'SM off-plan is advisory');
+  assert.match(off[0].reason, /^Advisory/);
+  assert.doesNotMatch(off[0].reason, /not on the approved plan for this day/, 'not worded like a rep breach');
+
+  const none = flagsForVisit(sm(), null, null, haversineKm);
+  assert.equal(none[0].kind, 'plan_not_approved');
+  assert.equal(none[0].soft, true, 'no plan is advisory for an SM');
+
+  // Anti-cheat proper applies to SMs exactly as to reps.
+  const far = flagsForVisit(sm({ distance_from_store_meters: 900, is_mock_location: true }), plan(), null, haversineKm);
+  assert.deepEqual(far.map((f) => [f.kind, f.soft ?? false]), [['mock_location', false], ['far_from_store', false]]);
+
+  // A rep visit is untouched by the SM branch.
+  assert.notEqual(flagsForVisit(visit({ store_id: 's9' }), plan(), null, haversineKm)[0].soft, true);
+}
+
 // ── mock location: only `true` is evidence ────────────────────────────────
 {
   assert.equal(flagsForVisit(visit({ is_mock_location: null }), plan(), null, haversineKm).length, 0,

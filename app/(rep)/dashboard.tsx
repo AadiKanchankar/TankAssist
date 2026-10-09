@@ -56,10 +56,8 @@ import AddStoreModal from '../../components/AddStoreModal';
 import WarningBanner from '../../components/WarningBanner';
 import OdometerCapture, { OdometerResult } from '../../components/OdometerCapture';
 import { uploadOdometerPhoto } from '../../lib/storage';
-import {
-  planDateFor,
-  PLAN_STATUS_LABEL,
-} from '../../lib/journeyPlan';
+import { planDateFor, planStatusLabel } from '../../lib/journeyPlan';
+import { useCheckInGate } from '../../hooks/useCheckInGate';
 import { userMessage } from '../../lib/userError';
 
 interface StoreSearchResult {
@@ -76,6 +74,12 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
   const reduce = useReducedMotion();
   const insets = useSafeAreaInsets();
   const { profile } = useAuthStore();
+  // A sales manager uses this same screen as their "My day" (App.tsx). Their
+  // differences: no assigned stores (any store in the system), an
+  // auto-approved plan, and Plan my day waits for check-in like the rest of
+  // their field work (owner decision — reps may plan before punching in).
+  const isSM = profile?.role === 'sales_manager';
+  const { guard } = useCheckInGate();
   const { data, refetch, isPending, isError } = useRepDashboard(profile?.id);
   const { data: plan, refetch: refetchPlan } = useMyPlan(profile?.id, planDateFor());
   const { data: openVisit, refetch: refetchOpenVisit } = useOpenVisit(profile?.id);
@@ -130,6 +134,8 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
 
   const isCheckedIn = !!attendance?.check_in_time;
   const isPunchedOut = !!attendance?.check_out_time;
+  const goPlan = () => navigation.navigate('JourneyPlan');
+  const openPlan = isSM ? guard(goPlan, 'Plan my day') : goPlan;
 
   const getStoreStatus = (storeId: string) => {
     const visit = visits.find((v) => v.store_id === storeId);
@@ -390,7 +396,7 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
         <View style={styles.greetRow}>
           <View style={{ flex: 1 }}>
             <Text style={[Type.title, { color: Colors.text }]}>
-              {getGreeting()}, {profile?.name || 'Rep'}
+              {getGreeting()}, {profile?.name || 'there'}
             </Text>
             <Text style={[Type.body, { color: Colors.textSecondary, marginTop: 2 }]}>
               {formattedDate}
@@ -620,7 +626,7 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
           <View style={styles.sectionHeader}>
             <Text style={[Type.section, { color: Colors.text }]}>Today’s plan</Text>
             <Pressable
-              onPress={() => navigation.navigate('JourneyPlan')}
+              onPress={openPlan}
               hitSlop={8}
               accessibilityRole="button"
               accessibilityLabel={plan ? 'Open your journey plan' : 'Plan your day'}
@@ -635,12 +641,18 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
             <BentoTile>
               <EmptyState
                 icon="map-outline"
-                title="No plan sent yet"
-                message="Pick the stores you’ll visit today and send it to your manager."
+                title={isSM ? 'No plan yet' : 'No plan sent yet'}
+                message={
+                  isSM
+                    ? isCheckedIn
+                      ? 'Pick the stores you’ll visit today. Your plan is approved as soon as you save it.'
+                      : 'Check in for the day to plan your stores.'
+                    : 'Pick the stores you’ll visit today and send it to your manager.'
+                }
               />
               <Button
                 title="Plan my day"
-                onPress={() => navigation.navigate('JourneyPlan')}
+                onPress={openPlan}
                 style={{ marginTop: Space.sm }}
               />
             </BentoTile>
@@ -670,7 +682,7 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
                   }
                 />
                 <Text style={[Type.bodyMed, { color: Colors.text, flex: 1 }]}>
-                  {PLAN_STATUS_LABEL[plan.status]}
+                  {planStatusLabel(plan)}
                 </Text>
                 <Text style={[Type.caption, { color: Colors.textMuted }]}>
                   {plan.store_ids.length} store{plan.store_ids.length === 1 ? '' : 's'}
@@ -714,7 +726,31 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
           )}
         </MotiView>
 
-        {/* Your stores preview */}
+        {/* A sales manager has no assigned stores — any store in the system is
+            theirs to visit — so the preview becomes a door to the full list. */}
+        {isSM ? (
+          <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
+            <BentoTile>
+              <View style={styles.resumeHead}>
+                <Ionicons name="storefront-outline" size={20} color={Colors.accent} />
+                <View style={{ flex: 1 }}>
+                  <Text style={[Type.bodyMed, { color: Colors.text }]}>Stores</Text>
+                  <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]}>
+                    {isCheckedIn
+                      ? 'Visit any store — search above, or browse the full list.'
+                      : 'Check in for the day to visit stores.'}
+                  </Text>
+                </View>
+              </View>
+              <Button
+                title="Browse stores"
+                variant="secondary"
+                onPress={guard(() => navigation.navigate('MyStores'), 'your stores')}
+                style={{ marginTop: Space.md }}
+              />
+            </BentoTile>
+          </MotiView>
+        ) : (
         <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
           <View style={styles.sectionHeader}>
             <Text style={[Type.section, { color: Colors.text }]}>Your stores</Text>
@@ -776,9 +812,14 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
           )}
         </MotiView>
 
+        )}
+
         {/* Daily report status */}
         <MotiView {...entrance(section++, reduce)}>
-          <BentoTile>
+          <BentoTile
+            onPress={isSM ? guard(() => navigation.navigate('Report'), 'your report') : undefined}
+            accessibilityLabel={isSM ? `My daily report: ${reportSubmitted ? 'submitted' : 'pending'}. Open` : undefined}
+          >
             <Text style={[Type.label, { color: Colors.textMuted }]}>Daily report</Text>
             <View style={[styles.statusRow, { marginTop: Space.sm }]}>
               <View
@@ -787,12 +828,35 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
                   { backgroundColor: reportSubmitted ? Colors.success : Colors.borderStrong },
                 ]}
               />
-              <Text style={[Type.bodyMed, { color: Colors.text }]}>
+              <Text style={[Type.bodyMed, { color: Colors.text, flex: 1 }]}>
                 {reportSubmitted ? 'Submitted' : 'Pending'}
               </Text>
+              {isSM ? <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} /> : null}
             </View>
           </BentoTile>
         </MotiView>
+
+        {/* The SM's own month — visits, odometer + route, cases, PDF. Named
+            "My field report" so it can't be mistaken for the team's report. */}
+        {isSM ? (
+          <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
+            <BentoTile
+              onPress={guard(() => navigation.navigate('MyReport'), 'your field report')}
+              accessibilityLabel="Open my field report"
+            >
+              <View style={styles.statusRow}>
+                <Ionicons name="bar-chart-outline" size={20} color={Colors.accent} />
+                <View style={{ flex: 1 }}>
+                  <Text style={[Type.bodyMed, { color: Colors.text }]}>My field report</Text>
+                  <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 2 }]}>
+                    Your own visits, travel and cases — not your team’s
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
+              </View>
+            </BentoTile>
+          </MotiView>
+        ) : null}
       </ScrollView>
 
       {/* Closing odometer, then the punch-out itself. startOfDay enables the

@@ -2,7 +2,7 @@
 
 Session-state snapshot for the next Claude Code session. **Temporal** — records what is live, pending, and out of scope as of the date below. Durable architecture facts live in `CLAUDE.md`; plain-language status for the user is `PROJECT_STATUS.md`.
 
-- **Snapshot date:** 2026-10-06 (this batch) / 2026-10-01 (builds/OTAs as of 2026-09-24 reconciled against `eas build:list` / `eas update:list`, data against the live DB via MCP — not against the previous copy of this file)
+- **Snapshot date:** 2026-10-09 (SM field role — DB side live, app side in progress) / 2026-10-06 / 2026-10-01 (builds/OTAs as of 2026-09-24 reconciled against `eas build:list` / `eas update:list`, data against the live DB via MCP — not against the previous copy of this file)
 - **Supabase project:** `ldgunrxceogfrohjrlxz` (live MCP access; verify before assuming)
 - **Repo:** `github.com/AadiKanchankar/TankAssist`. ⚠️ **Until 2026-09-23 `master` was 17 commits stale** (stuck at `9964b90`, the 1.1.0 build) while all work since 19 Aug lived on `feat/timeinstore-challan-review-push`. Both were fast-forwarded to `7d2085a` that day. **Before trusting any branch, check it against the newest EAS build's commit** — a stale branch plus a stale HANDOFF is how a whole session once got built on the wrong base.
 - **Type state:** `npx tsc --noEmit` clean. `*.test.ts` files pass (`npx tsx <file>`). `expo-doctor` **18/18** after `npx expo install --fix` cleared patch drift on `expo`, `expo-file-system`, `expo-location`, `expo-sharing`, `expo-updates`.
@@ -11,6 +11,87 @@ Session-state snapshot for the next Claude Code session. **Temporal** — record
 ---
 
 ## What is actually live right now
+
+### 2026-10-09 — sales managers as field users: DATABASE SIDE LIVE (app side §1b not shipped yet)
+
+> ## ⛔ HARD ORDERING CONSTRAINT — no `sales_manager` account may exist until §1b has shipped
+> Not a note: a precondition, like the TA backfill ordering. Since `sm_field_role_rls`, stock
+> counts recorded by a sales manager are **hidden from reps and other SMs at the row level** and
+> are shared only through `store_current_stock()`. Installed apps (1.3.0 / 1.4.0) still read the
+> table directly, so the moment an SM records stock, every rep's prefill and Store Detail would show
+> the **previous rep count with no error** — silently stale, which is worse than broken. Today
+> there are **0 sales_manager rows** (verified 2026-10-09), so it is harmless *only while that stays
+> true*. Do not create an SM (Team → Add User, or a tester `switch_tester_role('sales_manager')`)
+> until the §1b OTA that reads `store_current_stock` is live on every installed phone. Check
+> before creating one: `select count(*) from users where role = 'sales_manager'` must be 0 until then.
+> `switch_tester_role` rewrites `users.role` in the database, so a tester switching to SM counts too.
+
+**Migrations (owner-approved):**
+- **`sm_field_role_rls`** — applied 11:3x IST with a guard that aborts if any visit is open (0 were;
+  one rep had an open *day*, between stores). (A) photo/snapshot/order/challan rows can only attach
+  to the **writer's own visit** — closed a live gap where anyone could hang rows on another person's
+  visit; (B) SM plans: own, **auto-approved on insert** (`status='approved'`, `reviewed_by` and
+  `reviewed_at` NULL = the auto-approval marker), **today or later only** (no backdating), re-route
+  own auto-approved plan for today/future; (C) peer-SM isolation: `store_visit_photos` and
+  `daily_reports` reads now `management or manages_rep`, `rep_positions` SM→reps only, snapshots
+  split (SM-recorded rows: self + management; everything else unchanged), storage odometer/challan
+  /visit-photos: files uploaded by an SM readable only by that SM + management (delivered photos and
+  product images stay shared); new definer helpers `is_sales_manager(uuid)` and
+  `store_current_stock(store_id)`; (D) management may view an SM's live location; (E)
+  `update_order_status`: an SM **checked in at the store** verifies delivery like a rep; (F) **all 52
+  `TRUNCATE` grants to anon/authenticated revoked** + the `postgres` default privilege that re-granted
+  it on every new table (TRUNCATE bypasses RLS). Supersedes security-audit items M2 (reports/photos
+  part) and the TRUNCATE "Low" item.
+- **`field_actor_role`** — `actor_role` on `attendance`, `store_visits`, `orders`, `journey_plans`:
+  stamped by `trg_stamp_actor_role` from `get_my_role()` at insert (client value ignored), immutable
+  after; backfilled `'rep'` for every existing row (all were written in rep mode — admin tabs have no
+  field writes and no SM ever existed). Column comments on the four `rep_id` columns say they mean
+  "the field user".
+
+**Verification (all rolled back, live data unchanged — fingerprinted before/after):** 104-check
+impersonation suite with temporary SMs — **104/104 pass** after apply (71/100 before: the failures
+were the gaps above, confirmed live); full rep flow on **Banty Pal** and **Pranoy** (punch in → check
+in → photo upload + read-back → stock → order with server-set price → check out → punch out) **pass**;
+`actor_role` 10/10 (client value ignored, rewrite refused, sweep keeps it, backfill all `rep`).
+
+**Accepted residual (owner, 2026-10-09):** `store_current_stock()` returns the **day** a store's
+stock was last counted even when `recorded_by` is hidden, so a peer SM can see "someone counted this
+store on 9 Oct". Without attribution it is not reconstructable to a person. Known and accepted —
+do not "rediscover" it.
+
+**Later option, not scheduled:** rename `rep_id` → a neutral name in two phases (add new column +
+sync trigger → move clients → drop old). A one-step rename 400s every deployed 1.3.0/1.4.0 client.
+
+**App side (§1b–§2) — COMMITTED, OTA NOT PUBLISHED (owner hold, 2026-10-09, a Friday).** JS-only.
+SM "My day" tab + shared check-in gate (`hooks/useCheckInGate.ts`), SM auto-approved plans, advisory
+SM flags, `store_current_stock` for prefill + Store Detail, team figures with the manager's share
+(`lib/teamFigures.ts`), SM dashboard team scoped to the SM's own reps (it listed every rep in the
+company), "Total stores visited" / "Unique stores covered", store-wise sales table in the PDF.
+`tsc` clean, all `*.test.ts` pass, PDF previewed in headless Chrome.
+
+**Runtime decision (owner): everyone moves to the 1.4.0 APK; no 1.3.0 branch is maintained.** This
+batch imports the 1.4.0-only `expo-task-manager` path, so it goes to runtime 1.4.0 only. Any phone
+still on 1.3.0 must install APK `b564470a` (or later) first.
+
+**Ship sequence — do not reorder:**
+1. **On-device REP pass on 1.4.0 with this bundle, BEFORE publishing** (a dev/preview build or a
+   test-only channel): punch-in gate (My stores + Report greyed before check-in, open after; Report
+   still open after punch-out); check-in at a store → stock prefill shows the last counts (now via
+   `store_current_stock`) incl. a blank godown staying blank; Store Detail "Current stock" + recorder
+   name; daily report shows "Total stores visited" counting every visit; manager → rep → Report tile
+   "Total stores visited" equals its drill-down; generate a PDF → "Total stores visited" + "Unique
+   stores covered" tiles, Store-wise sales table on page 2 summing to Cases sold. Also the SM
+   dashboard as management/tester-SM is NOT part of this pass (no SM may exist yet).
+2. Publish the OTA to runtime 1.4.0 (`npx expo export … --max-workers 2` then `eas update --skip-bundler`, see Builds).
+3. Confirm every phone runs it (no 1.3.0 left).
+4. Only then create the first `sales_manager`, and run the SM paths + the two REQUIRED checks
+   (Pending on-device tests 17 Realtime, 18 signed URLs).
+
+**§3 (120 m hard geofence) is BLOCKED** on store data — see `Tasks/STORE_PIN_AUDIT_2026-10-09.md`:
+15 stores whose every check-in is > 120 m from the pin (46 of the 53 over-120 m check-ins), 30 stores
+with no coordinates (26 never visited, mostly duplicates), and `AddStoreModal` still saves a store
+with null coordinates when GPS hasn't resolved. Owner approved blocking check-in on Android-detected
+mock location *for this gate only*; never deny on poor accuracy; no override button.
 
 ### 2026-10-06b — live location rollout (APK 1.4.0, rebuilt from `master`)
 - The first 1.4.0 build (`b430f35c`, 2026-10-03) **errored in Install dependencies** — nobody ever had it. Cause: local npm 11 pruned three nested `@types/*` lockfile entries that EAS's npm 10 `npm ci` requires (see CLAUDE.md Builds). Lockfile regenerated with npm 10; `expo install --fix` cleared patch drift (`expo`, `expo-constants`, `expo-location`, `expo-notifications`, `expo-updates`). `expo-doctor`: only the SDK 56 Hermes V1 memory-regression warning remains (fix = SDK 57 upgrade, not done).
@@ -274,6 +355,8 @@ Everything below is installed and OTA-current on the `ef195f8` build; none of it
 8. **Live location** — any sales manager / management asks for any active rep (incl. unassigned Bhagwan) → checked-in rep answers; 18 s timeout falls back to last known; a checked-out rep never responds.
 15. **Error text** — trigger a previously-leaking error (e.g. resolve a flag on your own row via an old build, or any denied action) → a plain sentence or `(TA-XXXX)`, never a table/policy name.
 16. **Report PDF** — export a heavy month: page 1 is one page, both charts show their legend, a no-punch-out day is a dashed `n/a` (never 0), Route km and Odo km both present, visit log grouped by day.
+17. **REQUIRED before SM go-live (owner, 2026-10-09) — Realtime RLS on `journey_plans`.** With two real SM accounts (after §1b ships): SM A creates a plan while SM B sits on Team / the review queue. SM B must receive **no** change event (no list update, no badge). `journey_plans` is in `supabase_realtime`; if RLS were not applied to change events, a peer SM would be pushed another SM's plan silently. Also confirm management *does* see it live. Report the result — this is not to be carried as "documented behaviour".
+18. **REQUIRED before SM go-live — storage signed URLs honour the new policies.** As SM B, request a signed URL (Storage API, i.e. through the app) for an SM A selfie / store photo / odometer / challan path: must be refused. As management: allowed. As a rep: SM A's delivered photo allowed, selfie refused. The policies were tested in SQL against `storage.objects`; the HTTP signing path must be checked on the real accounts.
 9. **Excise** — upload PDF → parse → review → allocate → approve → ledger row; duplicate upload routes to the existing permit; "View original document" opens (this was the `lib/storage.ts` bucket bug).
 10. **Tester switch** — flip rep/sales_manager/management, land on the right dashboard, badge persists, full write rights in each role.
 11. **Stock buckets** — floor/display/godown captured; a blank godown stays blank on the next visit's prefill (must NOT come back as 0); total rolls loose bottles into cases; StoreDetail shows chips, and the 6 legacy rows show "Breakdown not recorded".
@@ -307,7 +390,7 @@ Everything below is installed and OTA-current on the `ef195f8` build; none of it
 ## Deferred / out of scope (do not start without a go-ahead)
 - **Instant-kill deactivation via a service-role Edge Function** — deliberately not built; keeps the anon-key-only architecture. Soft-ban + short JWT TTL is the mechanism. New-secret STOP POINT.
 - **`get_user_names(ids[])` RPC** — would let reps see teammate names on "last recorded by". Not built.
-- **Geo-fence enforcement** — no schema/logic. Contract if taken up: flag + reason, never block; no network in the fence check; reuse `distance_from_store_meters`; start at audit → schema STOP POINT.
+- ~~Geo-fence enforcement (flag, never block)~~ — **superseded 2026-10-09**: owner decided a hard 120 m check-in lock (§3 of the SM/geofence batch), blocked on the store-pin cleanup above.
 - **Offline queue + Python batch-sync backend** — not started.
 - **Redis / any non-Supabase infra** — explicitly ruled out; staying Supabase-anon-key-only.
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, View, StyleSheet, AppState, Alert } from 'react-native';
+import { ActivityIndicator, View, StyleSheet, AppState } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -40,13 +40,13 @@ import ProfileScreen from './app/(shared)/profile';
 import StoreDetailScreen from './app/(shared)/store-detail';
 import OrderDetailScreen from './app/(shared)/order-detail';
 import TesterBadge from './components/TesterBadge';
-import { startDutyTracking, stopDutyTracking } from './lib/dutyLocation';
 import JourneyPlanScreen from './app/(rep)/journey-plan';
 import ChallanScreen from './app/(rep)/challan';
 import ExceptionsScreen from './app/(admin)/exceptions';
 import ReportDrilldownScreen from './app/(admin)/report-drilldown';
 import ErrorBoundary from './components/ErrorBoundary';
-import { useRepDashboard } from './hooks/useRepDashboard';
+import { useCheckInGate, useDutyTracking } from './hooks/useCheckInGate';
+import MyReportScreen from './app/(rep)/my-report';
 
 const Stack = createNativeStackNavigator();
 const RepTab = createBottomTabNavigator();
@@ -75,6 +75,27 @@ function RepStoresStack() {
       <StoresStack.Screen name="StoreDetail" component={StoreDetailScreen} />
       <StoresStack.Screen name="StoreVisit" component={StoreVisitScreen} />
     </StoresStack.Navigator>
+  );
+}
+
+// Sales manager: My day — the rep's field surfaces, for their own day. Screen
+// names match the rep tabs ('MyStores', 'Report') so the shared rep screens
+// navigate the same way in either tree.
+const MyDayStackNav = createNativeStackNavigator();
+function SalesManagerMyDayStack() {
+  return (
+    <MyDayStackNav.Navigator screenOptions={{ headerShown: false }}>
+      <MyDayStackNav.Screen name="DashboardHome" component={RepDashboard} />
+      <MyDayStackNav.Screen name="Attendance" component={AttendanceScreen} />
+      <MyDayStackNav.Screen name="StoreVisit" component={StoreVisitScreen} />
+      <MyDayStackNav.Screen name="JourneyPlan" component={JourneyPlanScreen} />
+      <MyDayStackNav.Screen name="Challan" component={ChallanScreen} />
+      <MyDayStackNav.Screen name="MyStores" component={RepStoresScreen} />
+      <MyDayStackNav.Screen name="StoreDetail" component={StoreDetailScreen} />
+      <MyDayStackNav.Screen name="Report" component={ReportScreen} initialParams={{ stacked: true }} />
+      <MyDayStackNav.Screen name="MyReport" component={MyReportScreen} />
+      <MyDayStackNav.Screen name="ReportDrilldown" component={ReportDrilldownScreen} />
+    </MyDayStackNav.Navigator>
   );
 }
 
@@ -150,15 +171,9 @@ const getTabScreenOptions = (bottomInset: number) => ({
 // Rep bottom tabs
 function RepTabs() {
   const insets = useSafeAreaInsets();
-  const { profile } = useAuthStore();
-  // Same cached query the dashboard shows — no extra request. Stores and
-  // Report stay shut until today's check-in exists; Report reopens-and-stays
-  // after punch-out, which is when reps submit it. Nothing is locked while the
-  // first load is still in flight: a wrongful lockout is worse than a moment
-  // of access. ponytail: this greying is UX, NOT security — the database
-  // refuses a store visit without an open day (trg_store_visit_requires_checkin).
-  const { data: dash } = useRepDashboard(profile?.id);
-  const locked = dash !== undefined && !dash.attendance?.check_in_time;
+  // Stores and Report stay shut until today's check-in exists — the shared
+  // field gate (hooks/useCheckInGate), the same one a sales manager's My day uses.
+  const { locked, onDuty, explain } = useCheckInGate();
   const lockedTab = {
     tabBarItemStyle: locked ? { opacity: 0.35 } : undefined,
     tabBarAccessibilityLabel: locked ? 'Locked until you check in' : undefined,
@@ -167,18 +182,10 @@ function RepTabs() {
     tabPress: (e: { preventDefault: () => void }) => {
       if (!locked) return;
       e.preventDefault();
-      Alert.alert('Check in first', 'Start your day from the dashboard to open your stores and report.');
+      explain();
     },
   };
-  // On-duty background GPS follows the open day. Punch-out refetches this
-  // query, so it stops here; unmount (logout, role switch) stops it too. The
-  // server also refuses positions once the day is closed — see lib/dutyLocation.
-  const onDuty = dash === undefined ? undefined : !!dash.attendance?.check_in_time && !dash.attendance.check_out_time;
-  useEffect(() => {
-    if (onDuty === true) startDutyTracking();
-    else if (onDuty === false) stopDutyTracking();
-  }, [onDuty]);
-  useEffect(() => () => { stopDutyTracking(); }, []);
+  useDutyTracking(onDuty);
   return (
     <>
       <RepTab.Navigator screenOptions={getTabScreenOptions(insets.bottom)}>
@@ -246,9 +253,37 @@ function DashboardRouter(props: any) {
 // management-only (catalog management); sales managers don't see it.
 function AdminTabs() {
   const insets = useSafeAreaInsets();
-  const isManagement = useAuthStore((s) => s.profile?.role === 'management');
+  const role = useAuthStore((s) => s.profile?.role);
+  return role === 'sales_manager' ? (
+    <SalesManagerTabs bottomInset={insets.bottom} />
+  ) : (
+    <AdminTabsFor isManagement={role === 'management'} bottomInset={insets.bottom} />
+  );
+}
+
+/**
+ * A sales manager is a field user too. Manager functions (Dashboard, Team —
+ * approvals, the review queue, team reports — Orders, Profile) never wait for
+ * a check-in; only the field work inside My day does (owner decision).
+ * Separate component so the gate's query and on-duty GPS only exist for SMs.
+ */
+function SalesManagerTabs({ bottomInset }: { bottomInset: number }) {
+  const { onDuty } = useCheckInGate();
+  useDutyTracking(onDuty);
+  return <AdminTabsFor isManagement={false} isSalesManager bottomInset={bottomInset} />;
+}
+
+function AdminTabsFor({
+  isManagement,
+  isSalesManager = false,
+  bottomInset,
+}: {
+  isManagement: boolean;
+  isSalesManager?: boolean;
+  bottomInset: number;
+}) {
   return (
-    <AdminTab.Navigator screenOptions={getTabScreenOptions(insets.bottom)}>
+    <AdminTab.Navigator screenOptions={getTabScreenOptions(bottomInset)}>
       <AdminTab.Screen
         name="Dashboard"
         component={DashboardRouter}
@@ -269,6 +304,20 @@ function AdminTabs() {
           ),
         }}
       />
+      {/* "My day" is the SM's OWN field work; Dashboard/Team are the team's.
+          The label is the guard against reading a team number as your own. */}
+      {isSalesManager && (
+        <AdminTab.Screen
+          name="MyDay"
+          component={SalesManagerMyDayStack}
+          options={{
+            tabBarLabel: 'My day',
+            tabBarIcon: ({ color, size }) => (
+              <Ionicons name="walk" size={size} color={color} />
+            ),
+          }}
+        />
+      )}
       <AdminTab.Screen
         name="Stores"
         component={AdminStoresStack}

@@ -46,6 +46,9 @@ export default function RepDetailScreen({ route, navigation }: { route: any; nav
   const isManagement = profile?.role === 'management';
   const isSelf = profile?.id === rep.id;
   const isRep = rep.role === 'rep';
+  // A sales manager is a field user too. Their field report and live location
+  // are management's to see — never a peer SM's (RLS enforces it as well).
+  const isFieldSM = rep.role === 'sales_manager' && isManagement && !isSelf;
 
   const [tab, setTab] = useState<Tab>('assign');
   const [isActive, setIsActive] = useState(rep.is_active ?? true);
@@ -154,10 +157,16 @@ export default function RepDetailScreen({ route, navigation }: { route: any; nav
 
         {/* On-demand live location (management + sales_manager, reps only).
             RLS is the real gate on who may request whom. */}
-        {isRep && !isSelf && (
+        {(isRep || isFieldSM) && !isSelf && (
           <View style={{ marginTop: Space.md }}>
             <GetLocationButton repId={rep.id} repName={rep.name} />
           </View>
+        )}
+
+        {isFieldSM && (
+          <Text style={[Type.label, { color: Colors.textMuted, marginTop: Space.md }]}>
+            {rep.name.split(' ')[0]}’s own field work
+          </Text>
         )}
 
         {/* Rep: Assign / Report segmented control */}
@@ -184,6 +193,8 @@ export default function RepDetailScreen({ route, navigation }: { route: any; nav
         ) : (
           <RepReportSection rep={rep} />
         )
+      ) : isFieldSM ? (
+        <RepReportSection rep={rep} />
       ) : null}
     </View>
   );

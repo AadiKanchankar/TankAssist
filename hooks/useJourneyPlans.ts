@@ -59,8 +59,13 @@ export function useMyPlan(repId: string | undefined, date: string = planDateFor(
 /**
  * Submit a new plan, or edit + resubmit a rejected one. RLS guarantees the rep
  * can only ever land the row in 'submitted' — self-approval is impossible.
+ *
+ * A sales manager's plan is AUTO-APPROVED (owner decision): it is created
+ * straight into 'approved' with no reviewer — the only shape RLS allows an SM
+ * ("Plans: SM insert own auto-approved", today or later only) — and is
+ * re-routed without a status change, since there is nothing to resubmit.
  */
-export function useSubmitPlan(repId: string | undefined) {
+export function useSubmitPlan(repId: string | undefined, autoApprove = false) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({
@@ -74,11 +79,13 @@ export function useSubmitPlan(repId: string | undefined) {
     }) => {
       let planId = existingPlanId;
       if (planId) {
-        const { error } = await supabase
-          .from('journey_plans')
-          .update({ status: 'submitted', reviewed_by: null, reviewed_at: null, reject_reason: null })
-          .eq('id', planId);
-        if (error) throw error;
+        if (!autoApprove) {
+          const { error } = await supabase
+            .from('journey_plans')
+            .update({ status: 'submitted', reviewed_by: null, reviewed_at: null, reject_reason: null })
+            .eq('id', planId);
+          if (error) throw error;
+        }
         // Route is replaced wholesale — simpler and safer than diffing, and the
         // rows are cheap. Only permitted while the plan is not approved.
         const { error: delErr } = await supabase
@@ -89,7 +96,11 @@ export function useSubmitPlan(repId: string | undefined) {
       } else {
         const { data, error } = await supabase
           .from('journey_plans')
-          .insert({ rep_id: repId!, plan_date: date })
+          .insert(
+            autoApprove
+              ? { rep_id: repId!, plan_date: date, status: 'approved' }
+              : { rep_id: repId!, plan_date: date },
+          )
           .select('id')
           .single();
         if (error) throw error;
@@ -432,7 +443,7 @@ export function useFlaggedVisits() {
       const { data: visits, error } = await supabase
         .from('store_visits')
         .select(
-          'id, user_id, store_id, check_in_time, check_out_time, notes, latitude, longitude, distance_from_store_meters, checkout_distance_meters, is_mock_location, auto_closed',
+          'id, user_id, store_id, check_in_time, check_out_time, notes, latitude, longitude, distance_from_store_meters, checkout_distance_meters, is_mock_location, auto_closed, actor_role',
         )
         .gte('check_in_time', since)
         // Newest first so the cap keeps the RECENT window when a busy week
@@ -490,6 +501,7 @@ export function useFlaggedVisits() {
           checkout_distance_meters: v.checkout_distance_meters,
           is_mock_location: v.is_mock_location,
           auto_closed: v.auto_closed,
+          actor_role: v.actor_role,
           // A written note is work too, so it counts against the phantom-visit
           // flag even though it carries no timestamp of its own.
           artifact_count: (artifacts[v.id] ?? 0) + (v.notes?.trim() ? 1 : 0),
@@ -504,7 +516,11 @@ export function useFlaggedVisits() {
         out.push({
           visit_id: v.id,
           rep_id: v.user_id,
-          rep_name: info[v.user_id]?.name ?? 'Unknown rep',
+          // Only management ever sees an SM's visit here (RLS); say whose it is,
+          // since its advisory flags read differently from a rep's.
+          rep_name:
+            (info[v.user_id]?.name ?? 'Unknown rep') +
+            (v.actor_role === 'sales_manager' ? ' (sales manager)' : ''),
           store_id: v.store_id,
           store_name: (v.store_id && storeName[v.store_id]) || 'Unknown store',
           check_in_time: v.check_in_time,

@@ -31,7 +31,9 @@ function month(fromDay: number, toDay: number) {
       const cases = rnd() < 0.08 ? [10, 25, 40, 50, 250][Math.floor(rnd() * 5)] : 0;
       visits.push({
         id: `v${++id}`,
-        store_id: `s${STORES.indexOf(STORES[Math.floor(rnd() * STORES.length)])}`,
+        // Two draws kept so the seeded preview stays stable; the id follows the
+        // NAME so a store id means one shop (as in the database).
+        store_id: (rnd(), null),
         storeName: STORES[Math.floor(rnd() * STORES.length)],
         check_in_time: cin.toISOString(),
         check_out_time: lastOpen ? null : new Date(t + dur * 60_000).toISOString(),
@@ -60,6 +62,14 @@ function month(fromDay: number, toDay: number) {
   // Make sure the name-merge path is exercised.
   visits[1].storeName = 'Sector 19';
   visits[2].storeName = 'SECTOR 19';
+  for (const v of visits) v.store_id = `s${STORES.indexOf(v.storeName)}`;
+  // casesSold().byStore: per-visit cases by store, plus an order placed with
+  // no visit by this person (it still counts in the headline).
+  const casesByStore: Record<string, number> = {};
+  for (const v of visits) if (v.cases) casesByStore[v.store_id!] = (casesByStore[v.store_id!] ?? 0) + v.cases;
+  casesByStore.sOrderOnly = 7;
+  casesByDay[`2026-09-${String(toDay).padStart(2, '0')}`] = (casesByDay[`2026-09-${String(toDay).padStart(2, '0')}`] ?? 0) + 7;
+  const firstSeller = visits.find((v) => v.cases)!;
   const casesTotal = Object.values(casesByDay).reduce((s, n) => s + n, 0);
   return buildMonth({
     month: new Date(2026, 8, 1),
@@ -68,6 +78,10 @@ function month(fromDay: number, toDay: number) {
     dayReports: [{ report_date: '2026-09-21', notes: 'Good response in Sector 19', challenges: null }],
     casesByDay,
     casesTotal,
+    casesByStore,
+    schemeByStore: { [firstSeller.store_id!]: 2 },
+    storeNames: { sOrderOnly: 'Order-only shop' },
+    schemeFrom: '2026-07-18',
     now: new Date(2026, 9, 1),
   });
 }
@@ -123,6 +137,33 @@ assert.ok(!html2.includes('Week · 19–19'), 'no one-day week subtotal');
 assert.ok(html.includes('No punch-out'));
 assert.ok(standouts(full).some((s) => s.includes('Data gaps')));
 
+// §2b store-wise sales: sums to the headline, keeps 0-order stores (last),
+// sits after the summary and before the day-by-day detail and visit log.
+for (const md of [full, partial]) {
+  const sum = md.storeSales.reduce((t, r) => t + r.cases, 0);
+  assert.equal(sum + md.storeSalesUnattributed, md.casesTotal, 'table sums to headline cases');
+  assert.equal(md.storeSalesUnattributed, 0);
+  assert.equal(md.storeSales.length, md.stores.length + 1, 'every visited store + the order-only one');
+  const firstZero = md.storeSales.findIndex((r) => r.cases === 0);
+  assert.ok(firstZero === -1 || md.storeSales.slice(firstZero).every((r) => r.cases === 0), 'zeros sort last');
+  assert.ok(md.storeSales.some((r) => r.cases === 0 && r.visits > 0), 'visited-but-no-order stores are kept at 0');
+  const orderOnly = md.storeSales.find((r) => r.name === 'Order-only shop')!;
+  assert.equal(orderOnly.lastVisit, null);
+  assert.equal(orderOnly.visits, 0);
+  assert.equal(md.storeSales.reduce((t, r) => t + r.scheme, 0), 2);
+  assert.equal(md.storeSales.reduce((t, r) => t + r.visits, 0), md.visits.length);
+}
+{
+  const h = reportHtml('R', [full], new Date(2026, 9, 1));
+  const iSummaryEnd = h.indexOf('</section>');
+  const iStores = h.indexOf('<h2>Store-wise sales</h2>');
+  assert.ok(iStores > iSummaryEnd, 'after the summary page');
+  assert.ok(iStores < h.indexOf('<h2>Day by day</h2>') && iStores < h.indexOf('VISIT LOG'), 'before the detail');
+  assert.ok(h.includes('<th class="n">Scheme cases</th>') && h.includes('<th class="n">Last visit</th>'));
+  assert.ok(h.includes('Total stores visited') && h.includes('Unique stores covered'), '§2a headings');
+  assert.ok(!h.includes('>Store visits<') && !h.includes("'Stores covered'"), 'old headings gone');
+}
+
 // Auto-closed days: the note says exactly what the sweep produced (code review 2026-10-01).
 {
   const at = (d: number, h: number) => new Date(2026, 8, d, h).toISOString();
@@ -140,6 +181,7 @@ assert.ok(standouts(full).some((s) => s.includes('Data gaps')));
     ],
     visits: [v(1, 11), v(3, 10)],
     dayReports: [], casesByDay: {}, casesTotal: 0, now: new Date(2026, 9, 1),
+    casesByStore: {}, schemeByStore: {}, storeNames: {}, schemeFrom: '2026-07-18',
   });
   const h = reportHtml('T', [m], new Date(2026, 9, 1));
   const [d1, d2, d3] = m.fieldDays;
@@ -165,6 +207,7 @@ assert.ok(standouts(full).some((s) => s.includes('Data gaps')));
     ],
     visits: [{ id: 'a', store_id: 's', storeName: 'S', check_in_time: at(2, 11), check_out_time: at(2, 12), duration_minutes: 60, auto_closed: false, notes: null, cases: 0 }],
     dayReports: [], casesByDay: {}, casesTotal: 0, now: new Date(2026, 9, 1),
+    casesByStore: {}, schemeByStore: {}, storeNames: {}, schemeFrom: '2026-07-18',
   });
   assert.ok(standouts(m)[0].includes('Avg 3h 20m'), standouts(m)[0]);
   const h = reportHtml('A & "B" </style>', [m], new Date(2026, 9, 1));

@@ -2,7 +2,7 @@ import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system/legacy';
 import { supabase } from './supabase';
-import { casesSold } from './reportSemantics';
+import { casesSold, ORDERS_CUTOVER_DATE } from './reportSemantics';
 import {
   toDateStr,
   monthStart,
@@ -57,6 +57,16 @@ async function monthData(repId: string, monthDate: Date, now: Date): Promise<Mon
   if (visitsRes.error) throw visitsRes.error;
   if (reportsRes.error) throw reportsRes.error;
 
+  // Stores with orders this month but no visit by this person still need a name.
+  const visited = new Set(((visitsRes.data as any[]) ?? []).map((v) => v.store_id));
+  const orderOnly = Object.keys(cases.byStore).filter((id) => !visited.has(id));
+  const storeNames: Record<string, string> = {};
+  if (orderOnly.length) {
+    const { data, error } = await supabase.from('stores').select('id, name').in('id', orderOnly);
+    if (error) throw error;
+    for (const s of data ?? []) storeNames[s.id] = s.name;
+  }
+
   const visits: PdfVisit[] = ((visitsRes.data as any[]) ?? []).map((v) => ({
     id: v.id,
     store_id: v.store_id,
@@ -76,6 +86,10 @@ async function monthData(repId: string, monthDate: Date, now: Date): Promise<Mon
     dayReports: (reportsRes.data as any[]) ?? [],
     casesByDay: cases.byDay,
     casesTotal: cases.total,
+    casesByStore: cases.byStore,
+    schemeByStore: cases.schemeByStore,
+    storeNames,
+    schemeFrom: ORDERS_CUTOVER_DATE,
     now,
   });
 }

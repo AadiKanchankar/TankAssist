@@ -11,7 +11,7 @@ import AddStoreModal from '../../components/AddStoreModal';
 import { useAuthStore } from '../../store/useAuthStore';
 import { useMyPlan, useSubmitPlan } from '../../hooks/useJourneyPlans';
 import { usePlanStores, PlanStore } from '../../hooks/usePlanStores';
-import { planDateFor, PLAN_STATUS_LABEL } from '../../lib/journeyPlan';
+import { planDateFor, planStatusLabel, isAutoApproved } from '../../lib/journeyPlan';
 import { userMessage } from '../../lib/userError';
 
 /**
@@ -29,8 +29,11 @@ import { userMessage } from '../../lib/userError';
 export default function JourneyPlanScreen({ navigation }: { navigation: any }) {
   const { profile } = useAuthStore();
   const date = planDateFor();
+  // A sales manager plans the same way, but the plan is approved on save and
+  // stays editable for the day (nobody else reviews it).
+  const isSM = profile?.role === 'sales_manager';
   const { data: plan, refetch, isPending } = useMyPlan(profile?.id, date);
-  const submit = useSubmitPlan(profile?.id);
+  const submit = useSubmitPlan(profile?.id, isSM);
 
   const [search, setSearch] = useState('');
   const [debounced, setDebounced] = useState('');
@@ -70,7 +73,7 @@ export default function JourneyPlanScreen({ navigation }: { navigation: any }) {
     );
   }, [plan?.id, plan?.status]);
 
-  const locked = plan?.status === 'approved';
+  const locked = plan?.status === 'approved' && !(isSM && isAutoApproved(plan));
 
   // Scoped results plus anything selected that the scope doesn't cover, so a
   // store found by search stays visible and un-tickable after clearing search.
@@ -94,12 +97,14 @@ export default function JourneyPlanScreen({ navigation }: { navigation: any }) {
     try {
       await submit.mutateAsync({ date, storeIds: selected, existingPlanId: plan?.id });
       Alert.alert(
-        'Plan sent',
-        'Your manager has been notified. You can start your day now — you don’t have to wait for approval.',
+        isSM ? 'Plan saved' : 'Plan sent',
+        isSM
+          ? 'Your plan is approved. Management can see it.'
+          : 'Your manager has been notified. You can start your day now — you don’t have to wait for approval.',
         [{ text: 'OK', onPress: () => navigation.goBack() }],
       );
     } catch (e: any) {
-      Alert.alert('Couldn’t send the plan', userMessage(e));
+      Alert.alert(isSM ? 'Couldn’t save the plan' : 'Couldn’t send the plan', userMessage(e));
     }
   };
 
@@ -114,8 +119,13 @@ export default function JourneyPlanScreen({ navigation }: { navigation: any }) {
         >
           <Text style={[Type.label, { color: Colors.textMuted }]}>Today’s plan</Text>
           <Text style={[Type.bodyMed, { color: Colors.text, marginTop: 2 }]}>
-            {PLAN_STATUS_LABEL[plan.status]}
+            {planStatusLabel(plan)}
           </Text>
+          {isAutoApproved(plan) ? (
+            <Text style={styles.hint}>
+              Sales manager plans don’t need approval. You can change today’s stores any time.
+            </Text>
+          ) : null}
           {plan.status === 'submitted' ? (
             <Text style={styles.hint}>
               You can start visiting now. Visits made before approval are shown to your manager for
@@ -140,7 +150,9 @@ export default function JourneyPlanScreen({ navigation }: { navigation: any }) {
         <BentoTile>
           <Text style={[Type.bodyMed, { color: Colors.text }]}>No plan for today yet</Text>
           <Text style={styles.hint}>
-            Pick the stores you plan to visit and send it to your manager.
+            {isSM
+              ? 'Pick the stores you plan to visit. Your plan is approved as soon as you save it.'
+              : 'Pick the stores you plan to visit and send it to your manager.'}
           </Text>
         </BentoTile>
       )}
@@ -284,7 +296,7 @@ export default function JourneyPlanScreen({ navigation }: { navigation: any }) {
       {!locked && (
         <View style={styles.footer}>
           <Button
-            title={plan ? 'Send updated plan' : 'Send plan to manager'}
+            title={isSM ? (plan ? 'Save changes' : 'Save plan') : plan ? 'Send updated plan' : 'Send plan to manager'}
             onPress={onSubmit}
             loading={submit.isPending}
             disabled={selected.length === 0}

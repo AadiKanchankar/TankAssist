@@ -1,4 +1,10 @@
 import { supabase } from './supabase';
+import type { ActorRole } from './teamFigures';
+
+// Team-figure split (team totals include the manager; the manager's share is
+// always shown) — pure, in its own file so it runs under tsx, but exported
+// from here so every report figure comes from this one module.
+export * from './teamFigures';
 
 /** Local YYYY-MM-DD (device-local, matching reportExport's bucketing). */
 function toDateStr(d: Date): string {
@@ -55,6 +61,18 @@ export interface CasesResult {
    * a product split must label the difference, not invent a split.
    */
   byStoreProduct: Record<string, Record<string, number>>;
+  /**
+   * Cases by the role the row was MADE in (`actor_role`, frozen at insert —
+   * never the user's current role). Sums to `total`. Feeds the "of which
+   * sales managers'" split — see teamFigures.fromByActor.
+   */
+  byActor: Partial<Record<ActorRole, number>>;
+  /**
+   * Scheme ("free") cases per store, post-cutover only — legacy visit counts
+   * never recorded a scheme. Kept OUT of `byStore`/`total`, which are cases
+   * sold, so the store-wise table and the headline can't disagree.
+   */
+  schemeByStore: Record<string, number>;
 }
 export interface CasesFilter {
   userId?: string; // scope to one rep (placed_by / visit user)
@@ -77,10 +95,13 @@ export async function casesSold(
   const byStore: Record<string, number> = {};
   const byVisit: Record<string, number> = {};
   const byStoreProduct: Record<string, Record<string, number>> = {};
-  const add = (day: string, storeId: string | null, visitId: string | null, n: number) => {
+  const byActor: Partial<Record<ActorRole, number>> = {};
+  const schemeByStore: Record<string, number> = {};
+  const add = (day: string, storeId: string | null, visitId: string | null, n: number, actor: ActorRole) => {
     byDay[day] = (byDay[day] || 0) + n;
     if (storeId) byStore[storeId] = (byStore[storeId] || 0) + n;
     if (visitId) byVisit[visitId] = (byVisit[visitId] || 0) + n;
+    byActor[actor] = (byActor[actor] || 0) + n;
   };
 
   // A product filter cannot reach the legacy figures at all: cases_sold is one
@@ -97,7 +118,7 @@ export async function casesSold(
   if (wantLegacy) {
     let q = supabase
       .from('store_visits')
-      .select('id, check_in_time, cases_sold, store_id')
+      .select('id, check_in_time, cases_sold, store_id, actor_role')
       .gte('check_in_time', `${startYmd}T00:00:00`)
       .lt('check_in_time', `${endExclusiveYmd}T00:00:00`);
     if (filter.userId) q = q.eq('user_id', filter.userId);
@@ -111,7 +132,7 @@ export async function casesSold(
       // product_id comes along so a product filter can be applied per LINE.
       // Filtering the join server-side would drop whole orders that merely
       // contain other products too, which is a different question.
-      .select('created_at, store_id, visit_id, order_items(cases, product_id)')
+      .select('created_at, store_id, visit_id, actor_role, order_items(cases, free_cases, product_id)')
       .neq('status', 'cancelled')
       .gte('created_at', `${startYmd}T00:00:00`)
       .lt('created_at', `${endExclusiveYmd}T00:00:00`);
@@ -125,7 +146,7 @@ export async function casesSold(
   if (legacyRes) {
     for (const v of (legacyRes.data as any[]) || []) {
       const d = toDateStr(new Date(v.check_in_time));
-      if (d < ORDERS_CUTOVER_DATE) add(d, v.store_id, v.id, v.cases_sold || 0);
+      if (d < ORDERS_CUTOVER_DATE) add(d, v.store_id, v.id, v.cases_sold || 0, v.actor_role || 'rep');
     }
   }
 
@@ -137,8 +158,16 @@ export async function casesSold(
         const lines = (o.order_items || []).filter(
           (it: any) => !filter.productId || it.product_id === filter.productId
         );
-        add(d, o.store_id, o.visit_id, lines.reduce((s: number, it: any) => s + (it.cases || 0), 0));
+        add(
+          d,
+          o.store_id,
+          o.visit_id,
+          lines.reduce((s: number, it: any) => s + (it.cases || 0), 0),
+          o.actor_role || 'rep',
+        );
         if (o.store_id) {
+          const scheme = lines.reduce((s: number, it: any) => s + (it.free_cases || 0), 0);
+          if (scheme) schemeByStore[o.store_id] = (schemeByStore[o.store_id] || 0) + scheme;
           const perProduct = byStoreProduct[o.store_id] || (byStoreProduct[o.store_id] = {});
           for (const it of lines) {
             perProduct[it.product_id] = (perProduct[it.product_id] || 0) + (it.cases || 0);
@@ -149,7 +178,7 @@ export async function casesSold(
   }
 
   const total = Object.values(byDay).reduce((s, n) => s + n, 0);
-  return { byDay, byStore, total, legacyExcluded, byVisit, byStoreProduct };
+  return { byDay, byStore, total, legacyExcluded, byVisit, byStoreProduct, byActor, schemeByStore };
 }
 
 /** Per-day cases for one rep over [startYmd, endExclusiveYmd). */

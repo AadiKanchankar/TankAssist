@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '../lib/supabase';
 import { orderValue } from '../lib/orders';
-import { bucketBreakdown, SNAPSHOT_COLUMNS } from '../lib/stockBuckets';
+import { bucketBreakdown } from '../lib/stockBuckets';
 
 export interface Store {
   id: string;
@@ -124,7 +124,7 @@ export interface StoreDetailData {
 }
 async function fetchStoreDetail(
   routeStore: Store,
-  isManager: boolean,
+  fieldUser: boolean,
   userId: string | undefined,
   today: string
 ): Promise<StoreDetailData> {
@@ -142,17 +142,15 @@ async function fetchStoreDetail(
 
   const [{ data: prods }, { data: snaps }] = await Promise.all([
     supabase.from('products').select('id, name, unit').eq('is_active', true).order('name'),
-    supabase
-      .from('store_stock_snapshots')
-      .select(`product_id, ${SNAPSHOT_COLUMNS}, recorded_at, recorded_by`)
-      .eq('store_id', routeStore.id)
-      .order('recorded_at', { ascending: false }),
+    // Latest count per product via the definer RPC — see store-visit.tsx:
+    // a sales manager's count is shared here with its attribution withheld.
+    supabase.rpc('store_current_stock', { p_store_id: routeStore.id }),
   ]);
   const latest: Record<string, any> = {};
   for (const s of (snaps as any[]) || []) {
     if (!latest[s.product_id]) latest[s.product_id] = s;
   }
-  const recorderIds = [...new Set(Object.values(latest).map((s: any) => s.recorded_by))];
+  const recorderIds = [...new Set(Object.values(latest).map((s: any) => s.recorded_by).filter(Boolean))];
   const names: Record<string, string> = {};
   if (recorderIds.length) {
     const { data: users } = await supabase.from('users').select('id, name').in('id', recorderIds);
@@ -169,8 +167,8 @@ async function fetchStoreDetail(
         cases: s.cases,
         bottles: s.bottles,
         recorded_at: s.recorded_at,
-        recorded_by: s.recorded_by,
-        recorder_name: names[s.recorded_by] || null,
+        recorded_by: s.recorded_by ?? '',
+        recorder_name: (s.recorded_by && names[s.recorded_by]) || null,
         breakdown: bucketBreakdown(s),
       };
     });
@@ -211,7 +209,7 @@ async function fetchStoreDetail(
 
   let repStatus: RepStatus = 'pending';
   let dayEnded = false;
-  if (!isManager && userId) {
+  if (fieldUser && userId) {
     const { data: todayVisit } = await supabase
       .from('store_visits')
       .select('check_out_time')
@@ -244,10 +242,15 @@ async function fetchStoreDetail(
     dayEnded,
   };
 }
-export function useStoreDetail(routeStore: Store, isManager: boolean, userId: string | undefined) {
+/**
+ * `fieldUser`: the viewer is visiting stores (a rep, or a sales manager in My
+ * day), so today's own visit status and day-ended state are fetched for the
+ * check-in action.
+ */
+export function useStoreDetail(routeStore: Store, fieldUser: boolean, userId: string | undefined) {
   const today = localToday();
   return useQuery({
-    queryKey: ['store-detail', routeStore.id],
-    queryFn: () => fetchStoreDetail(routeStore, isManager, userId, today),
+    queryKey: ['store-detail', routeStore.id, fieldUser],
+    queryFn: () => fetchStoreDetail(routeStore, fieldUser, userId, today),
   });
 }

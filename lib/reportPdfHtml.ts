@@ -62,6 +62,16 @@ export interface PdfMonthInput {
   /** casesSold().byDay / .total for the month. */
   casesByDay: Record<string, number>;
   casesTotal: number;
+  /**
+   * casesSold().byStore / .schemeByStore — the SAME result as the headline, so
+   * the store-wise table sums to it by construction (store_id → cases).
+   */
+  casesByStore: Record<string, number>;
+  schemeByStore: Record<string, number>;
+  /** Names for stores that have orders this month but no visit by this person. */
+  storeNames: Record<string, string>;
+  /** First day orders were recorded (ORDERS_CUTOVER_DATE) — scheme exists only from then. */
+  schemeFrom: string;
   /** "Today" — bounds a month still in progress. */
   now: Date;
 }
@@ -133,6 +143,16 @@ export interface StoreAgg {
   sellingVisits: PdfVisit[];
 }
 
+/** One row of the store-wise sales table. */
+export interface StoreSalesRow {
+  name: string;
+  visits: number;
+  cases: number;
+  scheme: number;
+  /** Null when the store had orders this month but no visit by this person. */
+  lastVisit: string | null;
+}
+
 export interface MonthModel {
   title: string; // September 2026
   monthIndex: number;
@@ -155,6 +175,15 @@ export interface MonthModel {
   odoDays: number;
   inStoreOnMarketDays: number;
   dayReports: PdfDayReport[];
+  /** Store-wise sales, cases desc; visited-but-no-order stores (0) last. */
+  storeSales: StoreSalesRow[];
+  /**
+   * Cases the headline counts that no store row can carry (a legacy visit
+   * with no store). Shown as its own row so the table still sums; 0 normally.
+   */
+  storeSalesUnattributed: number;
+  /** True when the month reaches back before scheme cases were recorded. */
+  schemeBeforeCutover: boolean;
 }
 
 const nameKey = (s: string) => s.trim().replace(/\s+/g, ' ').toLowerCase();
@@ -260,6 +289,41 @@ export function buildMonth(input: PdfMonthInput): MonthModel {
     };
   });
 
+  // Store-wise sales. Grouped by the same tidied name as "Unique stores
+  // covered", so the row count and that tile agree. Cases and scheme come from
+  // casesSold().byStore / .schemeByStore — the result the headline total is —
+  // so the table sums to the headline; per-visit cases (byVisit) would miss an
+  // order not linked to a visit.
+  // Each store id belongs to exactly ONE row (first name it was seen under),
+  // so a store's cases can never be counted twice.
+  const sales = new Map<string, StoreSalesRow>();
+  const rowFor = (rawName: string) => {
+    const k = nameKey(rawName);
+    let r = sales.get(k);
+    if (!r) {
+      r = { name: shownByKey.get(k) ?? rawName.trim().replace(/\s+/g, ' '), visits: 0, cases: 0, scheme: 0, lastVisit: null };
+      sales.set(k, r);
+    }
+    return r;
+  };
+  const rowOfId = new Map<string, StoreSalesRow>();
+  for (const v of visits) {
+    const r = rowFor(v.storeName);
+    r.visits += 1;
+    if (!r.lastVisit || v.check_in_time > r.lastVisit) r.lastVisit = v.check_in_time;
+    if (v.store_id && !rowOfId.has(v.store_id)) rowOfId.set(v.store_id, r);
+  }
+  for (const id of new Set([...Object.keys(input.casesByStore), ...Object.keys(input.schemeByStore)])) {
+    const r = rowOfId.get(id) ?? rowFor(input.storeNames[id] ?? 'Store');
+    rowOfId.set(id, r);
+    r.cases += input.casesByStore[id] ?? 0;
+    r.scheme += input.schemeByStore[id] ?? 0;
+  }
+  const storeSales: StoreSalesRow[] = [...sales.values()].sort(
+    (a, b) => b.cases - a.cases || b.visits - a.visits || a.name.localeCompare(b.name),
+  );
+  const storeSalesUnattributed = input.casesTotal - storeSales.reduce((t, r) => t + r.cases, 0);
+
   const recorded = fieldDays.filter((r) => r.market === 'recorded');
   const routeDays = fieldDays.filter((r) => r.routeKm != null);
   const odoDays = fieldDays.filter((r) => r.odoKm != null);
@@ -288,6 +352,9 @@ export function buildMonth(input: PdfMonthInput): MonthModel {
     odoDays: odoDays.length,
     inStoreOnMarketDays: recorded.reduce((s, r) => s + r.inStoreMin, 0),
     dayReports: input.dayReports,
+    storeSales,
+    storeSalesUnattributed,
+    schemeBeforeCutover: ymd(new Date(y, m, 1)) < input.schemeFrom,
   };
 }
 
@@ -584,8 +651,8 @@ function summaryPage(md: MonthModel, repName: string, generated: Date): string {
     ${tile('Route (GPS)', md.routeKm == null ? '—' : `${km(md.routeKm)} <small>km</small>`, routeSub)}
     ${tile('Market time', md.market.min == null ? '—' : hm(md.market.min).replace(/ (\d+m)$/, ' <small>$1</small>'), marketNote)}
     ${tile('Cases sold', int(md.casesTotal), md.casesTotal ? `from ${selling} of ${plural(nVisits, 'visit')}` : 'no orders this month', 'good')}
-    ${tile('Store visits', String(nVisits), nField ? `${(nVisits / nField).toFixed(1)} per field day` : '—')}
-    ${tile('Stores covered', String(md.stores.length), `unique · ${plural(nVisits - md.stores.length, 'repeat visit')}`)}
+    ${tile('Total stores visited', String(nVisits), nField ? `every visit, repeats included · ${(nVisits / nField).toFixed(1)} per field day` : '—')}
+    ${tile('Unique stores covered', String(md.stores.length), `distinct stores · ${plural(nVisits - md.stores.length, 'repeat visit')}`)}
     ${tile('Field days', String(nField), fieldDaysSub(md))}
   </div>
   <div class="banner">▲ ${headline(md)}</div>
@@ -703,7 +770,7 @@ function notes(md: MonthModel): string {
   if (md.mergedNames.length) {
     const ex = md.mergedNames[0];
     n.push(
-      `Store names grouped ignoring capitalisation and spacing (e.g. ${ex.variants.map((v) => `“${esc(v)}”`).join(' / ')} are one store), so Stores covered is ${md.stores.length}${md.storeIdsCount !== md.stores.length ? `; the app counts ${md.storeIdsCount}` : ''}.`,
+      `Store names grouped ignoring capitalisation and spacing (e.g. ${ex.variants.map((v) => `“${esc(v)}”`).join(' / ')} are one store), so Unique stores covered is ${md.stores.length}${md.storeIdsCount !== md.stores.length ? `; the app counts ${md.storeIdsCount}` : ''}.`,
     );
   }
   return `<div class="notes">${n.map((x) => `<p>${x}</p>`).join('')}</div>`;
@@ -743,9 +810,44 @@ function repNotes(md: MonthModel): string {
   return rows ? `<div class="section">REP’S DAILY NOTES</div><div class="notes">${rows}</div>` : '';
 }
 
+/**
+ * Store-wise sales — after the summary, before the day-by-day detail and the
+ * visit log. Compact (one line per store, no per-visit detail — that is the
+ * log's job) and flows across pages with its header row repeated
+ * (thead = table-header-group). Visited-but-no-order stores stay in, at 0 and
+ * at the bottom: "visited and didn't order" is what a manager needs to see.
+ */
+function storeSalesTable(md: MonthModel): string {
+  if (!md.storeSales.length && !md.storeSalesUnattributed) return '';
+  const date = (iso: string | null) => (iso ? dayLabel(new Date(iso)) : '—');
+  const totalVisits = md.storeSales.reduce((t, r) => t + r.visits, 0);
+  const totalScheme = md.storeSales.reduce((t, r) => t + r.scheme, 0);
+  const rows = md.storeSales
+    .map(
+      (r, i) => `<tr class="${r.cases > 0 ? 'sale' : ''}"><td class="n">${i + 1}</td><td>${esc(r.name)}</td><td class="n">${r.visits || '—'}</td>
+        <td class="n">${int(r.cases)}</td><td class="n">${r.scheme ? int(r.scheme) : '–'}</td><td class="n">${date(r.lastVisit)}</td></tr>`,
+    )
+    .join('');
+  const unattributed = md.storeSalesUnattributed
+    ? `<tr><td></td><td class="note">Not linked to a store (older visit records)</td><td></td><td class="n">${int(md.storeSalesUnattributed)}</td><td></td><td></td></tr>`
+    : '';
+  const notes: string[] = [
+    'Cases sold per store come from the same calculation as the headline <b>Cases sold</b>, so this table adds up to it. <b>0</b> means the store was visited and did not order.',
+  ];
+  if (md.storeSales.some((r) => !r.lastVisit)) notes.push('A store with no last-visit date had an order this month without a visit by this person.');
+  if (md.schemeBeforeCutover) notes.push('Scheme cases are recorded with orders; visits before orders began carry none.');
+  const orderOnly = md.storeSales.filter((r) => !r.lastVisit).length;
+  const sub = `${plural(md.storeSales.length - orderOnly, 'store')} visited${orderOnly ? ` · ${orderOnly} more with an order but no visit` : ''}`;
+  return `<div class="dh"><h2>Store-wise sales</h2><span>${sub}</span></div>
+<table class="stores"><thead><tr><th class="n">#</th><th>Store</th><th class="n">Visits</th><th class="n">Cases sold</th><th class="n">Scheme cases</th><th class="n">Last visit</th></tr></thead>
+<tbody>${rows}${unattributed}<tr class="total"><td></td><td>Total</td><td class="n">${totalVisits}</td><td class="n">${int(md.casesTotal)}</td><td class="n">${totalScheme ? int(totalScheme) : '–'}</td><td></td></tr></tbody></table>
+<div class="notes">${notes.map((x) => `<p>${x}</p>`).join('')}</div>`;
+}
+
 function detailPages(md: MonthModel, repName: string): string {
   return `
 <section class="detail">
+  ${storeSalesTable(md)}
   <div class="dh"><h2>Day by day</h2><span>${esc(repName)} · ${md.title}</span></div>
   ${dayTable(md)}
   ${notes(md)}
@@ -826,6 +928,8 @@ tr.total td { background: ${C.ink}; color: #fff; font-weight: 750; }
 .notes p { font-size: 9px; color: ${C.sub}; line-height: 1.45; margin-bottom: 2px; }
 .notes b { color: ${C.ink}; }
 table.log { margin-top: 4px; table-layout: fixed; }
+table.stores { margin: 4px 0 2px; }
+table.stores + .notes { margin-bottom: 12px; }
 tr.dayhd { break-after: avoid; }
 tr.dayhd td { background: #13294b; color: #fff; font-weight: 700; font-size: 9.5px; padding: 5px 6px; }
 tr.dayhd td.r { text-align: right; font-weight: 500; }

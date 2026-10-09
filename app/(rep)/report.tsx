@@ -4,6 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, Type, Space, Radius, Layout } from '../../constants/colors';
 import Button from '../../components/Button';
+import Header from '../../components/Header';
 import BentoTile from '../../components/BentoTile';
 import Metric from '../../components/Metric';
 import VoiceInput from '../../components/VoiceInput';
@@ -15,8 +16,11 @@ import { repCasesSold } from '../../lib/reportSemantics';
 import { displayFigure, fmtKmShort, AttendanceFigures } from '../../lib/reportFigures';
 import { userMessage } from '../../lib/userError';
 
-export default function ReportScreen() {
+export default function ReportScreen({ navigation, route: navRoute }: { navigation?: any; route?: any }) {
   const { profile } = useAuthStore();
+  // A rep reaches this as a tab; a sales manager pushes it from My day, where
+  // it needs a way back and must say it is their OWN day, not their team's.
+  const stacked = navRoute?.params?.stacked === true;
   const insets = useSafeAreaInsets();
   // Today's attendance row, or null before punch-in.
   const [day, setDay] = useState<AttendanceFigures | null>(null);
@@ -42,14 +46,14 @@ export default function ReportScreen() {
       .maybeSingle();
     setDay(att ?? null);
 
-    // Stores visited today.
+    // Total stores visited today — every visit, repeats included.
     const { data: visits } = await supabase
       .from('store_visits')
-      .select('check_out_time')
+      .select('id')
       .eq('user_id', profile.id)
       .gte('check_in_time', `${today}T00:00:00`)
       .lt('check_in_time', `${today}T23:59:59`);
-    setStoresVisited((visits || []).filter((v) => v.check_out_time).length);
+    setStoresVisited((visits || []).length);
 
     // Cases Sold — cutover semantics (today on/after cutover → orders).
     const tomorrow = new Date(`${today}T00:00:00Z`);
@@ -122,15 +126,20 @@ export default function ReportScreen() {
   }
 
   return (
+    <View style={styles.container}>
+    {stacked ? <Header title="My daily report" onBack={() => navigation?.goBack()} /> : null}
     <ScrollView
       style={styles.container}
       contentContainerStyle={[
         styles.content,
-        { paddingTop: insets.top + Space.md, paddingBottom: Layout.tabBar + insets.bottom + Space.md },
+        {
+          paddingTop: stacked ? 0 : insets.top + Space.md,
+          paddingBottom: Layout.tabBar + insets.bottom + Space.md,
+        },
       ]}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
     >
-      <Text style={[Type.title, { color: Colors.text }]}>Daily report</Text>
+      {stacked ? null : <Text style={[Type.title, { color: Colors.text }]}>Daily report</Text>}
       <Text style={[Type.body, { color: Colors.textSecondary, marginTop: 2, marginBottom: Space.lg }]}>
         {dateLabel}
       </Text>
@@ -148,7 +157,7 @@ export default function ReportScreen() {
           <BentoTile style={styles.tile}><Metric label="Cases sold" value={totalCases} /></BentoTile>
         </View>
         <View style={styles.cell}>
-          <BentoTile style={styles.tile}><Metric label="Stores visited" value={storesVisited} /></BentoTile>
+          <BentoTile style={styles.tile}><Metric label="Total stores visited" value={storesVisited} /></BentoTile>
         </View>
         <View style={styles.cellWide}>
           <BentoTile style={styles.tile}><Metric label="Market time" {...market} /></BentoTile>
@@ -186,6 +195,7 @@ export default function ReportScreen() {
         <Button title="Submit report" spotlight onPress={handleSubmit} loading={submitting} style={{ marginTop: Space.sm }} />
       )}
     </ScrollView>
+    </View>
   );
 }
 

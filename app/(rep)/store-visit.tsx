@@ -59,7 +59,6 @@ import {
   bucketTotals,
   snapshotPayload,
   bucketBreakdown,
-  SNAPSHOT_COLUMNS,
   type StockBucket,
   type BucketEntries,
   type SnapshotRow,
@@ -462,15 +461,11 @@ export default function StoreVisitScreen({
         .select('id, name, unit, qty_per_carton, is_out_of_stock')
         .eq('is_active', true)
         .order('name'),
-      // Latest snapshot per product for this store. ponytail: newest 500 rows,
-      // not the store's whole history — a product unrecorded in its last 500
-      // snapshots loses only its prefill. A DISTINCT ON view if that ever bites.
-      supabase
-        .from('store_stock_snapshots')
-        .select(`product_id, ${SNAPSHOT_COLUMNS}, recorded_at, recorded_by`)
-        .eq('store_id', store.id)
-        .order('recorded_at', { ascending: false })
-        .limit(500),
+      // Latest count per product for this store, one row each. Through the
+      // definer RPC, not the table: a count a sales manager recorded is hidden
+      // from other users at the row level (it is their field evidence), but the
+      // store's stock is shared — the RPC returns it with recorded_by withheld.
+      supabase.rpc('store_current_stock', { p_store_id: store.id }),
       // Most recent non-terminal order at this store
       supabase
         .from('orders')

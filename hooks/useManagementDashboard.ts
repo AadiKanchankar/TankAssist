@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '../lib/supabase';
-import { casesSold } from '../lib/reportSemantics';
+import { casesSold, fromByActor, teamDistinct, teamFigure, TeamFigure } from '../lib/reportSemantics';
 import { ORDER_FILTER_STATUSES, OrderFilter } from '../lib/orders';
 import {
   toDateStr,
@@ -24,11 +24,14 @@ export interface TopStore {
 }
 export interface ManagementDashboardData {
   pipeline: Record<OrderFilter, number>;
-  casesThisMonth: number;
+  /** Includes sales managers' own orders; `managerOwn` is their share. */
+  casesThisMonth: TeamFigure;
   casesLastMonth: number;
   trend: number[];
-  repsCheckedIn: number;
-  visitsToday: number;
+  /** Field users checked in today (reps + sales managers); of which SMs. */
+  checkedInToday: TeamFigure;
+  /** Visits today, every field user; of which by sales managers. */
+  visitsToday: TeamFigure;
   attention: AttentionStore[];
   topStores: TopStore[];
   monthTitle: string;
@@ -72,12 +75,12 @@ async function fetchManagementDashboard(productId?: string): Promise<ManagementD
     Promise.all(FILTER_KEYS.map(countFor)),
     supabase
       .from('attendance')
-      .select('user_id')
+      .select('user_id, actor_role')
       .gte('check_in_time', `${today}T00:00:00`)
       .lt('check_in_time', `${today}T23:59:59`),
     supabase
       .from('store_visits')
-      .select('id')
+      .select('id, actor_role')
       .gte('check_in_time', `${today}T00:00:00`)
       .lt('check_in_time', `${today}T23:59:59`),
     supabase.from('stores').select('id, name'),
@@ -101,8 +104,10 @@ async function fetchManagementDashboard(productId?: string): Promise<ManagementD
   const pipeline = Object.fromEntries(
     FILTER_KEYS.map((key, i) => [key, counts[i].count ?? 0]),
   ) as Record<OrderFilter, number>;
-  const repsCheckedIn = new Set((attToday || []).map((a) => a.user_id)).size;
-  const visitsToday = (visToday || []).length;
+  // Split by the role each row was MADE in (actor_role), never current role.
+  const bySM = (r: { actor_role?: string | null }) => r.actor_role === 'sales_manager';
+  const checkedInToday = teamDistinct(attToday || [], (a) => a.user_id, bySM);
+  const visitsToday = teamFigure(visToday || [], () => 1, bySM);
 
   const visitedRecently = new Set((recentVisits || []).map((v) => v.store_id));
   const seen = new Set<string>();
@@ -138,10 +143,10 @@ async function fetchManagementDashboard(productId?: string): Promise<ManagementD
 
   return {
     pipeline,
-    casesThisMonth: thisM.total,
+    casesThisMonth: fromByActor(thisM.byActor),
     casesLastMonth: lastM.total,
     trend,
-    repsCheckedIn,
+    checkedInToday,
     visitsToday,
     attention,
     topStores,

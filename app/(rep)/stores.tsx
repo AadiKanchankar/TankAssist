@@ -44,7 +44,9 @@ export default function RepStoresScreen({ navigation }: { navigation: any }) {
   const visited = data?.visited ?? new Set<string>();
   const inProgress = data?.inProgress ?? new Set<string>();
 
-  const [viewMode, setViewMode] = useState<ViewMode>('assigned');
+  // A sales manager has no assigned stores — every store is theirs to visit.
+  const isSM = profile?.role === 'sales_manager';
+  const [viewMode, setViewMode] = useState<ViewMode>(isSM ? 'all' : 'assigned');
   /**
    * Add-store was previously reachable ONLY from the search-empty state, so a
    * rep had to search for a shop that did not exist to discover they could
@@ -90,10 +92,24 @@ export default function RepStoresScreen({ navigation }: { navigation: any }) {
     <View style={styles.container}>
       <View style={[styles.headerPad, { paddingTop: insets.top + Space.md }]}>
         <View style={styles.titleRow}>
+          {/* Pushed from a sales manager's My day (a rep reaches it as a tab). */}
+          {isSM ? (
+            <Pressable
+              onPress={() => navigation.goBack()}
+              style={styles.backBtn}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Back"
+            >
+              <Ionicons name="chevron-back" size={24} color={Colors.text} />
+            </Pressable>
+          ) : null}
           <View style={{ flex: 1 }}>
-            <Text style={[Type.title, { color: Colors.text }]}>Your stores</Text>
+            <Text style={[Type.title, { color: Colors.text }]}>{isSM ? 'Stores' : 'Your stores'}</Text>
             <Text style={[Type.body, { color: Colors.textSecondary, marginTop: 2 }]}>
-              {assignments.length} assigned · {visited.size} visited
+              {isSM
+                ? `${allStores.length} stores · ${visited.size} visited today`
+                : `${assignments.length} assigned · ${visited.size} visited`}
             </Text>
           </View>
           <Pressable
@@ -107,6 +123,8 @@ export default function RepStoresScreen({ navigation }: { navigation: any }) {
           </Pressable>
         </View>
 
+        {/* No "Assigned today" for a sales manager: nothing is assigned to them. */}
+        {isSM ? null : (
         <View style={styles.toggleRow}>
           {(['assigned', 'all'] as ViewMode[]).map((m) => (
             <Pressable
@@ -120,6 +138,7 @@ export default function RepStoresScreen({ navigation }: { navigation: any }) {
             </Pressable>
           ))}
         </View>
+        )}
 
         <View style={{ marginTop: Space.md }}>
           <SearchField value={searchInput} onChange={setSearchInput} placeholder="Search by name" />
@@ -164,7 +183,7 @@ export default function RepStoresScreen({ navigation }: { navigation: any }) {
                 : Colors.borderStrong;
             return (
               <Pressable
-                onPress={() => navigation.navigate('StoreDetail', { store: item })}
+                onPress={() => navigation.navigate('StoreDetail', { store: item, field: true })}
                 style={styles.rowWrap}
               >
                 <BentoTile>
@@ -253,6 +272,7 @@ const styles = StyleSheet.create({
   toggleText: { ...Type.label, color: Colors.textMuted },
   toggleTextActive: { color: Colors.white },
   list: { paddingHorizontal: Layout.screenPad, paddingTop: Space.sm },
+  backBtn: { width: Layout.tap, height: Layout.tap, alignItems: 'center', justifyContent: 'center', marginLeft: -Space.sm },
   sectionHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',

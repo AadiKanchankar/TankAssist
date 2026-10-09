@@ -34,7 +34,7 @@ const TITLE: Record<DrilldownKind, string> = {
   odometer: 'Odometer',
   cases: 'Cases sold',
   route: 'Route (GPS)',
-  visits: 'Stores visited',
+  visits: 'Total stores visited',
 };
 
 const fmtTime = (iso: string | null) =>
