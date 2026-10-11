@@ -34,6 +34,8 @@ import { monthName } from '../../lib/reportExport';
 import { managerShareNote } from '../../lib/reportSemantics';
 import { useManagementDashboard } from '../../hooks/useManagementDashboard';
 import { useCompanySellThrough } from '../../hooks/useSellThrough';
+import { useTeamPatterns } from '../../hooks/useProgress';
+import { TeamPatterns } from '../../components/Progress';
 import { fmtBottles } from '../../lib/sellThrough';
 import { useCasesTrend, TREND_RANGES, TrendRange } from '../../hooks/useCasesTrend';
 import { useInventoryAnalytics, fmtQty } from '../../hooks/useInventoryAnalytics';
@@ -69,6 +71,8 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
 
   const { data, refetch, isPending, isError } = useManagementDashboard(productId ?? undefined);
   const { data: sell, refetch: refetchSell } = useCompanySellThrough(30);
+  // Management-only screen, so this is management-only by construction.
+  const { data: patterns, refetch: refetchPatterns } = useTeamPatterns(true);
 
   const pipeline = data?.pipeline ?? {
     to_process: 0,
@@ -98,7 +102,8 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
     useCallback(() => {
       refetch();
       refetchSell();
-    }, [refetch, refetchSell])
+      refetchPatterns();
+    }, [refetch, refetchSell, refetchPatterns])
   );
 
   const { refreshing, onRefresh } = usePullToRefresh(refetch);
@@ -488,6 +493,15 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
                 </>
               )}
             </BentoTile>
+          </MotiView>
+        ) : null}
+
+        {/* Who is consistently completing plans and counting stock — a
+            coaching signal for management, by name, never a ranking. */}
+        {patterns ? (
+          <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
+            <Text style={[Type.section, styles.sectionTitle]}>Plans & stock counting · {monthTitle}</Text>
+            <TeamPatterns rows={patterns} monthTitle={monthTitle} />
           </MotiView>
         ) : null}
 

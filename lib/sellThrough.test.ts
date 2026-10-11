@@ -6,6 +6,7 @@ import {
   sellThroughIntervals,
   unexplainedSpotBottles,
   depletionFlagged,
+  corroboratedSpotIds,
   fmtBottles,
   DEPLETION_SLACK_BOTTLES,
 } from './sellThrough.ts';
@@ -73,6 +74,18 @@ const c = (at: string, bottles: number) => ({ store_id: S, product_id: P, at, bo
   );
   assert.equal(iv.length, 1);
   assert.equal(iv[0].soldBottles, 15);
+}
+
+// Corroboration: strict, per interval; pending (after the last count) never counts.
+{
+  const sp = (id: string, at: string, bottles: number) => ({ id, store_id: S, product_id: P, at, bottles, visit_id: 'v', user_id: 'u' });
+  const iv = sellThroughIntervals(
+    [c('2026-10-01T10:00:00Z', 24), c('2026-10-05T10:00:00Z', 20), c('2026-10-09T10:00:00Z', 20)],
+    [],
+    [sp('a', '2026-10-02T10:00:00Z', 3), sp('b', '2026-10-03T10:00:00Z', 1), sp('c', '2026-10-06T10:00:00Z', 2), sp('d', '2026-10-10T10:00:00Z', 1)],
+  );
+  // interval 1 sold 4, claims 4 → a, b; interval 2 sold 0, claims 2 → none; d after last count → pending.
+  assert.deepEqual([...corroboratedSpotIds(iv)].sort(), ['a', 'b']);
 }
 
 assert.equal(fmtBottles(52, 24), '2 cs 4 btl');

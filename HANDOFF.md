@@ -12,6 +12,16 @@ Session-state snapshot for the next Claude Code session. **Temporal** — record
 
 ## What is actually live right now
 
+### 2026-10-11b — personal gamification (JS-only, no schema)
+
+**JS-only → OTA-capable, on runtime 1.5.0** (master is 1.5.0 since the spot-sale batch, so this cannot reach 1.4.0 phones; it rides with the 1.5.0 rollout, or as an OTA once 1.5.0 is installed). No migration. Derivation `lib/progress.ts` (tested), `hooks/useProgress.ts`, plan bar + streak in the dashboard plan tile, "Your month" tile, `components/Celebration.tsx` (three moments), "Plans & stock counting" on the management dashboard. See CLAUDE.md "Gamification" for the excluded mechanics — a deliberate decision, not an omission.
+
+**Test APK:** `38169939` (1.5.0, built from `e84c7fa` — spot-sale batch, **without** gamification) finished 18:28 IST: https://expo.dev/artifacts/eas/RJwSWoB_Z-0ByCE7Ogp4PYpeAgy_VHuiZclOQJlgHOQ.apk — the face-detection module compiles. To test gamification on it, publish an OTA to channel `preview`, runtime 1.5.0 (only test phones have 1.5.0).
+
+**On-device pass (gamification):** (1) partial plan → bar shows "Stock counted at X of Y · visited Z of Y", pale segment for visited-not-counted; (2) finish the plan → celebration fires once, < 1 s, tap dismisses, doesn't return on the next focus; (3) remove one day's completion in a week → streak survives; (4) celebration screen: lime appears exactly once; (5) TalkBack over the dashboard and the celebration (it should wait for a tap). Screenshots of the three moments were NOT taken — no device or simulator on the Linux box.
+
+**Owner inputs:** `DECLARED_HOLIDAYS` in `lib/progress.ts` is empty — add the company's holidays (OTA). Plans: none submitted since 23 Sep, so the plan bar / streak read empty for everyone until reps plan their days again.
+
 ### 2026-10-11 — spot sales, face blur, camera zoom, compulsory stock, privacy notice: DATABASE LIVE, APP NEEDS BUILD 1.5.0
 
 **⚠️ BUILD-GATED — cannot ship as an OTA.** Face detection (`@infinitered/react-native-mlkit-face-detection`) is a new native module; `app.json` is now **1.5.0**, so no update can reach 1.4.0 phones. This build also carries the 2026-10-09 §1b app side (committed, never published) — it is in the same `master`.

@@ -40,6 +40,8 @@ export interface SpotRow {
   bottles: number;
   visit_id: string;
   user_id: string;
+  /** spot_sales.id — needed to say WHICH events an interval corroborates. */
+  id?: string;
 }
 
 export interface Interval {
@@ -55,6 +57,8 @@ export interface Interval {
   spotBottles: number;
   /** Visits whose spot sales fall in this interval. */
   spotVisitIds: string[];
+  /** The spot-sale events in this interval (those that carried an id). */
+  spotIds: string[];
 }
 
 /** Spot sales may exceed sell-through by this much before a flag is raised. */
@@ -100,6 +104,7 @@ export function sellThroughIntervals(
         soldBottles: a.bottles + delivered - b.bottles,
         spotBottles: spotIn.reduce((n, s) => n + s.bottles, 0),
         spotVisitIds: [...new Set(spotIn.map((s) => s.visit_id))],
+        spotIds: spotIn.flatMap((s) => (s.id ? [s.id] : [])),
       });
     }
   }
@@ -109,6 +114,20 @@ export function sellThroughIntervals(
 /** Bottles of claimed spot sales NOT explained by the stock that left the store. */
 export function unexplainedSpotBottles(i: Interval): number {
   return Math.max(0, i.spotBottles - Math.max(0, i.soldBottles));
+}
+
+/**
+ * Spot sales the store's stock fully accounts for — the only ones that may be
+ * CELEBRATED (gamification). Strict: an interval whose claims exceed what was
+ * sold by even one bottle corroborates none of them (we can't say which), and
+ * sales after the latest count are pending, not corroborated. The slack used
+ * for FLAGGING is deliberately not used here: tolerance protects reps from
+ * accusation, never inflates achievement.
+ */
+export function corroboratedSpotIds(intervals: Interval[]): Set<string> {
+  const out = new Set<string>();
+  for (const i of intervals) if (unexplainedSpotBottles(i) === 0) for (const id of i.spotIds) out.add(id);
+  return out;
 }
 
 export function depletionFlagged(i: Interval): boolean {

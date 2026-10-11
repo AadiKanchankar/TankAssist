@@ -46,6 +46,10 @@ import { usePullToRefresh } from '../../hooks/usePullToRefresh';
 import { useRepDashboard } from '../../hooks/useRepDashboard';
 import { useMyPlan } from '../../hooks/useJourneyPlans';
 import { useOpenVisit } from '../../hooks/useOpenVisit';
+import { useMyProgress } from '../../hooks/useProgress';
+import { useCelebration } from '../../hooks/useCelebration';
+import { PlanProgress, MonthTile } from '../../components/Progress';
+import Celebration from '../../components/Celebration';
 import {
   readCheckoutPosition,
   isFarCheckout,
@@ -83,6 +87,9 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
   const { data, refetch, isPending, isError } = useRepDashboard(profile?.id);
   const { data: plan, refetch: refetchPlan } = useMyPlan(profile?.id, planDateFor());
   const { data: openVisit, refetch: refetchOpenVisit } = useOpenVisit(profile?.id);
+  // Personal progress (derived — lib/progress.ts) and its three celebration moments.
+  const { data: progress, refetch: refetchProgress } = useMyProgress(profile?.id);
+  const celebration = useCelebration(profile?.id, progress);
   const attendance = data?.attendance ?? null;
   const assignments = data?.assignments ?? [];
   const visits = data?.visits ?? [];
@@ -123,13 +130,16 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
       // Re-checked on every focus, so returning from a killed app (or from the
       // stepper after checking out) reflects the true server state.
       refetchOpenVisit();
-    }, [refetch, refetchPlan, refetchOpenVisit])
+      // Returning from a check-out is what completes a plan; re-derive so the
+      // bar (and, once, the celebration) reflect it.
+      refetchProgress();
+    }, [refetch, refetchPlan, refetchOpenVisit, refetchProgress])
   );
 
   const { refreshing, onRefresh } = usePullToRefresh(
     useCallback(async () => {
-      await Promise.all([refetch(), refetchPlan(), refetchOpenVisit()]);
-    }, [refetch, refetchPlan, refetchOpenVisit])
+      await Promise.all([refetch(), refetchPlan(), refetchOpenVisit(), refetchProgress()]);
+    }, [refetch, refetchPlan, refetchOpenVisit, refetchProgress])
   );
 
   const isCheckedIn = !!attendance?.check_in_time;
@@ -689,6 +699,11 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
                 </Text>
               </View>
 
+              {/* Progress measures the work wanted: visited AND stock handled. */}
+              {progress && progress.today.day === plan.plan_date ? (
+                <PlanProgress p={progress.today} streak={progress.streak} />
+              ) : null}
+
               {plan.status === 'submitted' ? (
                 <Text style={styles.planHint}>
                   Start visiting now — you don’t have to wait. Your manager will see these visits
@@ -725,6 +740,13 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
             </BentoTile>
           )}
         </MotiView>
+
+        {/* Personal month — compared only with the person's own history. */}
+        {progress ? (
+          <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
+            <MonthTile b={progress.bests} />
+          </MotiView>
+        ) : null}
 
         {/* A sales manager has no assigned stores — any store in the system is
             theirs to visit — so the preview becomes a door to the full list. */}
@@ -887,6 +909,8 @@ export default function RepDashboard({ navigation }: { navigation: any }) {
           navigation.navigate('StoreVisit', { store: s });
         }}
       />
+
+      <Celebration spec={celebration.spec} onDone={celebration.dismiss} />
     </View>
   );
 }

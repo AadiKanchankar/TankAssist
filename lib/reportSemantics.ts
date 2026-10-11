@@ -5,6 +5,9 @@ import type { ActorRole } from './teamFigures';
 // always shown) — pure, in its own file so it runs under tsx, but exported
 // from here so every report figure comes from this one module.
 export * from './teamFigures';
+// Personal progress (gamification): derived from the same rows, never stored —
+// one definition for the app and any report. Pure, in its own file for tsx.
+export * from './progress';
 
 /** Local YYYY-MM-DD (device-local, matching reportExport's bucketing). */
 function toDateStr(d: Date): string {

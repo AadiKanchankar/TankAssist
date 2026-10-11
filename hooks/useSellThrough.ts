@@ -53,7 +53,7 @@ export async function loadSellThrough(storeIds: string[] | 'all', days = SELL_TH
     scoped(
       supabase
         .from('spot_sales')
-        .select('store_id, product_id, created_at, quantity, visit_id, user_id')
+        .select('id, store_id, product_id, created_at, quantity, visit_id, user_id')
         .is('undone_at', null)
         .gte('created_at', since),
     ),
@@ -96,6 +96,7 @@ export async function loadSellThrough(storeIds: string[] | 'all', days = SELL_TH
     bottles: s.quantity,
     visit_id: s.visit_id,
     user_id: s.user_id,
+    id: s.id,
   }));
   return { intervals: sellThroughIntervals(counts, deliveries, spotRows), perCase, productName };
 }
