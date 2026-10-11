@@ -13,6 +13,9 @@ interface UserProfile {
   assigned_manager_id: string | null;
   is_active: boolean;
   is_tester: boolean;
+  /** Privacy-notice version this user last acknowledged (constants/privacyPolicy.ts). */
+  policy_version: string | null;
+  policy_acknowledged_at: string | null;
 }
 
 interface AuthState {

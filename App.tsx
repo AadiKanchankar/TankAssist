@@ -39,6 +39,7 @@ import ManagementDashboard from './app/(admin)/management-dashboard';
 import ProfileScreen from './app/(shared)/profile';
 import StoreDetailScreen from './app/(shared)/store-detail';
 import OrderDetailScreen from './app/(shared)/order-detail';
+import PolicyUpdateCard from './components/PolicyUpdateCard';
 import TesterBadge from './components/TesterBadge';
 import JourneyPlanScreen from './app/(rep)/journey-plan';
 import ChallanScreen from './app/(rep)/challan';
@@ -447,6 +448,7 @@ export default function App() {
               </NavigationContainer>
             </ErrorBoundary>
             <TesterBadge />
+            {session && profile ? <PolicyUpdateCard /> : null}
           </>
         )}
         <StatusBar style="dark" />

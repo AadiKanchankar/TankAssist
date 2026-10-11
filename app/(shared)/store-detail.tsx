@@ -29,6 +29,9 @@ import { supabase } from '../../lib/supabase';
 import { fmtOrderPrice } from '../../lib/orders';
 import { useStoreDetail, Store, StockRow } from '../../hooks/useStores';
 import { userMessage } from '../../lib/userError';
+import { useStoreSellThrough } from '../../hooks/useSellThrough';
+import { stockSkipLabel } from '../../lib/stockBuckets';
+import { fmtBottles, depletionFlagged, type Interval } from '../../lib/sellThrough';
 
 const fmtDate = (iso: string) =>
   new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
@@ -53,11 +56,18 @@ export default function StoreDetailScreen({ route, navigation }: { route: any; n
   const repStatus = data?.repStatus ?? 'pending';
   const dayEnded = data?.dayEnded ?? false;
   const [deleting, setDeleting] = useState(false);
+  // Managers' view only; fetched alongside, never blocking the page.
+  const showSellThrough = isManager && !fieldMode;
+  const { data: st, refetch: refetchSt } = useStoreSellThrough(routeStore.id, showSellThrough);
+  // Latest interval per product — what moved between the two most recent counts.
+  const latestByProduct = new Map<string, Interval>();
+  for (const iv of st?.intervals ?? []) latestByProduct.set(iv.product_id, iv);
 
   useFocusEffect(
     useCallback(() => {
       refetch();
-    }, [refetch])
+      if (showSellThrough) refetchSt();
+    }, [refetch, refetchSt, showSellThrough])
   );
 
   const callNumber = () => {
@@ -259,6 +269,44 @@ export default function StoreDetailScreen({ route, navigation }: { route: any; n
             </MotiView>
           )}
 
+          {/* Sell-through (managers): stock at last count + delivered since − stock now. */}
+          {showSellThrough && st && (
+            <MotiView {...entrance(s++, reduce)}>
+              <Text style={styles.sectionTitle}>Sell-through</Text>
+              <BentoTile>
+                {latestByProduct.size === 0 ? (
+                  <Text style={[Type.body, { color: Colors.textSecondary }]}>
+                    Needs two stock counts in the last 90 days to work out what sold.
+                  </Text>
+                ) : (
+                  [...latestByProduct.values()].map((iv, i) => {
+                    const per = st.perCase[iv.product_id] ?? 0;
+                    const days = Math.max(1, Math.round((Date.parse(iv.to) - Date.parse(iv.from)) / 86_400_000));
+                    return (
+                      <View key={iv.product_id} style={[{ paddingVertical: Space.sm }, i > 0 && styles.divider]}>
+                        <Text style={[Type.bodyMed, { color: Colors.text }]}>
+                          {st.productName[iv.product_id] ?? 'Product'}
+                        </Text>
+                        <Text style={[Type.body, tabularNums, { color: Colors.text, marginTop: 2 }]}>
+                          {iv.soldBottles >= 0
+                            ? `Sold ${fmtBottles(iv.soldBottles, per)} in ${days} day${days === 1 ? '' : 's'}`
+                            : 'Stock rose with no delivery recorded — check the counts'}
+                        </Text>
+                        <Text style={[Type.caption, tabularNums, { color: Colors.textSecondary, marginTop: 2 }]}>
+                          {fmtDate(iv.from)} → {fmtDate(iv.to)} · {fmtBottles(iv.startBottles, per)} + {fmtBottles(iv.deliveredBottles, per)} delivered − {fmtBottles(iv.endBottles, per)} now
+                        </Text>
+                        <Text style={[Type.caption, tabularNums, { color: depletionFlagged(iv) ? Colors.warning : Colors.textSecondary, marginTop: 2 }]}>
+                          Spot sales logged in this period: {fmtBottles(iv.spotBottles, per)}
+                          {depletionFlagged(iv) ? ' — more than the stock accounts for' : ''}
+                        </Text>
+                      </View>
+                    );
+                  })
+                )}
+              </BentoTile>
+            </MotiView>
+          )}
+
           {/* Visits & notes */}
           <MotiView {...entrance(s++, reduce)}>
             <Text style={styles.sectionTitle}>Visits & notes</Text>
@@ -280,6 +328,12 @@ export default function StoreDetailScreen({ route, navigation }: { route: any; n
                   {v.cases_sold ? (
                     <Text style={[Type.caption, { color: Colors.textMuted, marginTop: 4 }]}>
                       {v.cases_sold} cases sold (legacy)
+                    </Text>
+                  ) : null}
+                  {v.stock_skip_reason ? (
+                    <Text style={[Type.caption, { color: Colors.warning, marginTop: 4 }]}>
+                      Stock not counted: {stockSkipLabel(v.stock_skip_reason).toLowerCase()}
+                      {v.stock_skip_note ? ` — ${v.stock_skip_note}` : ''}
                     </Text>
                   ) : null}
                   {v.notes ? (

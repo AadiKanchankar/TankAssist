@@ -15,6 +15,8 @@ import {
   editDistance,
   nameLooksSame,
   findDuplicateCandidates,
+  spotFlags,
+  STOCK_REQUIRED_FROM,
   JourneyPlan,
   VisitForFlags,
 } from './journeyPlan.ts';
@@ -307,6 +309,57 @@ assert.equal(planDateFor(new Date(2026, 0, 9, 23, 30)), '2026-01-09', 'zero-padd
 
   // A genuinely new shop in an empty area offers nothing and blocks nothing.
   assert.deepEqual(findDuplicateCandidates('Brand New Bar', 19.9, 72.1, existing, haversineKm), []);
+}
+
+// ── Spot-sale pattern flags ────────────────────────────────────────────────
+{
+  const base: VisitForFlags = {
+    id: 'v', store_id: 's', check_in_time: '2026-10-21T10:00:00Z', latitude: 19, longitude: 72,
+    distance_from_store_meters: 10, is_mock_location: false,
+    check_out_time: '2026-10-21T11:00:00Z', store_lat: 19, store_lng: 72,
+  };
+  const sale = (t: string, o: Partial<{ latitude: number; accuracy_m: number; duplicate_scope: any }> = {}) => ({
+    created_at: t, latitude: o.latitude ?? 19, longitude: 72, accuracy_m: o.accuracy_m ?? 10,
+    duplicate_scope: o.duplicate_scope ?? null,
+  });
+  const kinds = (v: VisitForFlags) => spotFlags(v, haversineKm).map((f) => f.kind).sort();
+
+  // Spread across the visit, at the store, no reuse: nothing — however many.
+  const honest = Array.from({ length: 10 }, (_, i) => sale(`2026-10-21T10:${String(i * 5).padStart(2, '0')}:00Z`));
+  assert.deepEqual(kinds({ ...base, spot_sales: honest }), []);
+  // No sales / not loaded: nothing.
+  assert.deepEqual(kinds({ ...base, spot_sales: [] }), []);
+  assert.deepEqual(kinds(base), []);
+
+  // Three inside two minutes → burst; two in the last two minutes → end cluster.
+  assert.ok(kinds({ ...base, spot_sales: [sale('2026-10-21T10:10:00Z'), sale('2026-10-21T10:10:40Z'), sale('2026-10-21T10:11:30Z')] }).includes('spot_burst'));
+  assert.deepEqual(kinds({ ...base, spot_sales: [sale('2026-10-21T10:59:00Z'), sale('2026-10-21T10:59:30Z')] }), ['spot_end_cluster']);
+  // An auto-closed visit's checkout is not a real moment: no end-cluster.
+  assert.deepEqual(kinds({ ...base, auto_closed: true, spot_sales: [sale('2026-10-21T10:59:00Z'), sale('2026-10-21T10:59:30Z')] }), []);
+
+  // ~1.1 km away → away; inside GPS accuracy → not.
+  assert.deepEqual(kinds({ ...base, spot_sales: [sale('2026-10-21T10:10:00Z', { latitude: 19.01 })] }), ['spot_away']);
+  assert.deepEqual(kinds({ ...base, spot_sales: [sale('2026-10-21T10:10:00Z', { latitude: 19.003, accuracy_m: 200 })] }), []);
+
+  // Server-detected near-duplicate.
+  assert.deepEqual(kinds({ ...base, spot_sales: [sale('2026-10-21T10:10:00Z', { duplicate_scope: 'company' })] }), ['spot_duplicate']);
+}
+
+// ── Compulsory stock ───────────────────────────────────────────────────────
+{
+  const v = (o: Partial<VisitForFlags>): VisitForFlags => ({
+    id: 'v', store_id: 's', check_in_time: `${STOCK_REQUIRED_FROM}T10:00:00Z`, latitude: null, longitude: null,
+    distance_from_store_meters: null, is_mock_location: false, check_out_time: `${STOCK_REQUIRED_FROM}T11:00:00Z`,
+    artifact_count: 1, ...o,
+  });
+  const has = (x: VisitForFlags) => flagsForVisit(x, plan({ status: 'approved' }), null, haversineKm).some((f) => f.kind === 'stock_not_recorded');
+  assert.equal(has(v({ stock_counted: false })), true);
+  assert.equal(has(v({ stock_counted: false, stock_skip_reason: 'shop_busy' })), false);
+  assert.equal(has(v({ stock_counted: true })), false);
+  assert.equal(has(v({})), false, 'not loaded is not "missing"');
+  assert.equal(has(v({ stock_counted: false, check_out_time: '2026-10-01T11:00:00Z' })), false, 'predates the rule');
+  assert.equal(has(v({ stock_counted: false, auto_closed: true })), false);
+  assert.equal(has(v({ stock_counted: false, check_out_time: null })), false, 'still open');
 }
 
 console.log('journeyPlan.test.ts: all assertions passed');

@@ -4,6 +4,7 @@
   "main": "index.ts",
   "dependencies": {
     "@expo/vector-icons": "^15.1.1",
+    "@infinitered/react-native-mlkit-face-detection": "5.0.0",
     "@infinitered/react-native-mlkit-text-recognition": "^5.0.1",
     "@react-native-async-storage/async-storage": "2.2.0",
     "@react-navigation/bottom-tabs": "^7.17.1",
@@ -33,6 +34,7 @@
     "expo-status-bar": "~56.0.4",
     "expo-task-manager": "~56.0.27",
     "expo-updates": "~56.0.28",
+    "jpeg-js": "0.4.4",
     "moti": "^0.30.0",
     "react": "19.2.3",
     "react-native": "0.85.3",
@@ -51,7 +53,8 @@
     "typescript": "~6.0.3"
   },
   "overrides": {
-    "react": "19.2.3"
+    "react": "19.2.3",
+    "@infinitered/react-native-mlkit-core": "3.1.0"
   },
   "scripts": {
     "start": "expo start",

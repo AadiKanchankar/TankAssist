@@ -30,6 +30,17 @@ export const ODOMETER_BUCKET = 'odometer-photos';
  */
 export const CHALLAN_BUCKET = 'challan-photos';
 
+/**
+ * Locked bucket for spot-sale photos — pictures of members of the public, so
+ * kept apart from visit-photos: own retention (deleted at 90 days by
+ * purge_spot_sale_photos), JPEG only, uploads pinned to the rep's own folder,
+ * and readable only by the rep, their manager and management (never peers).
+ *
+ * ⚠️ Only a file returned by blurFacesForUpload (lib/faceBlur.ts) may be
+ * passed here. Same signing rule as the other locked buckets.
+ */
+export const SPOT_SALE_BUCKET = 'spot-sale-photos';
+
 /** Local date as YYYY-MM-DD (used as a storage path segment). */
 function todayStr(): string {
   const d = new Date();
@@ -165,6 +176,16 @@ export async function uploadOdometerPhoto(
 export async function uploadChallanPhoto(uri: string, repId: string): Promise<string> {
   const path = `challans/${repId}/${todayStr()}/${Date.now()}.jpg`;
   return uploadToPath(uri, path, CHALLAN_BUCKET);
+}
+
+/**
+ * Upload a face-blurred spot-sale photo into the LOCKED spot-sale bucket.
+ * Path: spot-sales/{repId}/{YYYY-MM-DD}/{timestamp}-{rand}.jpg — the second
+ * segment must be the uploader's id or the bucket's insert policy refuses it.
+ */
+export async function uploadSpotSalePhoto(uri: string, repId: string): Promise<string> {
+  const path = `spot-sales/${repId}/${todayStr()}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+  return uploadToPath(uri, path, SPOT_SALE_BUCKET);
 }
 
 /**

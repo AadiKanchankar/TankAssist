@@ -10,7 +10,8 @@ import {
   Alert,
   ActivityIndicator,
 } from 'react-native';
-import { CameraView, useCameraPermissions } from 'expo-camera';
+import { useCameraPermissions } from 'expo-camera';
+import ZoomCamera, { type ZoomCameraHandle } from '../../components/ZoomCamera';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, Type, Space, Radius, Layout } from '../../constants/colors';
 import Header from '../../components/Header';
@@ -54,7 +55,7 @@ export default function ChallanScreen({ route, navigation }: { route: any; navig
   const visitId: string | null = route?.params?.visitId ?? null;
 
   const [permission, requestPermission] = useCameraPermissions();
-  const [cameraRef, setCameraRef] = useState<CameraView | null>(null);
+  const [cameraRef, setCameraRef] = useState<ZoomCameraHandle | null>(null);
   const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [shooting, setShooting] = useState(false);
 
@@ -172,7 +173,7 @@ export default function ChallanScreen({ route, navigation }: { route: any; navig
           </View>
         ) : (
           <>
-            <CameraView style={styles.camera} facing="back" ref={setCameraRef} />
+            <ZoomCamera style={styles.camera} facing="back" ref={setCameraRef} />
             <View style={styles.shutterBar}>
               <Text style={styles.shutterHint}>
                 Fill the frame with the challan. You will type the quantities next.

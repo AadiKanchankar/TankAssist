@@ -27,6 +27,8 @@ export interface VisitRow {
   check_in_time: string;
   check_out_time: string | null;
   cases_sold: number | null;
+  stock_skip_reason: string | null;
+  stock_skip_note: string | null;
   notes: string | null;
   users: { name: string } | null;
 }
@@ -136,7 +138,7 @@ async function fetchStoreDetail(
 
   const { data: visitRows } = await supabase
     .from('store_visits')
-    .select('id, check_in_time, check_out_time, cases_sold, notes, users(name)')
+    .select('id, check_in_time, check_out_time, cases_sold, notes, stock_skip_reason, stock_skip_note, users(name)')
     .eq('store_id', routeStore.id)
     .order('check_in_time', { ascending: false });
 

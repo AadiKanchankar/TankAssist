@@ -12,6 +12,31 @@ Session-state snapshot for the next Claude Code session. **Temporal** — record
 
 ## What is actually live right now
 
+### 2026-10-11 — spot sales, face blur, camera zoom, compulsory stock, privacy notice: DATABASE LIVE, APP NEEDS BUILD 1.5.0
+
+**⚠️ BUILD-GATED — cannot ship as an OTA.** Face detection (`@infinitered/react-native-mlkit-face-detection`) is a new native module; `app.json` is now **1.5.0**, so no update can reach 1.4.0 phones. This build also carries the 2026-10-09 §1b app side (committed, never published) — it is in the same `master`.
+
+**Migration `spot_sales_privacy` (owner-approved 2026-10-11), verified 21/21 by impersonation in a rolled-back transaction** (nothing persisted, re-checked): `spot_sales` + `competitor_brands` (seeded) + `undo_spot_sale()`; bucket **`spot-sale-photos`** (JPEG, 2 MB, own-folder upload, read = self/management/`manages_rep`; anon may select+delete only objects > 90 days); **`purge_spot_sale_photos()`** + pg_cron **`purge-spot-sale-photos`** (hourly, ran once clean); `store_visit_photos.zoom`; `store_visits.stock_skip_reason/stock_skip_note`; `users.policy_version/policy_acknowledged_at` + `acknowledge_policy()`; **`on_location_viewed()` no longer pushes** (audit log kept; only notification path on that event — verified). Checks covered: own-open-visit insert, server-forced store/time/actor_role, other rep's visit / other folder / after check-out / direct UPDATE / DELETE all 42501, near-duplicate flagged `same_rep`, undo once within 60 s then refused, peer rep sees 0 rows and 0 objects, management sees both, rep can't add brands, anon sees nothing fresh, ack writes only its two columns.
+
+**App side (committed):** `ZoomCamera` replaces all six camera surfaces; `lib/faceBlur.ts` (fail-closed), `lib/faceRedact.ts`, `lib/photoHash.ts`; `components/SpotSale.tsx` bar + capture; compulsory stock with skip reasons; `lib/sellThrough.ts` on Store Detail + management dashboard; new flag kinds in the review queue; Privacy & Data page (Profile + login) + one-time acknowledgement card. Policy text corrected where it overstated (location look-ups off duty; route basis) — see `constants/privacyPolicy.ts`.
+
+**Ship sequence — do not reorder:**
+1. Build a **test** APK (1.5.0) — **not for distribution**.
+2. On-device pass (below). The face-blur check is on the **uploaded object**, not the preview.
+3. Only then distribute 1.5.0 to every phone; set `STOCK_REQUIRED_FROM` (`lib/journeyPlan.ts`, placeholder `2026-10-20`) to the date the last phone updates, via OTA.
+4. Before go-live: privacy notice placeholders filled + legal review, `POLICY_EFFECTIVE_DATE` set (the page says "Draft" until then).
+
+**On-device pass (1.5.0 test APK):**
+1. Check in → the dark spot-sale bar sits above the stepper on every step until check-out.
+2. Log a sale **with a face in frame** → preview says "1 face blurred"; open it full screen. Then download that object from the `spot-sale-photos` bucket in the dashboard and confirm no recoverable face. Also try a profile face and a face ~3 m back.
+3. Log a second shot of the same scene → manager's review queue shows "near-copy". Undo within 60 s → tally drops; after 60 s Undo is gone.
+4. Odometer at **1x, 2x and 5x** — record what OCR read at each (crop maths unchanged by design; this proves it).
+5. Try to leave the stock step blank → prompt; pick "Other" without a note → still blocked; with a reason → proceeds; manager sees "Stock not counted: …" on Store Detail.
+6. Profile → Privacy & Data; logged out → login screen link; first open shows the one-time card, and it doesn't return after "Got it".
+7. Manager views a rep's location → **no push arrives**, and a `location_requests` row exists.
+
+**⚠️ Found live 2026-10-11, NOT changed (owner's call):** both testers (Pranoy, Aadi) are currently switched to `sales_manager`, which the 2026-10-09 constraint below forbids until §1b is on every phone. Aadi's account has 9 stock snapshots; the snapshot read policy hides rows whose recorder is *currently* an SM, so reps on installed apps likely aren't seeing those counts in prefill right now. Switching both back to `rep`/`management` restores them.
+
 ### 2026-10-09 — sales managers as field users: DATABASE SIDE LIVE (app side §1b not shipped yet)
 
 > ## ⛔ HARD ORDERING CONSTRAINT — no `sales_manager` account may exist until §1b has shipped

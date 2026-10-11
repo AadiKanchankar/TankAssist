@@ -111,7 +111,16 @@ export type FlagKind =
   | 'auto_closed'
   | 'no_work_recorded'
   | 'far_at_checkout'
-  | 'closed_on_next_checkin';
+  | 'closed_on_next_checkin'
+  // Spot sales (§1c) — flag, never cap: a good rep may genuinely convert ten.
+  | 'spot_duplicate'
+  | 'spot_burst'
+  | 'spot_away'
+  | 'spot_end_cluster'
+  | 'spot_not_depleted'
+  // Compulsory stock (§4).
+  | 'stock_not_recorded'
+  | 'stock_skipped_often';
 
 export interface VisitFlag {
   kind: FlagKind;
@@ -138,6 +147,34 @@ export const FAR_AT_CHECKOUT_METERS = 100;
 export const IMPLAUSIBLE_KMH = 120;
 /** Two stores closer than this are probably the same shop entered twice. */
 export const DUPLICATE_STORE_METERS = 100;
+
+// ── Spot-sale pattern thresholds — the one place to tune them ──
+/** This many spot sales inside SPOT_BURST_WINDOW_MS reads as bulk-logging. */
+export const SPOT_BURST_MIN = 3;
+export const SPOT_BURST_WINDOW_MS = 2 * 60_000;
+/** A spot sale logged further than this from the store (beyond GPS accuracy). */
+export const SPOT_AWAY_METERS = 250;
+/** This many in the final SPOT_END_WINDOW_MS before check-out: logging on the way out. */
+export const SPOT_END_MIN = 2;
+export const SPOT_END_WINDOW_MS = 2 * 60_000;
+/**
+ * Visits closed on/after this date must carry a stock count or a skip reason.
+ * Earlier visits predate the rule (and 1.4.0 phones have no skip UI).
+ * ⚠️ Set to the 1.5.0 rollout date when the build is on every phone.
+ */
+export const STOCK_REQUIRED_FROM = '2026-10-20';
+/** Skipping on at least this many of a rep's last STOCK_SKIP_OF visits is a pattern. */
+export const STOCK_SKIP_MIN = 3;
+export const STOCK_SKIP_OF = 10;
+
+export interface SpotForFlags {
+  /** Server clock (spot_sales.created_at) — never the device's captured_at. */
+  created_at: string;
+  latitude: number | null;
+  longitude: number | null;
+  accuracy_m: number | null;
+  duplicate_scope: 'same_rep' | 'same_store' | 'company' | null;
+}
 
 export interface VisitForFlags {
   id: string;
@@ -175,6 +212,14 @@ export interface VisitForFlags {
    * back soft and labelled advisory. Every other flag applies unchanged.
    */
   actor_role?: string | null;
+  /** Live (not undone) spot sales in this visit. Undefined = not loaded. */
+  spot_sales?: SpotForFlags[];
+  /** The store's saved coordinates, for the spot-sale distance check. */
+  store_lat?: number | null;
+  store_lng?: number | null;
+  /** True when the visit wrote at least one stock snapshot. Undefined = not loaded. */
+  stock_counted?: boolean;
+  stock_skip_reason?: string | null;
 }
 
 /**
@@ -362,6 +407,89 @@ export function flagsForVisit(
     });
   }
 
+  flags.push(...spotFlags(visit, distanceKm));
+
+  // 6. Compulsory stock: closed with neither a count nor a reason. Only for
+  //    visits the rule applies to, and only when it was actually checked
+  //    (stock_counted loaded). An auto-closed visit already says it was never
+  //    finished; it doesn't also collect this.
+  if (
+    visit.stock_counted === false &&
+    !visit.stock_skip_reason &&
+    visit.check_out_time &&
+    visit.auto_closed !== true &&
+    visit.check_out_time.slice(0, 10) >= STOCK_REQUIRED_FROM
+  ) {
+    flags.push({
+      kind: 'stock_not_recorded',
+      reason: 'Visit closed without a stock count or a reason for skipping it.',
+    });
+  }
+
+  return flags;
+}
+
+/**
+ * Spot-sale pattern flags for one visit. Each is a prompt to look, never a
+ * cap: the count itself is never limited, because a good rep converts many.
+ */
+export function spotFlags(
+  visit: VisitForFlags,
+  distanceKm: (aLat: number, aLng: number, bLat: number, bLng: number) => number,
+): VisitFlag[] {
+  const sales = visit.spot_sales;
+  if (!sales?.length) return [];
+  const flags: VisitFlag[] = [];
+  const times = sales.map((s) => Date.parse(s.created_at)).sort((a, b) => a - b);
+
+  const dup = sales.find((s) => s.duplicate_scope);
+  if (dup) {
+    const where =
+      dup.duplicate_scope === 'same_rep'
+        ? 'an earlier photo by the same person'
+        : dup.duplicate_scope === 'same_store'
+        ? 'an earlier photo at this store'
+        : 'a photo taken at another store';
+    flags.push({ kind: 'spot_duplicate', reason: `A spot-sale photo is a near-copy of ${where}.` });
+  }
+
+  let burst = 0;
+  for (let i = 0, j = 0; j < times.length; j++) {
+    while (times[j] - times[i] > SPOT_BURST_WINDOW_MS) i++;
+    burst = Math.max(burst, j - i + 1);
+  }
+  if (burst >= SPOT_BURST_MIN) {
+    flags.push({
+      kind: 'spot_burst',
+      reason: `${burst} spot sales logged within ${SPOT_BURST_WINDOW_MS / 60_000} minutes of each other.`,
+    });
+  }
+
+  if (visit.store_lat != null && visit.store_lng != null) {
+    let worst = 0;
+    for (const s of sales) {
+      if (s.latitude == null || s.longitude == null) continue;
+      const m = distanceKm(s.latitude, s.longitude, visit.store_lat, visit.store_lng) * 1000 - (s.accuracy_m ?? 0);
+      worst = Math.max(worst, m);
+    }
+    if (worst > SPOT_AWAY_METERS) {
+      flags.push({
+        kind: 'spot_away',
+        reason: `A spot sale was logged about ${Math.round(worst)} m from the store.`,
+      });
+    }
+  }
+
+  if (visit.check_out_time && visit.auto_closed !== true) {
+    const out = Date.parse(visit.check_out_time);
+    const late = times.filter((x) => x <= out && out - x <= SPOT_END_WINDOW_MS).length;
+    if (late >= SPOT_END_MIN) {
+      flags.push({
+        kind: 'spot_end_cluster',
+        reason: `${late} spot sales logged in the last ${SPOT_END_WINDOW_MS / 60_000} minutes before check-out.`,
+      });
+    }
+  }
   return flags;
 }
 
@@ -381,6 +509,13 @@ export function sortFlags(flags: VisitFlag[]): VisitFlag[] {
     off_plan: 6,
     plan_not_approved: 7,
     auto_closed: 8,
+    spot_duplicate: 1,
+    spot_not_depleted: 2,
+    spot_away: 3,
+    spot_end_cluster: 4,
+    spot_burst: 4,
+    stock_not_recorded: 5,
+    stock_skipped_often: 5,
   };
   return [...flags].sort(
     (a, b) => Number(a.soft ?? false) - Number(b.soft ?? false) || rank[a.kind] - rank[b.kind],

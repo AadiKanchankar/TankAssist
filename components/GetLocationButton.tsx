@@ -69,10 +69,10 @@ const ago = (iso: string) => {
 /**
  * Manager-side "Get location" (management + sales_manager). While a rep is on
  * duty their phone reports its position every few minutes (lib/dutyLocation),
- * so this answers instantly — no request for the rep to accept. Logging the
- * view (location_requests INSERT) is what tells the rep: its trigger snapshots
- * what was shown and, only while they are on duty, sends them a silent
- * "Your live location was viewed" notification. RLS gates who may look.
+ * so this answers instantly — no request for the rep to accept. Every view is
+ * LOGGED (location_requests INSERT; its trigger snapshots what was shown) — the
+ * audit trail the privacy notice §6 points to. The rep is no longer notified
+ * (owner decision 2026-10-11); the log stays. RLS gates who may look.
  */
 export default function GetLocationButton({ repId, repName }: { repId: string; repName: string }) {
   const [open, setOpen] = useState(false);
@@ -92,7 +92,7 @@ export default function GetLocationButton({ repId, repName }: { repId: string; r
       supabase.from('location_requests').insert({ rep_id: repId, requested_by: me }),
     ]);
 
-    // An unlogged view would be one the rep is never told about — don't show it.
+    // An unlogged view would be one the audit trail never recorded — don't show it.
     if (logError) {
       setView({
         icon: 'close-circle-outline', tone: Colors.alert, title: 'Couldn’t get location', fix: null,

@@ -18,6 +18,7 @@ import { Colors, Typography, Type, Space, Radius, Layout } from '../../constants
 import Button from '../../components/Button';
 import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
+import PrivacyNotice from '../../components/PrivacyNotice';
 
 const COUNTRY_CODES = [
   { code: '+91', country: 'India' },
@@ -34,6 +35,9 @@ export default function LoginScreen({ navigation }: { navigation: any }) {
   const [phone, setPhone] = useState('');
   const [countryCode, setCountryCode] = useState('+91');
   const [showCodePicker, setShowCodePicker] = useState(false);
+  // Reachable before login: location and camera are asked for early, so the
+  // notice explaining them must be readable before anyone signs in.
+  const [showPrivacy, setShowPrivacy] = useState(false);
   const [error, setError] = useState('');
   const [checking, setChecking] = useState(false);
   const { sendOtp, loading } = useAuthStore();
@@ -168,8 +172,19 @@ export default function LoginScreen({ navigation }: { navigation: any }) {
               style={styles.loginButton}
             />
           </View>
+
+          <Pressable
+            onPress={() => setShowPrivacy(true)}
+            style={styles.privacyLink}
+            accessibilityRole="link"
+            accessibilityLabel="Privacy and data notice"
+          >
+            <Text style={[Type.label, { color: Colors.accent }]}>Privacy & Data</Text>
+          </Pressable>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      <PrivacyNotice visible={showPrivacy} onClose={() => setShowPrivacy(false)} />
 
       {/* Country code picker */}
       <Modal
@@ -212,6 +227,7 @@ export default function LoginScreen({ navigation }: { navigation: any }) {
 }
 
 const styles = StyleSheet.create({
+  privacyLink: { alignSelf: 'center', minHeight: Layout.tap, justifyContent: 'center', paddingHorizontal: Space.md, marginTop: Space.lg },
   safe: { flex: 1, backgroundColor: Colors.background },
   flex: { flex: 1 },
   scrollContent: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: Space.xl, paddingVertical: Space.xxl },

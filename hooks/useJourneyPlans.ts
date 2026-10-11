@@ -11,8 +11,15 @@ import {
   sortFlags,
   planDateFor,
   planCutoffDate,
+  STOCK_REQUIRED_FROM,
+  STOCK_SKIP_MIN,
+  STOCK_SKIP_OF,
+  type SpotForFlags,
 } from '../lib/journeyPlan';
 import { mismatchFlag } from '../lib/odometer';
+import { loadSellThrough } from './useSellThrough';
+import { depletionFlagged, unexplainedSpotBottles, fmtBottles } from '../lib/sellThrough';
+import { stockSkipLabel } from '../lib/stockBuckets';
 
 const SELECT =
   'id, rep_id, plan_date, status, submitted_at, reviewed_by, reviewed_at, reject_reason, journey_plan_stores(store_id, position, stores(name))';
@@ -400,9 +407,14 @@ const VISIT_SCAN_LIMIT = 500;
  * would accuse every honest rep in the window — the one direction this flag
  * must never fail in.
  */
-async function artifactCounts(visitIds: string[]): Promise<Record<string, number>> {
+async function artifactCounts(
+  visitIds: string[],
+): Promise<{ counts: Record<string, number>; stocked: Set<string> }> {
   const out: Record<string, number> = {};
-  if (!visitIds.length) return out;
+  // Visits that wrote a stock snapshot — the compulsory-stock check needs this
+  // separately from the overall artifact tally.
+  const stocked = new Set<string>();
+  if (!visitIds.length) return { counts: out, stocked };
 
   const results = await Promise.all([
     supabase.from('store_visit_photos').select('visit_id').in('visit_id', visitIds),
@@ -413,13 +425,15 @@ async function artifactCounts(visitIds: string[]): Promise<Record<string, number
     // gets accused of a phantom visit.
     supabase.from('challans').select('visit_id').in('visit_id', visitIds),
   ]);
-  for (const { data, error } of results) {
+  results.forEach(({ data, error }, i) => {
     if (error) throw error;
     for (const row of (data as { visit_id: string | null }[]) ?? []) {
-      if (row.visit_id) out[row.visit_id] = (out[row.visit_id] ?? 0) + 1;
+      if (!row.visit_id) continue;
+      out[row.visit_id] = (out[row.visit_id] ?? 0) + 1;
+      if (i === 1) stocked.add(row.visit_id);
     }
-  }
-  return out;
+  });
+  return { counts: out, stocked };
 }
 
 /** The signed-in user's id, from the in-memory session (no round trip). */
@@ -443,7 +457,7 @@ export function useFlaggedVisits() {
       const { data: visits, error } = await supabase
         .from('store_visits')
         .select(
-          'id, user_id, store_id, check_in_time, check_out_time, notes, latitude, longitude, distance_from_store_meters, checkout_distance_meters, is_mock_location, auto_closed, actor_role',
+          'id, user_id, store_id, check_in_time, check_out_time, notes, latitude, longitude, distance_from_store_meters, checkout_distance_meters, is_mock_location, auto_closed, actor_role, stock_skip_reason',
         )
         .gte('check_in_time', since)
         // Newest first so the cap keeps the RECENT window when a busy week
@@ -461,17 +475,69 @@ export function useFlaggedVisits() {
 
       // One parallel wave. These were three sequential round-trips, and the
       // store lookup fetched the ENTIRE stores table to build a name map.
-      const [artifacts, { data: stores }, { data: planRows }] = await Promise.all([
-        artifactCounts(rows.map((v) => v.id)),
-        supabase.from('stores').select('id, name').in('id', storeIds),
+      const visitIds = rows.map((v) => v.id);
+      const [{ counts: artifacts, stocked }, { data: stores }, { data: planRows }, spotsRes] = await Promise.all([
+        artifactCounts(visitIds),
+        supabase.from('stores').select('id, name, latitude, longitude').in('id', storeIds),
         supabase
           .from('journey_plans')
           .select(SELECT)
           .gte('plan_date', planDateFor(new Date(Date.now() - QUEUE_DAYS * 86_400_000))),
+        supabase
+          .from('spot_sales')
+          .select('visit_id, store_id, created_at, latitude, longitude, accuracy_m, duplicate_scope')
+          .in('visit_id', visitIds)
+          .is('undone_at', null),
       ]);
+      // Throws like artifactCounts: missing spot sales would hide flags, and a
+      // partial read must never pass for a clean one.
+      if (spotsRes.error) throw spotsRes.error;
 
       const storeName: Record<string, string> = {};
-      for (const s of stores ?? []) storeName[s.id] = s.name;
+      const storeAt: Record<string, { lat: number | null; lng: number | null }> = {};
+      for (const s of stores ?? []) {
+        storeName[s.id] = s.name;
+        storeAt[s.id] = { lat: s.latitude, lng: s.longitude };
+      }
+      const spotsByVisit: Record<string, SpotForFlags[]> = {};
+      for (const sp of (spotsRes.data as any[]) ?? []) (spotsByVisit[sp.visit_id] ??= []).push(sp);
+
+      // Depletion: spot sales claimed between two counts vs what the store's
+      // stock actually dropped. Second wave, only when there are spot sales.
+      const depletion: Record<string, string> = {};
+      const spotStores = [...new Set(((spotsRes.data as any[]) ?? []).map((s) => s.store_id))];
+      if (spotStores.length) {
+        const st = await loadSellThrough(spotStores);
+        for (const iv of st.intervals) {
+          if (!depletionFlagged(iv)) continue;
+          const per = st.perCase[iv.product_id] ?? 0;
+          const msg =
+            `Spot sales of ${fmtBottles(iv.spotBottles, per)} were logged between two stock counts, ` +
+            `but the store’s stock only accounts for ${fmtBottles(Math.max(0, iv.soldBottles), per)} sold ` +
+            `(${fmtBottles(unexplainedSpotBottles(iv), per)} unexplained).`;
+          for (const vid of iv.spotVisitIds) depletion[vid] = msg;
+        }
+      }
+
+      // Repeated stock skips: the latest skipping visit of a rep who skipped on
+      // STOCK_SKIP_MIN+ of their last STOCK_SKIP_OF closed visits in the window.
+      const skipFlag: Record<string, string> = {};
+      const closedByRep: Record<string, any[]> = {};
+      for (const v of rows) {
+        if (v.user_id && v.check_out_time && v.check_out_time.slice(0, 10) >= STOCK_REQUIRED_FROM) {
+          (closedByRep[v.user_id] ??= []).push(v);
+        }
+      }
+      for (const list of Object.values(closedByRep)) {
+        const recent = list.slice(-STOCK_SKIP_OF);
+        const skipped = recent.filter((v) => v.stock_skip_reason);
+        if (skipped.length >= STOCK_SKIP_MIN) {
+          const last = skipped[skipped.length - 1];
+          skipFlag[last.id] =
+            `Skipped the stock count on ${skipped.length} of their last ${recent.length} visits ` +
+            `(this time: ${stockSkipLabel(last.stock_skip_reason).toLowerCase()}).`;
+        }
+      }
 
       // Plans covering the same window, keyed rep|local-date.
       const planBy: Record<string, JourneyPlan> = {};
@@ -504,13 +570,20 @@ export function useFlaggedVisits() {
           actor_role: v.actor_role,
           // A written note is work too, so it counts against the phantom-visit
           // flag even though it carries no timestamp of its own.
-          artifact_count: (artifacts[v.id] ?? 0) + (v.notes?.trim() ? 1 : 0),
+          artifact_count:
+            (artifacts[v.id] ?? 0) + (v.notes?.trim() ? 1 : 0) + (spotsByVisit[v.id]?.length ?? 0),
+          spot_sales: spotsByVisit[v.id] ?? [],
+          store_lat: v.store_id ? storeAt[v.store_id]?.lat ?? null : null,
+          store_lng: v.store_id ? storeAt[v.store_id]?.lng ?? null : null,
+          stock_counted: stocked.has(v.id),
+          stock_skip_reason: v.stock_skip_reason,
         };
         const day = v.check_in_time ? planDateFor(new Date(v.check_in_time)) : null;
         const plan = day ? planBy[`${v.user_id}|${day}`] ?? null : null;
-        const flags = sortFlags(
-          flagsForVisit(visit, plan, prevByRep[v.user_id] ?? null, haversineKm),
-        );
+        const derived = flagsForVisit(visit, plan, prevByRep[v.user_id] ?? null, haversineKm);
+        if (depletion[v.id]) derived.push({ kind: 'spot_not_depleted', reason: depletion[v.id] });
+        if (skipFlag[v.id]) derived.push({ kind: 'stock_skipped_often', reason: skipFlag[v.id] });
+        const flags = sortFlags(derived);
         prevByRep[v.user_id] = visit;
         if (!flags.length) continue;
         out.push({

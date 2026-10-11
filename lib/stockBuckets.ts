@@ -192,3 +192,21 @@ export function bucketBreakdown(
   }
   return out;
 }
+
+// ── Compulsory stock: skipping needs a reason (store_visits.stock_skip_reason) ──
+/**
+ * Why a rep could not count. A hard block with no escape produces INVENTED
+ * numbers from reps who genuinely can't count, and an invented count silently
+ * poisons sell-through — worse than a missing one. An honest recorded skip is
+ * data. Keys match the DB check constraint; 'other' requires a note (DB too).
+ */
+export const STOCK_SKIP_REASONS = [
+  { key: 'owner_unavailable', label: 'Owner unavailable' },
+  { key: 'godown_locked', label: 'Stock in locked godown' },
+  { key: 'shop_busy', label: 'Shop too busy' },
+  { key: 'section_closed', label: 'Section closed' },
+  { key: 'other', label: 'Other' },
+] as const;
+export type StockSkipReason = (typeof STOCK_SKIP_REASONS)[number]['key'];
+export const stockSkipLabel = (k: string | null | undefined): string =>
+  STOCK_SKIP_REASONS.find((r) => r.key === k)?.label ?? 'Not recorded';

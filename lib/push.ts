@@ -63,8 +63,9 @@ async function getToken(): Promise<string | null> {
       name: 'Plan approvals',
       importance: Notifications.AndroidImportance.HIGH,
     });
-    // "Your live location was viewed" (on_location_viewed trigger): sits in
-    // the shade silently — no sound, no heads-up.
+    // Formerly "Your live location was viewed". That push was removed
+    // 2026-10-11 (on_location_viewed now only logs); the channel is kept so
+    // Android doesn't show a stray "deleted channel" entry on updated phones.
     await Notifications.setNotificationChannelAsync('location', {
       name: 'Location viewed',
       importance: Notifications.AndroidImportance.LOW,

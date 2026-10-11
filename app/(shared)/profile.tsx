@@ -12,6 +12,7 @@ import { supabase } from '../../lib/supabase';
 import FacilitiesScreen from '../(admin)/facilities';
 import PermitsScreen from '../(admin)/permits';
 import { userMessage } from '../../lib/userError';
+import PrivacyNotice from '../../components/PrivacyNotice';
 
 const TESTER_ROLES: { value: 'rep' | 'sales_manager' | 'management'; label: string }[] = [
   { value: 'rep', label: 'Rep' },
@@ -49,6 +50,7 @@ export default function ProfileScreen() {
   const [switching, setSwitching] = useState<string | null>(null);
   const [showFacilities, setShowFacilities] = useState(false);
   const [showPermits, setShowPermits] = useState(false);
+  const [showPrivacy, setShowPrivacy] = useState(false);
 
   useEffect(() => {
     if (profile?.role === 'rep' && profile.assigned_manager_id) {
@@ -170,6 +172,22 @@ export default function ProfileScreen() {
         )}
       </BentoTile>
 
+      {/* Every role: what the app collects and why. */}
+      <Pressable onPress={() => setShowPrivacy(true)} accessibilityRole="button" accessibilityLabel="Privacy and data">
+        <BentoTile style={{ marginTop: Space.md }}>
+          <View style={styles.adminRow}>
+            <Ionicons name="shield-checkmark-outline" size={20} color={Colors.accent} />
+            <View style={{ flex: 1 }}>
+              <Text style={[Type.bodyMed, { color: Colors.text }]}>Privacy & Data</Text>
+              <Text style={[Type.caption, { color: Colors.textMuted }]}>
+                What the app records, who can see it, how long it’s kept
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
+          </View>
+        </BentoTile>
+      </Pressable>
+
       {/* Management-only admin config */}
       {profile.role === 'management' && (
         <Pressable onPress={() => setShowPermits(true)} accessibilityRole="button" accessibilityLabel="Excise permits">
@@ -250,6 +268,7 @@ export default function ProfileScreen() {
 
       <FacilitiesScreen visible={showFacilities} onClose={() => setShowFacilities(false)} />
       <PermitsScreen visible={showPermits} onClose={() => setShowPermits(false)} />
+      <PrivacyNotice visible={showPrivacy} onClose={() => setShowPrivacy(false)} />
     </ScrollView>
   );
 }

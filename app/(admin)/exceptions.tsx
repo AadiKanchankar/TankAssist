@@ -111,7 +111,7 @@ function TriageActions({ onDismiss, onWarn }: { onDismiss: () => void; onWarn: (
 const TYPE_ORDER = ['odometer', 'visit', 'plan'] as const;
 const TYPE_TITLE: Record<(typeof TYPE_ORDER)[number], string> = {
   odometer: 'Odometer flags',
-  visit: 'Location & visit flags',
+  visit: 'Visits, stock & spot sales',
   plan: 'Day plans',
 };
 

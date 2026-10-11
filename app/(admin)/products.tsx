@@ -15,7 +15,8 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { CameraView, useCameraPermissions } from 'expo-camera';
+import { useCameraPermissions } from 'expo-camera';
+import ZoomCamera, { type ZoomCameraHandle } from '../../components/ZoomCamera';
 import { Colors, Type, Space, Radius, Layout } from '../../constants/colors';
 import Button from '../../components/Button';
 import Header from '../../components/Header';
@@ -104,7 +105,7 @@ export default function ProductsScreen() {
   // Camera (product image capture — reuses the existing capture pattern, no gallery dep)
   const [permission, requestPermission] = useCameraPermissions();
   const [capturing, setCapturing] = useState(false);
-  const cameraRef = React.useRef<CameraView>(null);
+  const cameraRef = React.useRef<ZoomCameraHandle>(null);
 
   useFocusEffect(useCallback(() => { refetch(); }, [refetch]));
   const { refreshing, onRefresh } = usePullToRefresh(refetch);
@@ -359,7 +360,7 @@ export default function ProductsScreen() {
           {capturing ? (
             <>
               <Header title="Product photo" onBack={() => setCapturing(false)} />
-              <CameraView ref={cameraRef} style={{ flex: 1 }} facing="back" />
+              <ZoomCamera ref={cameraRef} style={{ flex: 1 }} facing="back" />
               <View style={styles.cameraActions}>
                 <Button title="Capture" onPress={takePhoto} style={{ flex: 1 }} />
                 <Button title="Cancel" onPress={() => setCapturing(false)} variant="secondary" style={{ flex: 1 }} />

@@ -35,7 +35,8 @@ import VoiceInput from '../../components/VoiceInput';
 import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
 import * as Location from 'expo-location';
-import { CameraView, useCameraPermissions } from 'expo-camera';
+import { useCameraPermissions } from 'expo-camera';
+import ZoomCamera, { type ZoomCameraHandle } from '../../components/ZoomCamera';
 import {
   uploadStoreVisitPhoto,
   uploadStockPhoto,
@@ -59,6 +60,8 @@ import {
   bucketTotals,
   snapshotPayload,
   bucketBreakdown,
+  STOCK_SKIP_REASONS,
+  type StockSkipReason,
   type StockBucket,
   type BucketEntries,
   type SnapshotRow,
@@ -66,6 +69,8 @@ import {
 import { emptyDraft, type VisitDraft } from '../../lib/visitDraft';
 import { saveDraft, loadDraft, clearDraft } from '../../lib/visitDraftStore';
 import { userMessage } from '../../lib/userError';
+import { SpotSaleBar } from '../../components/SpotSale';
+import { useMySpotSalesHere } from '../../hooks/useSpotSales';
 
 interface StoreParam {
   id: string;
@@ -203,6 +208,13 @@ export default function StoreVisitScreen({
   // means "not verified", keeping the whole step skippable.
   const [stockTouched, setStockTouched] = useState<Set<string>>(new Set());
   const [shopPhotoUris, setShopPhotoUris] = useState<string[]>([]);
+  // Nominal zoom per captured photo (ZoomCamera), stored with the photo row so
+  // a reviewer can tell a shelf close-up from a shot across the shop.
+  const [photoZoom, setPhotoZoom] = useState<Record<string, number>>({});
+  // Compulsory stock (§4): every active product counted, or a reason recorded.
+  const [stockSkip, setStockSkip] = useState<{ reason: StockSkipReason; note: string } | null>(null);
+  // Resumed visit whose stock was already committed on an earlier "save & stay".
+  const [stockAlreadyRecorded, setStockAlreadyRecorded] = useState(false);
   const [stockPhotoUri, setStockPhotoUri] = useState<string | null>(null);
   const [orderLines, setOrderLines] = useState<Record<string, QtyEntry>>({});
   const [orderNotes, setOrderNotes] = useState('');
@@ -218,7 +230,10 @@ export default function StoreVisitScreen({
   // Camera
   const [permission, requestPermission] = useCameraPermissions();
   const [cameraTarget, setCameraTarget] = useState<CameraTarget | null>(null);
-  const cameraRef = useRef<CameraView>(null);
+  const cameraRef = useRef<ZoomCameraHandle>(null);
+
+  // Shares the spot-sale bar's cached query (same key), so no extra request.
+  const { data: spotHere = [] } = useMySpotSalesHere(store.id, profile?.id);
 
   const [orderBusy, setOrderBusy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -343,6 +358,16 @@ export default function StoreVisitScreen({
           setNotes(existing.notes || '');
           setCheckInAddress(existing.address ?? null);
           setResumedVisitId(existing.id);
+          if (existing.stock_skip_reason) {
+            setStockSkip({ reason: existing.stock_skip_reason, note: existing.stock_skip_note ?? '' });
+          }
+          // A "save & stay" earlier in this visit may already have committed the
+          // count; the requirement is met, so don't make the rep recount.
+          const { count } = await supabase
+            .from('store_stock_snapshots')
+            .select('id', { count: 'exact', head: true })
+            .eq('visit_id', existing.id);
+          if (count) setStockAlreadyRecorded(true);
         } else {
           // A FRESH fix, confirmed on screen. Reusing the phone's remembered
           // position recorded the PREVIOUS shop's coordinates on check-in.
@@ -595,11 +620,38 @@ export default function StoreVisitScreen({
       return t.cases > 0 || t.bottles > 0;
     });
 
+  // ── Compulsory stock (§4) ──
+  // Every active product counted (a bucket entered, 0 included), or a reason.
+  const allProductsCounted = () =>
+    products.every(
+      (p) => stockTouched.has(p.id) && bucketTotals(stock[p.id] ?? emptyBuckets(), p.qty_per_carton).anyRecorded,
+    );
+  const skipValid = () => !!stockSkip && (stockSkip.reason !== 'other' || stockSkip.note.trim().length > 0);
+  const stockRequirementMet = () => stockAlreadyRecorded || allProductsCounted() || skipValid();
+  const explainStockRequired = () =>
+    Alert.alert(
+      'Stock count needed',
+      stockSkip?.reason === 'other'
+        ? 'Add a short note saying why you couldn’t count.'
+        : 'Count every product, or choose why you can’t count today.',
+    );
+  /** What to write on the visit row. A full count clears an earlier reason. */
+  const skipFields = (): Record<string, unknown> =>
+    allProductsCounted()
+      ? { stock_skip_reason: null, stock_skip_note: null }
+      : skipValid()
+      ? { stock_skip_reason: stockSkip!.reason, stock_skip_note: stockSkip!.note.trim() || null }
+      : {};
+
   const goNext = () => {
     // Leaving the prior-order step resolves it — replace the stack so Back
     // can't return to a now-handled (nulled) prev order.
     if (current === 'prev') {
       setStepStack(['stock']);
+      return;
+    }
+    if (current === 'stock' && !stockRequirementMet()) {
+      explainStockRequired();
       return;
     }
     let next: Step | 'checkout';
@@ -685,6 +737,7 @@ export default function StoreVisitScreen({
     if (!cameraRef.current) return;
     const photo = await cameraRef.current.takePictureAsync({ quality: 0.7 });
     if (!photo) return;
+    setPhotoZoom((z) => ({ ...z, [photo.uri]: photo.zoom }));
     if (cameraTarget === 'shop') setShopPhotoUris((p) => [...p, photo.uri]);
     else if (cameraTarget === 'delivered') setDeliveredPhotoUris((p) => [...p, photo.uri]);
     else if (cameraTarget === 'stock') setStockPhotoUri(photo.uri);
@@ -853,7 +906,7 @@ export default function StoreVisitScreen({
         if (i === 0) firstPhotoPath = path;
         const { error } = await supabase
           .from('store_visit_photos')
-          .insert({ visit_id: visitId, user_id: profile!.id, storage_path: path, position: i });
+          .insert({ visit_id: visitId, user_id: profile!.id, storage_path: path, position: i, zoom: photoZoom[shopPhotoUris[i]] ?? null });
         if (error) throw error;
       }
 
@@ -864,6 +917,7 @@ export default function StoreVisitScreen({
           user_id: profile!.id,
           storage_path: path,
           position: shopPhotoUris.length,
+          zoom: photoZoom[stockPhotoUri] ?? null,
         });
         if (error) throw error;
       }
@@ -902,6 +956,13 @@ export default function StoreVisitScreen({
    */
   const handleCheckout = () => {
     if (!visitId) return;
+    // Checked again here: resume and back-navigation can reach the last step
+    // without passing the stock step's Next.
+    if (!stockRequirementMet()) {
+      explainStockRequired();
+      setStepStack((s) => [...s, 'stock']);
+      return;
+    }
     if (stockPhotoMissing()) {
       Alert.alert('Stock photo needed', 'You entered stock levels — add a stock photo before finishing.');
       setStepStack((s) => [...s, 'stockphoto']);
@@ -925,7 +986,7 @@ export default function StoreVisitScreen({
       const firstPhotoPath = await flushVisitData();
       const { error } = await supabase
         .from('store_visits')
-        .update({ notes: notes.trim() || null, photo_url: firstPhotoPath })
+        .update({ notes: notes.trim() || null, photo_url: firstPhotoPath, ...skipFields() })
         .eq('id', visitId!);
       if (error) throw error;
       // Committed server-side, so the draft has nothing left to protect.
@@ -953,7 +1014,7 @@ export default function StoreVisitScreen({
         visitId: visitId!,
         checkInTime,
         pos,
-        extra: { notes: notes.trim() || null, photo_url: firstPhotoPath },
+        extra: { notes: notes.trim() || null, photo_url: firstPhotoPath, ...skipFields() },
       });
       await clearDraft(visitId!);
 
@@ -1044,7 +1105,7 @@ export default function StoreVisitScreen({
     return (
       <View style={styles.container}>
         <Header title="Take photo" onBack={() => setCameraTarget(null)} />
-        <CameraView ref={cameraRef} style={styles.fullCamera} facing="back" />
+        <ZoomCamera ref={cameraRef} style={styles.fullCamera} facing="back" />
         <View style={styles.cameraActions}>
           <Button title="Capture" onPress={takePhoto} style={styles.captureBtn} />
           <Button
@@ -1063,6 +1124,16 @@ export default function StoreVisitScreen({
   return (
     <View style={styles.container}>
       <Header title={store.name} onBack={goBack} />
+
+      {/* Spot sales: ambient for the whole open visit, alongside the stepper
+          rather than inside it — conversions don't happen at a step. */}
+      {visitId ? (
+        <SpotSaleBar
+          visitId={visitId}
+          storeId={store.id}
+          products={products.map((p) => ({ id: p.id, name: p.name }))}
+        />
+      ) : null}
 
       {/* Progress indicator — chunking + goal-gradient; the one lime spotlight */}
       <View style={styles.progress}>
@@ -1147,6 +1218,9 @@ export default function StoreVisitScreen({
               latest={stockLatest}
               touched={stockTouched}
               selfId={profile?.id}
+              skip={stockSkip}
+              setSkip={setStockSkip}
+              alreadyRecorded={stockAlreadyRecorded}
             />
           )}
 
@@ -1176,6 +1250,7 @@ export default function StoreVisitScreen({
               placed={orderPlaced}
               busy={orderBusy}
               onPlace={handlePlaceOrder}
+              spotCount={spotHere.length}
             />
           )}
 
@@ -1238,7 +1313,11 @@ export default function StoreVisitScreen({
       {current !== 'prev' && (
         <View style={styles.footer}>
           {current === 'stock' ? (
-            <Text style={styles.footerHint}>Enter what you can verify, or leave blank to skip.</Text>
+            <Text style={styles.footerHint}>
+              {stockAlreadyRecorded
+                ? 'Stock was saved earlier this visit — update it if it changed.'
+                : 'Count every product, or choose why you can’t below.'}
+            </Text>
           ) : null}
           <Button
             title={
@@ -1369,7 +1448,7 @@ function PrevOrderStep({
 }
 
 // ─── Step 2: stock ───
-function StockStep({ products, stock, setField, latest, touched, selfId }: any) {
+function StockStep({ products, stock, setField, latest, touched, selfId, skip, setSkip, alreadyRecorded }: any) {
   if (products.length === 0) {
     return (
       <BentoTile>
@@ -1428,6 +1507,41 @@ function StockStep({ products, stock, setField, latest, touched, selfId }: any) 
           </BentoTile>
         );
       })}
+
+      {/* The honest escape hatch. A recorded skip is data; a made-up count
+          poisons sell-through. Partial counts entered above are still saved. */}
+      {!alreadyRecorded ? (
+        <BentoTile>
+          <Text style={styles.fieldLabel}>Can’t count stock today?</Text>
+          <Text style={styles.helpText}>Pick the reason. Your manager sees it with the visit.</Text>
+          <View style={styles.chipWrap}>
+            {STOCK_SKIP_REASONS.map((r) => {
+              const on = skip?.reason === r.key;
+              return (
+                <Pressable
+                  key={r.key}
+                  style={[styles.chip, on && styles.chipSelected]}
+                  onPress={() => setSkip(on ? null : { reason: r.key, note: skip?.note ?? '' })}
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected: on }}
+                >
+                  <Text style={[styles.chipText, on && styles.chipTextSelected]}>{r.label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          {skip ? (
+            <TextInput
+              style={[styles.textInput, { minHeight: Layout.tap }]}
+              value={skip.note}
+              onChangeText={(t) => setSkip({ ...skip, note: t })}
+              maxLength={200}
+              placeholder={skip.reason === 'other' ? 'Say why (required)' : 'Add detail (optional)'}
+              placeholderTextColor={Colors.textMuted}
+            />
+          ) : null}
+        </BentoTile>
+      ) : null}
     </View>
   );
 }
@@ -1509,18 +1623,32 @@ function OrderStep({
   busy,
   total,
   onPlace,
+  spotCount,
 }: any) {
-  if (placed) {
-    return (
-      <BentoTile>
-        <View style={styles.rowGap}>
-          <Ionicons name="checkmark-circle" size={22} color={Colors.success} />
-          <Text style={[Type.section, { color: Colors.success }]}>Order placed</Text>
-        </View>
-        <Text style={[styles.helpText, { marginTop: Space.xs }]}>
-          The order is registered for this store. Tap Next to continue.
+  // Closes the loop on the selling work done on the floor before the order.
+  const spotLine =
+    spotCount > 0 ? (
+      <BentoTile style={styles.spotLine}>
+        <Ionicons name="people-outline" size={18} color={Colors.accent} />
+        <Text style={[Type.bodyMed, { color: Colors.text, flex: 1 }]}>
+          You logged {spotCount} spot sale{spotCount === 1 ? '' : 's'} here today
         </Text>
       </BentoTile>
+    ) : null;
+  if (placed) {
+    return (
+      <View style={{ gap: Space.md }}>
+        <BentoTile>
+          <View style={styles.rowGap}>
+            <Ionicons name="checkmark-circle" size={22} color={Colors.success} />
+            <Text style={[Type.section, { color: Colors.success }]}>Order placed</Text>
+          </View>
+          <Text style={[styles.helpText, { marginTop: Space.xs }]}>
+            The order is registered for this store. Tap Next to continue.
+          </Text>
+        </BentoTile>
+        {spotLine}
+      </View>
     );
   }
   if (products.length === 0) {
@@ -1544,6 +1672,7 @@ function OrderStep({
     }));
   return (
     <View style={{ gap: Space.md }}>
+      {spotLine}
       <Text style={styles.helpText}>Optional — add products the store wants to order.</Text>
       {products.map((p: ProductRow) => {
         const l = lines[p.id] || {};
@@ -1695,6 +1824,7 @@ const styles = StyleSheet.create({
   footerHint: { ...Type.caption, color: Colors.textMuted, marginBottom: Space.sm, textAlign: 'center' },
   rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   rowGap: { flexDirection: 'row', alignItems: 'center', gap: Space.sm },
+  spotLine: { flexDirection: 'row', alignItems: 'center', gap: Space.sm },
   // chips
   chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: Space.sm, marginBottom: Space.sm },
   chip: {

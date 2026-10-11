@@ -33,6 +33,8 @@ import { OrderFilter } from '../../lib/orders';
 import { monthName } from '../../lib/reportExport';
 import { managerShareNote } from '../../lib/reportSemantics';
 import { useManagementDashboard } from '../../hooks/useManagementDashboard';
+import { useCompanySellThrough } from '../../hooks/useSellThrough';
+import { fmtBottles } from '../../lib/sellThrough';
 import { useCasesTrend, TREND_RANGES, TrendRange } from '../../hooks/useCasesTrend';
 import { useInventoryAnalytics, fmtQty } from '../../hooks/useInventoryAnalytics';
 import { useProducts } from '../../hooks/useProducts';
@@ -66,6 +68,7 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
   const scopeLabel = selectedProduct?.name ?? 'All products';
 
   const { data, refetch, isPending, isError } = useManagementDashboard(productId ?? undefined);
+  const { data: sell, refetch: refetchSell } = useCompanySellThrough(30);
 
   const pipeline = data?.pipeline ?? {
     to_process: 0,
@@ -94,7 +97,8 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
   useFocusEffect(
     useCallback(() => {
       refetch();
-    }, [refetch])
+      refetchSell();
+    }, [refetch, refetchSell])
   );
 
   const { refreshing, onRefresh } = usePullToRefresh(refetch);
@@ -453,6 +457,39 @@ export default function ManagementDashboard({ navigation }: { navigation: any })
             </Pressable>
           )}
         </MotiView>
+
+        {/* Sell-through: what stores actually sold between two stock counts. */}
+        {sell ? (
+          <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
+            <Text style={[Type.section, styles.sectionTitle]}>Sell-through · last 30 days</Text>
+            <BentoTile>
+              {sell.storesMeasured === 0 ? (
+                <Text style={[Type.body, { color: Colors.textMuted }]}>
+                  No store has been counted twice in the last 30 days yet.
+                </Text>
+              ) : (
+                <>
+                  {sell.soldByProduct.map((p) => (
+                    <View key={p.productId} style={styles.topRow}>
+                      <Text style={[Type.body, { color: Colors.text, flex: 1 }]} numberOfLines={1}>
+                        {p.name}
+                      </Text>
+                      <Text style={[Type.bodyMed, tabularNums, { color: Colors.accent }]}>
+                        {fmtBottles(p.bottles, p.perCase)}
+                      </Text>
+                    </View>
+                  ))}
+                  <Text style={[Type.caption, { color: Colors.textMuted, marginTop: Space.xs }]}>
+                    Measured at {sell.storesMeasured} store{sell.storesMeasured === 1 ? '' : 's'} counted at least twice
+                    {sell.storesUnexplained
+                      ? ` · spot sales outrun stock at ${sell.storesUnexplained} (see the review queue)`
+                      : ''}
+                  </Text>
+                </>
+              )}
+            </BentoTile>
+          </MotiView>
+        ) : null}
 
         {/* Top stores this month */}
         <MotiView {...entrance(section++, reduce)} style={{ marginTop: Space.md }}>
