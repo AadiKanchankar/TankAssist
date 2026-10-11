@@ -5,8 +5,10 @@ import * as Haptics from 'expo-haptics';
 import { Colors, Palette, Type, Space, Radius, Layout, tabularNums } from '../constants/colors';
 
 /**
- * The ONE camera every capture surface uses: selfie, odometer, shop/stock/
- * delivered photos, challan, product image and spot sales. Digital zoom via
+ * The camera for shop/stock/delivered photos, challan, product image and spot
+ * sales. The check-in SELFIE and the ODOMETER deliberately use a plain
+ * CameraView at 1x (owner, 2026-10-11): a selfie needs no zoom, and the
+ * odometer's OCR crop was calibrated on unzoomed frames. Digital zoom via
  * expo-camera's `zoom` prop — pinch, or tap 1x / 2x / 5x.
  *
  * expo-camera's `zoom` is a 0..1 fraction of the DEVICE's max zoom ratio
@@ -61,13 +63,22 @@ const ZoomCamera = forwardRef<ZoomCameraHandle, Props>(function ZoomCamera(
   factorRef.current = factor;
   const pinch = useRef<{ d: number; f: number } | null>(null);
 
-  useImperativeHandle(ref, () => ({
-    async takePictureAsync(opts) {
-      const p = await cam.current?.takePictureAsync({ quality: opts?.quality ?? 0.7 });
-      if (!p?.uri) return undefined;
-      return { uri: p.uri, width: p.width, height: p.height, zoom: Math.round(factorRef.current * 10) / 10 };
-    },
-  }));
+  // Empty deps = ONE stable handle. Without them a new handle is created every
+  // render, and a caller holding the ref in state (`ref={setCameraRef}`, as
+  // challan does) re-renders on each one: an endless update loop that crashed
+  // the odometer and challan cameras in 1.5.0 (TA-955C). Everything the handle
+  // reads is a ref, so it never needs to change.
+  useImperativeHandle(
+    ref,
+    () => ({
+      async takePictureAsync(opts) {
+        const p = await cam.current?.takePictureAsync({ quality: opts?.quality ?? 0.7 });
+        if (!p?.uri) return undefined;
+        return { uri: p.uri, width: p.width, height: p.height, zoom: Math.round(factorRef.current * 10) / 10 };
+      },
+    }),
+    [],
+  );
 
   // Two-finger only, so single taps still reach buttons in the overlay.
   const responder = useRef(

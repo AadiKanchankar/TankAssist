@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, Modal, Pressable, TextInput, ActivityIndicator, Alert, Image } from 'react-native';
-import { useCameraPermissions } from 'expo-camera';
-import ZoomCamera, { type ZoomCameraHandle } from './ZoomCamera';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, Type, Space, Radius, Layout } from '../constants/colors';
 import Header from './Header';
@@ -55,7 +54,7 @@ export default function OdometerCapture({
   onConfirm,
 }: Props) {
   const [permission, requestPermission] = useCameraPermissions();
-  const [cameraRef, setCameraRef] = useState<ZoomCameraHandle | null>(null);
+  const [cameraRef, setCameraRef] = useState<CameraView | null>(null);
   const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [reading, setReading] = useState('');
   const [busy, setBusy] = useState(false);
@@ -110,11 +109,6 @@ export default function OdometerCapture({
    * CameraView may letterbox the sensor image, so the crop can be a few
    * percent off — harmless, because the box is drawn generously and the rep
    * confirms the number. Upgrade path is the frame's real preview rect.
-   *
-   * Zoom-safe: ZoomCamera's digital zoom crops at the sensor, so the captured
-   * photo IS the zoomed field of view and the frame's proportion still maps
-   * onto it — at 2x/5x the digits are simply larger inside the same crop.
-   * Nothing here may divide by the zoom factor (that would double-apply it).
    *
    * Falls back to the uncropped photo on any failure: a bad crop must never
    * cost the rep their capture.
@@ -269,7 +263,7 @@ export default function OdometerCapture({
           </View>
         ) : !photoUri ? (
           <View style={{ flex: 1 }}>
-            <ZoomCamera
+            <CameraView
               ref={setCameraRef}
               style={{ flex: 1 }}
               facing="back"
@@ -285,7 +279,7 @@ export default function OdometerCapture({
                   (not the trip meter)
                 </Text>
               </View>
-            </ZoomCamera>
+            </CameraView>
             <View style={styles.shootBar}>
               <Button title={busy ? 'Reading…' : 'Capture'} onPress={shoot} loading={busy} />
             </View>

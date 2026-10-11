@@ -10,8 +10,7 @@ import SuccessOverlay from '../../components/SuccessOverlay';
 import { useAuthStore } from '../../store/useAuthStore';
 import { supabase } from '../../lib/supabase';
 import * as Location from 'expo-location';
-import { useCameraPermissions } from 'expo-camera';
-import ZoomCamera, { type ZoomCameraHandle } from '../../components/ZoomCamera';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import { uploadSelfie, uploadOdometerPhoto } from '../../lib/storage';
 import OdometerCapture, { OdometerResult } from '../../components/OdometerCapture';
 import { reverseGeocode } from '../../lib/geocoding';
@@ -28,7 +27,7 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
   const [address, setAddress] = useState<string | null>(null);
   const [loadingAddress, setLoadingAddress] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
-  const cameraRef = useRef<ZoomCameraHandle>(null);
+  const cameraRef = useRef<CameraView>(null);
 
   useEffect(() => {
     (async () => {
@@ -221,7 +220,7 @@ export default function AttendanceScreen({ navigation }: { navigation: any }) {
           ) : (
             <View>
               <View style={styles.cameraWrapper}>
-                <ZoomCamera ref={cameraRef} style={styles.camera} facing="front" />
+                <CameraView ref={cameraRef} style={styles.camera} facing="front" />
               </View>
               <Button title="Take selfie" onPress={takeSelfie} variant="secondary" style={{ marginTop: Space.md }} />
             </View>
