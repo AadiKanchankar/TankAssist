@@ -12,7 +12,7 @@ Session-state snapshot for the next Claude Code session. **Temporal** — record
 
 ## What is actually live right now
 
-### 2026-10-12 — PDF store-wise table: avg time in store + spot sales (JS-only, OTA to runtime 1.5.0)
+### 2026-10-12 — PDF store-wise table: avg time in store + spot sales (JS-only, OTA `03fb65f4` to runtime 1.5.0, commit `a1df1f0`)
 
 Owner request: the store-wise sales table (page 2 of the field report PDF, reps and sales managers alike) gains **Avg time in store** and **Spot sales** columns. `lib/reportPdfHtml.ts` (model + table, tested in `reportPdfHtml.test.ts`), `lib/reportPdf.ts` fetches the month's `spot_sales` per visit; `fetchAll` moved from `useProgress` to `lib/supabase.ts`. No schema change. Rules in CLAUDE.md "Reports (CSV + PDF)". Spot sales exist only from the 1.5.0 build, so earlier months read "–". CSV export unchanged (not asked for). **Re-test on device:** export a month's PDF for a rep and for an SM (My field report) and check the two columns and the notes under the table.
 
