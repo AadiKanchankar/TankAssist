@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { supabase } from '../lib/supabase';
+import { fetchAll, supabase } from '../lib/supabase';
 import { loadSellThrough } from './useSellThrough';
 import { corroboratedSpotIds } from '../lib/sellThrough';
 import {
@@ -21,19 +21,6 @@ import {
  * rows (lib/progress.ts) — this hook only fetches them. No score table exists
  * and none may be added (CLAUDE.md "Gamification").
  */
-
-const PAGE = 1000; // PostgREST's default max rows per request
-
-/** Every page of a query. Usually one page; a year of a busy rep is ~2–3. */
-async function fetchAll(build: (from: number, to: number) => PromiseLike<{ data: any[] | null; error: any }>) {
-  const out: any[] = [];
-  for (let from = 0; ; from += PAGE) {
-    const { data, error } = await build(from, from + PAGE - 1);
-    if (error) throw error;
-    out.push(...(data ?? []));
-    if (!data || data.length < PAGE) return out;
-  }
-}
 
 const shapePlans = (rows: any[]) =>
   rows.map((p) => ({

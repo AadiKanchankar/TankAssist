@@ -48,3 +48,16 @@ export const enrollClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     detectSessionInUrl: false,
   },
 });
+
+const PAGE = 1000; // PostgREST's default max rows per request
+
+/** Every page of a query. Usually one page; a year of a busy rep is ~2–3. */
+export async function fetchAll(build: (from: number, to: number) => PromiseLike<{ data: any[] | null; error: any }>) {
+  const out: any[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await build(from, from + PAGE - 1);
+    if (error) throw error;
+    out.push(...(data ?? []));
+    if (!data || data.length < PAGE) return out;
+  }
+}

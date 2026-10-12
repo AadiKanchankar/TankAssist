@@ -41,6 +41,7 @@ function month(fromDay: number, toDay: number) {
         auto_closed: false,
         notes: i === 0 && d === 21 ? 'A grade shop' : null,
         cases,
+        spotSales: 0,
       });
       sold += cases;
       t += (dur + 15 + Math.floor(rnd() * 40)) * 60_000;
@@ -152,6 +153,29 @@ for (const md of [full, partial]) {
   assert.equal(orderOnly.visits, 0);
   assert.equal(md.storeSales.reduce((t, r) => t + r.scheme, 0), 2);
   assert.equal(md.storeSales.reduce((t, r) => t + r.visits, 0), md.visits.length);
+}
+// Avg time in store + spot sales per store row.
+{
+  const at = (min: number) => new Date(2026, 8, 3, 11, min).toISOString();
+  const v = (id: string, store: string, dur: number | null, spot: number): PdfVisit => ({
+    id, store_id: store, storeName: store, check_in_time: at(Number(id.slice(1))), check_out_time: dur == null ? null : at(Number(id.slice(1)) + dur),
+    duration_minutes: dur, auto_closed: dur == null, notes: null, cases: 0, spotSales: spot,
+  });
+  const md = buildMonth({
+    month: new Date(2026, 8, 1), days: [], dayReports: [], casesByDay: {}, casesTotal: 0,
+    visits: [v('v1', 'A', 10, 2), v('v2', 'A', 25, 1), v('v3', 'A', null, 3), v('v4', 'B', null, 0), v('v5', 'C', 0, 0)],
+    casesByStore: {}, schemeByStore: {}, storeNames: {}, schemeFrom: '2026-07-18', now: new Date(2026, 9, 1),
+  });
+  const row = (n: string) => md.storeSales.find((r) => r.name === n)!;
+  assert.equal(row('A').avgMin, 18, 'mean of timed visits only, rounded (17.5 → 18)');
+  assert.equal(row('A').spotSales, 6, 'spot sales count even on an untimed visit');
+  assert.equal(row('B').avgMin, null, 'no timed visit → — , never 0');
+  assert.equal(row('C').avgMin, 0, 'a measured 0 stays 0');
+  assert.equal(md.storeSalesAvgMin, 12, 'total = mean over all timed visits (35/3)');
+  assert.equal(md.untimedVisits, 2);
+  const h = reportHtml('R', [md], new Date(2026, 9, 1));
+  assert.ok(h.includes('<th class="n">Avg time in store</th><th class="n">Spot sales</th>'));
+  assert.ok(h.includes('0h 18m') && h.includes('2 visits with no check-out'));
 }
 {
   const h = reportHtml('R', [full], new Date(2026, 9, 1));

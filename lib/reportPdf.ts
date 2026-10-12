@@ -1,7 +1,7 @@
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system/legacy';
-import { supabase } from './supabase';
+import { fetchAll, supabase } from './supabase';
 import { casesSold, ORDERS_CUTOVER_DATE } from './reportSemantics';
 import {
   toDateStr,
@@ -30,7 +30,7 @@ async function monthData(repId: string, monthDate: Date, now: Date): Promise<Mon
   const startStr = toDateStr(start);
   const endStr = toDateStr(nextMonthStart(monthDate));
 
-  const [attRes, visitsRes, reportsRes, cases] = await Promise.all([
+  const [attRes, visitsRes, reportsRes, cases, spots] = await Promise.all([
     supabase
       .from('attendance')
       .select('check_in_time, check_out_time, auto_closed, total_market_time_minutes, total_distance_km, odo_start, odo_end')
@@ -52,6 +52,17 @@ async function monthData(repId: string, monthDate: Date, now: Date): Promise<Mon
       .gte('report_date', startStr)
       .lt('report_date', endStr),
     casesSold(startStr, endStr, { userId: repId }),
+    // Same window as the visits; counted per visit (a spot sale needs an open visit).
+    fetchAll((a, b) =>
+      supabase
+        .from('spot_sales')
+        .select('visit_id')
+        .eq('user_id', repId)
+        .is('undone_at', null)
+        .gte('created_at', `${startStr}T00:00:00`)
+        .lt('created_at', `${endStr}T00:00:00`)
+        .range(a, b),
+    ),
   ]);
   if (attRes.error) throw attRes.error;
   if (visitsRes.error) throw visitsRes.error;
@@ -67,6 +78,9 @@ async function monthData(repId: string, monthDate: Date, now: Date): Promise<Mon
     for (const s of data ?? []) storeNames[s.id] = s.name;
   }
 
+  const spotsByVisit: Record<string, number> = {};
+  for (const s of spots) spotsByVisit[s.visit_id] = (spotsByVisit[s.visit_id] ?? 0) + 1;
+
   const visits: PdfVisit[] = ((visitsRes.data as any[]) ?? []).map((v) => ({
     id: v.id,
     store_id: v.store_id,
@@ -77,6 +91,7 @@ async function monthData(repId: string, monthDate: Date, now: Date): Promise<Mon
     auto_closed: v.auto_closed,
     notes: v.notes,
     cases: cases.byVisit[v.id] ?? 0,
+    spotSales: spotsByVisit[v.id] ?? 0,
   }));
 
   return buildMonth({

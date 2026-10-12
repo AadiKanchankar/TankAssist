@@ -45,6 +45,8 @@ export interface PdfVisit {
   notes: string | null;
   /** Through the cutover hybrid (casesSold().byVisit) — never the raw column. */
   cases: number;
+  /** Spot sales logged on this visit (undone excluded) — self-reported, one per customer. */
+  spotSales: number;
 }
 
 export interface PdfDayReport {
@@ -151,6 +153,9 @@ export interface StoreSalesRow {
   scheme: number;
   /** Null when the store had orders this month but no visit by this person. */
   lastVisit: string | null;
+  /** Mean duration_minutes over visits with a check-out; null when none had one. */
+  avgMin: number | null;
+  spotSales: number;
 }
 
 export interface MonthModel {
@@ -184,6 +189,10 @@ export interface MonthModel {
   storeSalesUnattributed: number;
   /** True when the month reaches back before scheme cases were recorded. */
   schemeBeforeCutover: boolean;
+  /** Mean over every visit with a recorded duration (not a mean of the row means). */
+  storeSalesAvgMin: number | null;
+  /** Visits left out of the averages: still open or closed by the 22:30 sweep. */
+  untimedVisits: number;
 }
 
 const nameKey = (s: string) => s.trim().replace(/\s+/g, ' ').toLowerCase();
@@ -301,18 +310,31 @@ export function buildMonth(input: PdfMonthInput): MonthModel {
     const k = nameKey(rawName);
     let r = sales.get(k);
     if (!r) {
-      r = { name: shownByKey.get(k) ?? rawName.trim().replace(/\s+/g, ' '), visits: 0, cases: 0, scheme: 0, lastVisit: null };
+      r = { name: shownByKey.get(k) ?? rawName.trim().replace(/\s+/g, ' '), visits: 0, cases: 0, scheme: 0, lastVisit: null, avgMin: null, spotSales: 0 };
       sales.set(k, r);
     }
     return r;
   };
   const rowOfId = new Map<string, StoreSalesRow>();
+  // Time in store averages only visits with a duration (checked out by the
+  // person) — an open or auto-closed visit has none, and counting it as 0
+  // would drag the average down with a figure nobody measured.
+  const timed = new Map<StoreSalesRow, { sum: number; n: number }>();
   for (const v of visits) {
     const r = rowFor(v.storeName);
     r.visits += 1;
+    r.spotSales += v.spotSales;
     if (!r.lastVisit || v.check_in_time > r.lastVisit) r.lastVisit = v.check_in_time;
     if (v.store_id && !rowOfId.has(v.store_id)) rowOfId.set(v.store_id, r);
+    if (v.duration_minutes != null) {
+      const t = timed.get(r) ?? { sum: 0, n: 0 };
+      t.sum += v.duration_minutes;
+      t.n += 1;
+      timed.set(r, t);
+    }
   }
+  for (const [r, t] of timed) r.avgMin = Math.round(t.sum / t.n); // whole minutes: hm(59.6) would read 0h 60m
+  const allTimed = visits.filter((v) => v.duration_minutes != null);
   for (const id of new Set([...Object.keys(input.casesByStore), ...Object.keys(input.schemeByStore)])) {
     const r = rowOfId.get(id) ?? rowFor(input.storeNames[id] ?? 'Store');
     rowOfId.set(id, r);
@@ -355,6 +377,8 @@ export function buildMonth(input: PdfMonthInput): MonthModel {
     storeSales,
     storeSalesUnattributed,
     schemeBeforeCutover: ymd(new Date(y, m, 1)) < input.schemeFrom,
+    storeSalesAvgMin: allTimed.length ? Math.round(allTimed.reduce((s, v) => s + v.duration_minutes!, 0) / allTimed.length) : null,
+    untimedVisits: visits.length - allTimed.length,
   };
 }
 
@@ -822,25 +846,31 @@ function storeSalesTable(md: MonthModel): string {
   const date = (iso: string | null) => (iso ? dayLabel(new Date(iso)) : '—');
   const totalVisits = md.storeSales.reduce((t, r) => t + r.visits, 0);
   const totalScheme = md.storeSales.reduce((t, r) => t + r.scheme, 0);
+  const totalSpot = md.storeSales.reduce((t, r) => t + r.spotSales, 0);
   const rows = md.storeSales
     .map(
       (r, i) => `<tr class="${r.cases > 0 ? 'sale' : ''}"><td class="n">${i + 1}</td><td>${esc(r.name)}</td><td class="n">${r.visits || '—'}</td>
-        <td class="n">${int(r.cases)}</td><td class="n">${r.scheme ? int(r.scheme) : '–'}</td><td class="n">${date(r.lastVisit)}</td></tr>`,
+        <td class="n">${int(r.cases)}</td><td class="n">${r.scheme ? int(r.scheme) : '–'}</td><td class="n">${hm(r.avgMin)}</td>
+        <td class="n">${r.spotSales ? int(r.spotSales) : '–'}</td><td class="n">${date(r.lastVisit)}</td></tr>`,
     )
     .join('');
   const unattributed = md.storeSalesUnattributed
-    ? `<tr><td></td><td class="note">Not linked to a store (older visit records)</td><td></td><td class="n">${int(md.storeSalesUnattributed)}</td><td></td><td></td></tr>`
+    ? `<tr><td></td><td class="note">Not linked to a store (older visit records)</td><td></td><td class="n">${int(md.storeSalesUnattributed)}</td><td></td><td></td><td></td><td></td></tr>`
     : '';
   const notes: string[] = [
     'Cases sold per store come from the same calculation as the headline <b>Cases sold</b>, so this table adds up to it. <b>0</b> means the store was visited and did not order.',
   ];
   if (md.storeSales.some((r) => !r.lastVisit)) notes.push('A store with no last-visit date had an order this month without a visit by this person.');
   if (md.schemeBeforeCutover) notes.push('Scheme cases are recorded with orders; visits before orders began carry none.');
+  notes.push(
+    `<b>Avg time in store</b> is check-in to check-out, averaged over this person’s visits to that store${md.untimedVisits ? ` — ${plural(md.untimedVisits, 'visit')} with no check-out (left open or closed at 22:30) ${md.untimedVisits === 1 ? 'is' : 'are'} left out, not counted as 0` : ''}.`,
+  );
+  notes.push('<b>Spot sales</b> counts the customer sales this person logged at the store (one per customer, undone ones excluded). Self-reported — not checked against stock.');
   const orderOnly = md.storeSales.filter((r) => !r.lastVisit).length;
   const sub = `${plural(md.storeSales.length - orderOnly, 'store')} visited${orderOnly ? ` · ${orderOnly} more with an order but no visit` : ''}`;
   return `<div class="dh"><h2>Store-wise sales</h2><span>${sub}</span></div>
-<table class="stores"><thead><tr><th class="n">#</th><th>Store</th><th class="n">Visits</th><th class="n">Cases sold</th><th class="n">Scheme cases</th><th class="n">Last visit</th></tr></thead>
-<tbody>${rows}${unattributed}<tr class="total"><td></td><td>Total</td><td class="n">${totalVisits}</td><td class="n">${int(md.casesTotal)}</td><td class="n">${totalScheme ? int(totalScheme) : '–'}</td><td></td></tr></tbody></table>
+<table class="stores"><thead><tr><th class="n">#</th><th>Store</th><th class="n">Visits</th><th class="n">Cases sold</th><th class="n">Scheme cases</th><th class="n">Avg time in store</th><th class="n">Spot sales</th><th class="n">Last visit</th></tr></thead>
+<tbody>${rows}${unattributed}<tr class="total"><td></td><td>Total</td><td class="n">${totalVisits}</td><td class="n">${int(md.casesTotal)}</td><td class="n">${totalScheme ? int(totalScheme) : '–'}</td><td class="n">${hm(md.storeSalesAvgMin)}</td><td class="n">${totalSpot ? int(totalSpot) : '–'}</td><td></td></tr></tbody></table>
 <div class="notes">${notes.map((x) => `<p>${x}</p>`).join('')}</div>`;
 }
 

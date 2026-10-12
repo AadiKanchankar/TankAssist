@@ -12,6 +12,10 @@ Session-state snapshot for the next Claude Code session. **Temporal** — record
 
 ## What is actually live right now
 
+### 2026-10-12 — PDF store-wise table: avg time in store + spot sales (JS-only, OTA to runtime 1.5.0)
+
+Owner request: the store-wise sales table (page 2 of the field report PDF, reps and sales managers alike) gains **Avg time in store** and **Spot sales** columns. `lib/reportPdfHtml.ts` (model + table, tested in `reportPdfHtml.test.ts`), `lib/reportPdf.ts` fetches the month's `spot_sales` per visit; `fetchAll` moved from `useProgress` to `lib/supabase.ts`. No schema change. Rules in CLAUDE.md "Reports (CSV + PDF)". Spot sales exist only from the 1.5.0 build, so earlier months read "–". CSV export unchanged (not asked for). **Re-test on device:** export a month's PDF for a rep and for an SM (My field report) and check the two columns and the notes under the table.
+
 ### 2026-10-11c — fix: odometer/challan camera crash in 1.5.0 (TA-955C) — OTA to runtime 1.5.0
 
 Found on device: opening the odometer capture crashed ("Something broke", stack at `ZoomCamera` in `OdometerCapture`). Cause: `ZoomCamera`'s `useImperativeHandle` had no deps, so it produced a new handle every render; callers that keep the ref in STATE (`ref={setCameraRef}` — odometer and challan) re-rendered on each one → endless loop. Fixed with empty deps (stable handle) — this also fixes the challan camera, which had the same pattern. Per owner: the **check-in selfie and odometer are reverted to the plain 1x `CameraView`** (files restored to their pre-zoom versions); zoom remains on shop/stock/delivered photos, challan, product image and spot sales. JS-only → published as an OTA to channel `preview`, runtime 1.5.0 (includes the 2026-10-11b gamification JS). Re-test: odometer at check-in and punch-out, selfie, challan photo, one shop photo with 2x.
