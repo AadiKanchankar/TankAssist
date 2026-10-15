@@ -610,6 +610,11 @@ export default function StoreVisitScreen({
     });
     setStockTouched((prev) => (prev.has(pid) ? prev : new Set(prev).add(pid)));
   };
+  // "Same as last visit": the prefill IS the count. Stock often doesn't move
+  // between visits, and forcing an edit to prove it was counted pushed reps to
+  // nudge a number off and back — or to invent a change.
+  const confirmStockSame = (pid: string) =>
+    setStockTouched((prev) => (prev.has(pid) ? prev : new Set(prev).add(pid)));
 
   // Any TOUCHED product with a positive TOTAL across its buckets — drives the
   // stock-photo requirement and the shop→stockphoto routing.
@@ -633,7 +638,7 @@ export default function StoreVisitScreen({
       'Stock count needed',
       stockSkip?.reason === 'other'
         ? 'Add a short note saying why you couldn’t count.'
-        : 'Count every product, or choose why you can’t count today.',
+        : 'Count every product — tap “Same as last visit” where nothing changed — or choose why you can’t count today.',
     );
   /** What to write on the visit row. A full count clears an earlier reason. */
   const skipFields = (): Record<string, unknown> =>
@@ -1215,6 +1220,7 @@ export default function StoreVisitScreen({
               products={products}
               stock={stock}
               setField={setStockField}
+              confirmSame={confirmStockSame}
               latest={stockLatest}
               touched={stockTouched}
               selfId={profile?.id}
@@ -1316,7 +1322,7 @@ export default function StoreVisitScreen({
             <Text style={styles.footerHint}>
               {stockAlreadyRecorded
                 ? 'Stock was saved earlier this visit — update it if it changed.'
-                : 'Count every product, or choose why you can’t below.'}
+                : 'Count every product (or tap “Same as last visit”), or choose why you can’t below.'}
             </Text>
           ) : null}
           <Button
@@ -1448,7 +1454,7 @@ function PrevOrderStep({
 }
 
 // ─── Step 2: stock ───
-function StockStep({ products, stock, setField, latest, touched, selfId, skip, setSkip, alreadyRecorded }: any) {
+function StockStep({ products, stock, setField, confirmSame, latest, touched, selfId, skip, setSkip, alreadyRecorded }: any) {
   if (products.length === 0) {
     return (
       <BentoTile>
@@ -1471,7 +1477,9 @@ function StockStep({ products, stock, setField, latest, touched, selfId, skip, s
               <Text style={styles.subHint}>
                 Last recorded{' '}
                 {prior.length
-                  ? prior.map((b) => `${b.label.replace(' stock', '')} ${b.cases} cs`).join(' · ')
+                  ? prior
+                      .map((b) => `${b.label.replace(' stock', '')} ${b.cases} cs${b.bottles ? ` + ${b.bottles} btl` : ''}`)
+                      .join(' · ')
                   : `${l.cases} cs / ${l.bottles} btl (total only)`}{' '}
                 · {fmtDate(l.recorded_at)}
                 {l.recorded_by === selfId ? ' · by you' : ''}
@@ -1502,7 +1510,19 @@ function StockStep({ products, stock, setField, latest, touched, selfId, skip, s
             {total.anyRecorded ? (
               <Text style={styles.bucketTotal}>
                 Total {total.cases} cs{total.bottles ? ` + ${total.bottles} btl` : ''}
+                {isTouched ? ' · counted' : ''}
               </Text>
+            ) : null}
+            {/* Only offered while the fields still hold last visit's figures
+                (untouched) — there is nothing to confirm on a never-counted
+                product, and after an edit the rep's numbers already count. */}
+            {l && !isTouched && total.anyRecorded ? (
+              <Button
+                title="Same as last visit"
+                variant="secondary"
+                onPress={() => confirmSame(p.id)}
+                style={{ marginTop: Space.sm }}
+              />
             ) : null}
           </BentoTile>
         );

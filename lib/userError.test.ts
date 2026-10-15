@@ -40,7 +40,8 @@ assert.match(userMessage({ __isAuthError: true, code: 'otp_expired', message: 'T
 assert.match(userMessage({ __isStorageError: true, status: 403, message: 'new row violates row-level security policy' }), /permission/);
 assert.match(userMessage('new row violates row-level security policy for table "x"'), /TA-/);
 
-// Regression guard: no UI file renders a caught error's .message directly.
+// Regression guard: no UI file renders a caught error's .message — or any
+// stack (JS or React component stack; TA-955C put one on a rep's screen) — directly.
 // Allowed: console lines, __DEV__-only lines, and VoiceInput (speech-engine text, never DB).
 const ALLOW = new Set(['components/VoiceInput.tsx']);
 const root = join(__dirname, '..');
@@ -51,7 +52,7 @@ const walk = (dir: string) => {
     if (statSync(join(root, rel)).isDirectory()) walk(rel);
     else if (/\.tsx?$/.test(n) && !n.endsWith('.test.ts') && !ALLOW.has(rel)) {
       readFileSync(join(root, rel), 'utf8').split('\n').forEach((line, i) => {
-        if (/\b(e|err|error|\w+Error|\w+Err)\??\.message\b/.test(line) && !/console\.|__DEV__/.test(line)) {
+        if (/\b(e|err|error|\w+Error|\w+Err)\??\.(message|stack)\b|componentStack|state\.info\b/.test(line) && !/console\.|__DEV__/.test(line)) {
           offenders.push(`${rel}:${i + 1}: ${line.trim()}`);
         }
       });
@@ -59,6 +60,6 @@ const walk = (dir: string) => {
   }
 };
 ['app', 'components', 'hooks', 'store'].forEach(walk);
-assert.deepEqual(offenders, [], `raw error text in UI — use userMessage():\n${offenders.join('\n')}`);
+assert.deepEqual(offenders, [], `raw error text / stack in UI — use userMessage(), stacks are __DEV__-only:\n${offenders.join('\n')}`);
 
 console.log('userError: ok');

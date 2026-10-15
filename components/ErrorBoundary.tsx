@@ -39,10 +39,11 @@ export default class ErrorBoundary extends React.Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
-    // Kept in state rather than only logged: a release build has no console
-    // the rep can reach, so the stack has to be on screen to be useful.
-    this.setState({ info: info?.componentStack?.slice(0, 2000) ?? '' });
-    // Still log it, for anyone attached to Metro or logcat.
+    // Dev only. A release build never puts a stack on screen — not the JS
+    // stack, not the component stack: both expose component names and code
+    // structure to whoever holds the phone (TA-955C showed "at ZoomCamera …
+    // at OdometerCapture" to a rep). The ref is enough to find this log line.
+    if (__DEV__) this.setState({ info: info?.componentStack?.slice(0, 2000) ?? '' });
     console.error(`[ErrorBoundary ${errorRef(error)}]`, this.props.label ?? '', error, info?.componentStack);
   }
 
@@ -67,15 +68,15 @@ export default class ErrorBoundary extends React.Component<Props, State> {
 
           <Button title="Try again" onPress={this.reset} style={{ marginTop: Space.lg }} />
 
-          {/* The error's own text can carry DB detail (lib/userError), so a
-              release build shows only the reference + where it happened; the
-              full error is in logcat under the same ref. Dev builds keep it. */}
+          {/* The error's text and stacks can carry DB detail (lib/userError) and
+              code structure, so a release build shows ONLY the reference + where
+              it happened; the full error is in logcat under the same ref. */}
           <View style={styles.detail}>
             <Text style={styles.detailText} selectable>
               {errorRef(error)}
               {this.props.label ? ` · ${this.props.label}` : ''}
               {__DEV__ ? `\n${error.name}: ${error.message}\n\n${error.stack?.slice(0, 1200) ?? ''}` : ''}
-              {this.state.info ? `\n${this.state.info.slice(0, 600)}` : ''}
+              {__DEV__ && this.state.info ? `\n${this.state.info.slice(0, 600)}` : ''}
             </Text>
           </View>
         </ScrollView>

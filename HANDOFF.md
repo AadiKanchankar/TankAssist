@@ -12,6 +12,14 @@ Session-state snapshot for the next Claude Code session. **Temporal** — record
 
 ## What is actually live right now
 
+### 2026-10-15 — error screen leaked code; stock "Same as last visit" (JS-only, OTA to runtime 1.5.0)
+
+**1. Punch-out crash (TA-955C) on a rep's phone.** Screenshot stack: `at ZoomCamera … at OdometerCapture`. Current code has no `ZoomCamera` in `OdometerCapture` (removed in `ebaa340`), so **that phone was still running the bundle embedded in APK `38169939` (`e84c7fa`, pre-fix)** — the fix OTA `6991b8be` was published but not yet applied there. expo-updates downloads on launch and applies on the *next* cold start, so the rep must **fully close and reopen the app twice** (with network); Profile shows `bundle: <id>` — it must not say embedded. ⚠️ Any further 1.5.0 installs should come from a **new APK built from `master`**, not `38169939`, or every fresh install starts with the crash until its first OTA lands.
+
+**2. The error screen showed code.** `ErrorBoundary` gated the JS stack behind `__DEV__` but rendered the **React component stack** in release (component names + bundle offsets) to the rep. Now dev-only; release shows the sentence + `TA-` ref. Rule written into CLAUDE.md ("User-facing error text"); `lib/userError.test.ts` now fails on any `.stack` / `componentStack` / `state.info` render outside `__DEV__` (verified: fails on the old file, passes on the new).
+
+**3. Stock that didn't change couldn't be confirmed.** The prefill from the last count didn't count as "counted" until edited, so an unchanged store blocked Next. Each product with a prefilled count now has **"Same as last visit"**, which marks it counted with those figures (a new snapshot with the same numbers is written at checkout; the stock-photo rule applies as before when any figure is > 0). The "Last recorded" line also now shows bottles (it read "Shelf 0 cs" for a product holding 5 bottles). `app/(rep)/store-visit.tsx` only. **Re-test:** open a store with a previous count → tap "Same as last visit" on every product → Next passes; edit one instead → still passes; never-counted product shows no button.
+
 ### 2026-10-12 — PDF store-wise table: avg time in store + spot sales (JS-only, OTA `03fb65f4` to runtime 1.5.0, commit `a1df1f0`)
 
 Owner request: the store-wise sales table (page 2 of the field report PDF, reps and sales managers alike) gains **Avg time in store** and **Spot sales** columns. `lib/reportPdfHtml.ts` (model + table, tested in `reportPdfHtml.test.ts`), `lib/reportPdf.ts` fetches the month's `spot_sales` per visit; `fetchAll` moved from `useProgress` to `lib/supabase.ts`. No schema change. Rules in CLAUDE.md "Reports (CSV + PDF)". Spot sales exist only from the 1.5.0 build, so earlier months read "–". CSV export unchanged (not asked for). **Re-test on device:** export a month's PDF for a rep and for an SM (My field report) and check the two columns and the notes under the table.
