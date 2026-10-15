@@ -12,7 +12,7 @@ Session-state snapshot for the next Claude Code session. **Temporal** — record
 
 ## What is actually live right now
 
-### 2026-10-15 — error screen leaked code; stock "Same as last visit" (JS-only, OTA to runtime 1.5.0)
+### 2026-10-15 — error screen leaked code; stock "Same as last visit" (JS-only, OTA `47794c7a` to runtime 1.5.0, commit `3faedba`)
 
 **1. Punch-out crash (TA-955C) on a rep's phone.** Screenshot stack: `at ZoomCamera … at OdometerCapture`. Current code has no `ZoomCamera` in `OdometerCapture` (removed in `ebaa340`), so **that phone was still running the bundle embedded in APK `38169939` (`e84c7fa`, pre-fix)** — the fix OTA `6991b8be` was published but not yet applied there. expo-updates downloads on launch and applies on the *next* cold start, so the rep must **fully close and reopen the app twice** (with network); Profile shows `bundle: <id>` — it must not say embedded. ⚠️ Any further 1.5.0 installs should come from a **new APK built from `master`**, not `38169939`, or every fresh install starts with the crash until its first OTA lands.
 
